@@ -1,0 +1,11 @@
+#!/bin/bash
+echo "Running parallel tests..."
+PYTHONPATH=`pwd`/../src pytest -s . -C 4 >& test_output.txt && echo -e "\e[31mFAIL: \e[39mExpected error status" && exit 1 || echo -e "\e[32mPASS:\e[39m Got expected error return code"
+cat test_output.txt | grep "== 1 failed, 1005 passed" || echo -e "\e[31mFAILED: \e[39mPass/fail counts not as expected" | exit 1 && echo -e "\e[32mPASSED: \e[39m Pass/fail counts as expected"
+cat test_output.txt | grep "###### INITIALIZE ############" || echo -e "\e[31mFAILED: \e[39mInitializer not invoked" | exit 1 && echo -e "\e[32mPASSED:\e[39m Initializer invoked"
+cat test_output.txt | grep "###### FINALIZE ############" || echo -e "\e[31mFAILED: \e[39mFinalizer not invoked" | exit 1 && echo -e "\e[32mPASSED:\e[39m Finalizer invoked"
+echo "Running serially and checking same output..."
+PYTHONPATH=`pwd`/../src pytest -s . >& test_output.txt && echo -e "\e[31mFAIL: \e[39mExpected error status" && exit 1 || echo -e "\e[32mPASS:\e[39m Got expected error return code"
+cat test_output.txt | grep "== 1 failed, 1005 passed" || echo -e "\e[31mFAILED: \e[39mPass/fail counts not as expected" | exit 1 && echo -e "\e[32mPASSED: \e[39m Pass/fail counts as expected"
+cat test_output.txt | grep "###### INITIALIZE ############" || echo -e "\e[31mFAILED: \e[39mInitializer not invoked" | exit 1 && echo -e "\e[32mPASSED:\e[39m Initializer invoked"
+cat test_output.txt | grep "###### FINALIZE ############" || echo -e "\e[31mFAILED: \e[39mFinalizer not invoked" | exit 1 && echo -e "\e[32mPASSED:\e[39m Finalizer invoked"
