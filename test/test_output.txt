@@ -1,30 +1,29 @@
->>>>> no number of cores provided, not running multiprocessing <<<<<
+>>>>> no number of cores provided or running in environment unsupportive of parallelized testing, not running multiprocessing <<<<<
 ============================= test session starts ==============================
-platform darwin -- Python 3.7.7, pytest-5.4.1, py-1.7.0, pluggy-0.13.1
-rootdir: /Users/jrusnak/workspace/OSS/pytest_mproc
-plugins: forked-1.0.2, asyncio-0.10.0, html-1.20.0, cov-2.6.0, xdist-1.31.0, metadata-1.8.0
-collected 1006 items / 1 error / 1005 selected
-
-###### INITIALIZE ############
-
-
-###### FINALIZE ############
-
+platform linux -- Python 3.7.2, pytest-4.5.0, py-1.8.0, pluggy-0.11.0
+rootdir: /home/jrusnak/workspace/pytest_mproc
+plugins: metadata-1.8.0, html-1.20.0, cov-2.7.1
+collected 0 items / 2 errors
 
 ==================================== ERRORS ====================================
+___________________ ERROR collecting test/test_mproc_runs.py ___________________
+ImportError while importing test module '/home/jrusnak/workspace/pytest_mproc/test/test_mproc_runs.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+test_mproc_runs.py:10: in <module>
+    from pytest_mproc_utils import pytest_mproc_global_finalizer, pytest_mproc_global_initializer
+E   ModuleNotFoundError: No module named 'pytest_mproc_utils'
 ____________________ ERROR collecting test/test_output.txt _____________________
-/export/apps/python/3.7/lib/python3.7/doctest.py:668: in get_doctest
+/usr/local/lib/python3.7/doctest.py:668: in get_doctest
     return DocTest(self.get_examples(string, name), globs,
-/export/apps/python/3.7/lib/python3.7/doctest.py:682: in get_examples
+/usr/local/lib/python3.7/doctest.py:682: in get_examples
     return [x for x in self.parse(string, name)
-/export/apps/python/3.7/lib/python3.7/doctest.py:644: in parse
+/usr/local/lib/python3.7/doctest.py:644: in parse
     self._parse_example(m, name, lineno)
-/export/apps/python/3.7/lib/python3.7/doctest.py:702: in _parse_example
+/usr/local/lib/python3.7/doctest.py:702: in _parse_example
     self._check_prompt_blank(source_lines, indent, name, lineno)
-/export/apps/python/3.7/lib/python3.7/doctest.py:789: in _check_prompt_blank
+/usr/local/lib/python3.7/doctest.py:789: in _check_prompt_blank
     line[indent:indent+3], line))
-E   ValueError: line 1 of the docstring for test_output.txt lacks blank after >>>: '>>>>> no number of cores provided, not running multiprocessing <<<<<'
-=========================== short test summary info ============================
-ERROR test_output.txt - ValueError: line 1 of the docstring for test_output.t...
-!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
-=============================== 1 error in 0.30s ===============================
+E   ValueError: line 1 of the docstring for test_output.txt lacks blank after >>>: '>>>>> no number of cores provided or running in environment unsupportive of parallelized testing, not running multiprocessing <<<<<'
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+=========================== 2 error in 0.57 seconds ============================

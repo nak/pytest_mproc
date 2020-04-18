@@ -1,0 +1,52 @@
+============================= test session starts ==============================
+platform linux -- Python 3.7.2, pytest-4.5.0, py-1.8.0, pluggy-0.11.0
+rootdir: /home/jrusnak/workspace/pytest_mproc
+plugins: metadata-1.8.0, html-1.20.0, cov-2.7.1
+collected 1005 items
+
+###### INITIALIZE ############
+
+
+test_mproc_runs.py ............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................F
+test/test_mproc_runs.py::test_some_alg3 FAILED
+
+=============================== STATS ================================
+Process worker-1 executed 251 tests in 1.54 seconds
+Process worker-2 executed 252 tests in 1.58 seconds
+Process worker-3 executed 250 tests in 1.54 seconds
+Process worker-4 executed 252 tests in 1.54 seconds
+
+###### FINALIZE ############
+
+
+
+=================================== FAILURES ===================================
+________________________________ test_some_alg3 ________________________________
+
+    def test_some_alg3():
+>       Something().some_alg3()
+
+test_mproc_runs.py:46: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <testcode.testsomething.Something object at 0x7f725b393a90>
+
+    def some_alg3(self):
+        to_be_run_under_test()
+>       assert False
+E       AssertionError
+
+../testcode/testsomething.py:28: AssertionError
+
+----------- coverage: platform linux, python 3.7.2-final-0 -----------
+Name                                                                   Stmts   Miss  Cover
+------------------------------------------------------------------------------------------
+/home/jrusnak/workspace/pytest_mproc/testcode/__init__.py                  0      0   100%
+/home/jrusnak/workspace/pytest_mproc/testcode/dummy_src/__init__.py        0      0   100%
+/home/jrusnak/workspace/pytest_mproc/testcode/dummy_src/something.py       2      0   100%
+/home/jrusnak/workspace/pytest_mproc/testcode/testsomething.py            17      0   100%
+------------------------------------------------------------------------------------------
+TOTAL                                                                     19      0   100%
+Coverage HTML written to dir htmlcov
+
+==================== 1 failed, 1004 passed in 2.77 seconds =====================

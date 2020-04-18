@@ -18,7 +18,7 @@ else:
 try:
     my_cov = None  # overriden later, after fork
     try:
-        original_cleanup = pytest_cov.embed.cleanup
+        original_cleanup = pytest_cov.embed.cleanupgit
     except:
         original_cleanup = None
 
@@ -55,6 +55,7 @@ class WorkerSession:
         self._buffered_results = []
         self._buffer_size = 10
         self._timestamp = datetime.utcnow()
+        self._last_execution_time = time.time()
 
     def _put(self, kind, data):
         """
@@ -90,17 +91,18 @@ class WorkerSession:
                 my_cov = pytest_cov.embed.active_cov
             except:
                 my_cov = None
+
         if session.testsfailed and not session.config.option.continue_on_collection_errors:
             raise session.Interrupted("%d errors during collection" % session.testsfailed)
 
         if session.config.option.collectonly:
             return  # should never really get here, but for consistency
 
-        for preitem in session.items:
+        for items in session.items:
             # test item comes through as a unique string nodeid of the test
             # We use the pytest-collected mapping we squirrelled away to look up the
             # actual _pytest.pythone.Function test callable
-            for item in preitem if isinstance(preitem, list) else [preitem]:
+            for item in items:
                 item = session._named_items[item]
                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
                 # very much like that in _pytest.main:
@@ -113,7 +115,7 @@ class WorkerSession:
                     raise session.Interrupted(session.shouldstop)
                 # count tests that have been run
                 self._count += 1
-
+                self._last_execution_time = time.time()
 
     @pytest.mark.tryfirst
     def pytest_collection_finish(self, session):
@@ -149,8 +151,9 @@ class WorkerSession:
 
         :param exitstatus: exit status of the test suite run
         """
-        self._put('exit', (self._index, self._count, exitstatus, time.time() - self._session_start_time))
+        self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time))
         self._flush()
+        self._result_q.close()
 
 
 def main(index, test_q, result_q, num_processes):

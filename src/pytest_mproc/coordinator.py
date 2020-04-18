@@ -9,7 +9,6 @@ import time
 from _pytest.config import _prepareconfig
 from multiprocessing import Process, Queue
 from pytest_mproc.worker import main as worker_main
-from pytest_mproc_utils import _GlobalFixtures
 
 
 class Coordinator:
@@ -49,11 +48,6 @@ class Coordinator:
         """
         :param tests: the items containing the pytest hooks to the tests to be run
         """
-        funcs = _GlobalFixtures.initializers
-        # only execute in main thread and none of the worker threads:
-        for func in funcs:
-            func()
-
         grouped = [t for t in tests if getattr(t._pyfuncitem.obj, "_pytest_group", None)]
         self._tests = [t for t in tests if t not in grouped]
         groups = {}
@@ -66,11 +60,21 @@ class Coordinator:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+    def stop(self, delay=None):
         # shouldn't be any procs left, but just in case
         for proc in self._processes:
             if proc:
-                proc.join()
-                proc.terminate()
+                try:
+                    if delay is not None:
+                        proc.join(delay)
+                except Exception:
+                    pass
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
 
     @staticmethod
     def _write_sep(s, txt):
@@ -85,21 +89,6 @@ class Coordinator:
         sep_extra = sep_total % 2
         out = '%s %s %s\n' % (s * sep_len, txt, s * (sep_len + sep_extra))
         sys.stdout.write(out)
-
-    def _populate_test_q(self):
-        """
-        Populate te test queue, separating grouped tests into lists as a single item in the queue
-        """
-        for test in self._tests:
-            # Function objects in pytest are not pickle-able, so have to send string nodeid and
-            # do lookup on worker side
-            if isinstance(test, list):
-                self._test_q.put([t.nodeid for t in test])
-            else:
-                self._test_q.put(test.nodeid)
-        for _ in self._processes:
-            self._test_q.put(None)  # signals end;  close() doesn't actually seem to work like it should :-/
-        self._test_q.close()
 
     def _output_summary(self):
         """
@@ -139,7 +128,10 @@ class Coordinator:
                 name = "worker-%d" % (index + 1)
                 self._process_status_text[index] = "Process %s executed %d tests in %.2f seconds\n" % (
                     name, worker_count, duration)
-                self._processes[index].join()
+                try:
+                    self._processes[index].join(5)
+                except Exception as e:
+                    pass
                 self._processes[index].terminate()
                 self._processes[index] = None
                 self._result_qs[index].close()
@@ -160,17 +152,36 @@ class Coordinator:
 
         :param session: Pytest test session, to get session or config information
         """
-        self._populate_test_q()
-
         reader_mapping = {q._reader: q for q in self._result_qs}
 
-        while any(self._result_qs):
-            (inputs, [], []) = select.select([q._reader for q in self._result_qs if q is not None], [], [])
-            for input in inputs:
-                items = reader_mapping[input].get()
-                for kind, data in items:
-                    self._process_worker_message(session, kind, data)
+        def read_results(timeout=0):
+            available_qs = [q._reader for q in self._result_qs if q is not None]
+            (inputs, _, _) = select.select(available_qs, [], [], timeout)
+            while inputs:
+                for input in inputs:
+                    items = reader_mapping[input].get()
+                    for kind, data in items:
+                        self._process_worker_message(session, kind, data)
+                available_qs = [q._reader for q in self._result_qs if q is not None]
+                (inputs, _, _) = select.select(available_qs, [], [], timeout)
 
+        #while any(self._result_qs):
+        for test in self._tests:
+            if all([q is None for q in self._result_qs]):
+                raise Exception("Tests remain but no workers left to process them!")
+            read_results()
+            # Function objects in pytest are not pickle-able, so have to send string nodeid and
+            # do lookup on worker side
+            item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
+            self._test_q.put(item)
+
+        read_results()
+        for _ in self._processes:
+            self._test_q.put(None)  # signals end
+
+        while any([q is not None for q in self._result_qs]):
+            read_results(timeout=1)
+        self._test_q.close()
         sys.stdout.write("\r\n")
         self._output_summary()
 
