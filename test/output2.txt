@@ -22,7 +22,7 @@ ________________________________ test_some_alg3 ________________________________
 test_mproc_runs.py:46: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-self = <testcode.testsomething.Something object at 0x7faa5377fd30>
+self = <testcode.testsomething.Something object at 0x7f60fed84cf8>
 
     def some_alg3(self):
         to_be_run_under_test()
@@ -30,4 +30,4 @@ self = <testcode.testsomething.Something object at 0x7faa5377fd30>
 E       AssertionError
 
 ../testcode/testsomething.py:28: AssertionError
-==================== 1 failed, 1004 passed in 3.02 seconds =====================
+==================== 1 failed, 1004 passed in 3.06 seconds =====================

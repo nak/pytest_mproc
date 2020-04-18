@@ -82,12 +82,13 @@ def pytest_cmdline_main(config):
 
 @pytest.mark.trylast
 def pytest_configure(config):
-    config.context_managers = [(cm(), fixtures) for cm, fixtures in _GlobalFixtures.session_contexts]
+    worker = getattr(config.option, "mproc_worker", None)
+    if not worker:
+        config.context_managers = [(cm(), fixtures) for cm, fixtures in _GlobalFixtures.session_contexts]
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
         return  # return of None indicates other hook impls will be executed to do the task at hand
     # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
     config.option.dist = "no"
-    worker = getattr(config.option, "mproc_worker", None)
     if not worker:
         # in main thread,
         # instantiate coordinator here and start to kick off processing on workers early, so they can
