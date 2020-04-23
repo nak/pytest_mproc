@@ -1,8 +1,10 @@
 import setuptools
 
-VERSION=open('version.txt').read().strip()
+VERSION="2.0.2"
 setuptools.setup(
     name='pytest_mproc',
+    author='John Rusnak',
+    author_email='jrusnak@linkedin.com',
     version=VERSION,
     package_dir={'': 'src'},
     packages=setuptools.find_packages('src'),
