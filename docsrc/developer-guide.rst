@@ -19,7 +19,7 @@ grab the next available test from the queue for execution.  This pull model alle
 the developer to figure out how to split up their tests for execution.  Ideally, longer running tests would be executed
 first and short tests run last, to best distribute the workload.
 
-A Note about Running Tests for pytest_mpdist
+A Note about Running Tests for pytest_mproc
 ============================================
 
 Please note that one of the tests for this product is designed to fail deliberately.  This is to test that test

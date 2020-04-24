@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 # -- Project information -----------------------------------------------------
 
-project = 'pytest_mpdist'
+project = 'pytest_mproc'
 copyright = '2020, John Rusnak'
 author = 'John Rusnak'
 
