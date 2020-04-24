@@ -1,9 +1,9 @@
-.. pytest_mpdist documentation master file, created by
+.. pytest_mproc documentation master file, created by
    sphinx-quickstart on Sat Feb  8 16:47:29 2020.
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to pytest_mpdist's documentation!
+Welcome to pytest_mproc's documentation!
 =========================================
 
 .. toctree::
@@ -23,15 +23,15 @@ Indices and tables
 Introduction
 ============
 
-Welcome to pytest-mpdist, a plugin for pytest to run distributed testing via multiprocessing.  This manner
+Welcome to pytest-mproc, a plugin for pytest to run distributed testing via multiprocessing.  This manner
 of distributed testing has several advantages, including more efficient execution over pytest-xdist in many cases.
 
 xdist works for cases perhaps where there are large number of tests, but the cost of overhead in using rsync and
 overall implementation prevents realization of test-execution-time gains that one might hope for.
 
-To begin using pytest mpdist, just install:
+To begin using pytest_mproc, just install:
 
-% pip install pytest-mpdist
+% pip install pytest-mproc
 
 
 Usage
