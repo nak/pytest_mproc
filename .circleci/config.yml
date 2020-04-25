@@ -31,6 +31,7 @@ jobs:
             cd test
             cp conftest.py.template conftest.py
             ./run_test.sh
+            cd ..
       - run:
           name: docs
           command: |
@@ -38,6 +39,7 @@ jobs:
             pip install sphinx
             cd docsrc
             make github
+            cd ..
       - run:
           name: Setup dist
           command: |
