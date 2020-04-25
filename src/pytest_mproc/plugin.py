@@ -1,8 +1,10 @@
 """
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
-import functools
+import inspect
+import socket
 import sys
+from contextlib import closing
 from multiprocessing.managers import BaseManager
 from typing import Any
 
@@ -11,16 +13,24 @@ _pytest.fixtures.scopes.insert(0, "global")
 _pytest.fixtures.scopenum_function = _pytest.fixtures.scopes.index("function")
 import pytest
 
-from multiprocessing import cpu_count
+from multiprocessing import cpu_count, Queue
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.utils import is_degraded
+
+
+def find_free_port():
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
 
 
 class Global(_pytest.main.Session):
 
     class Manager(BaseManager):
 
-        ADDRESS = ('127.0.0.1', 33981)
+        ADDRESS = ('127.0.0.1', find_free_port())
+        _start_gate = Queue()
 
         class Value:
 
@@ -33,6 +43,7 @@ class Global(_pytest.main.Session):
         def __init__(self, config):
             super().__init__(self.ADDRESS, authkey=b'pass')
             self._fixtures = {}
+            self._on_hold = True
             if hasattr(config.option, "mproc_worker"):
                 # client
                 Global.Manager.register("invoke_fixture")
@@ -43,6 +54,19 @@ class Global(_pytest.main.Session):
                 Global.Manager.register("invoke_fixture", self._invoke)
                 Global.Manager.register("register_fixture", self._register_fixture)
                 super().start()
+
+        def hold(self):
+            if not self._on_hold:
+                return
+            v = self._start_gate.get()
+            self._on_hold = False
+            self._start_gate.put(v)
+            if isinstance(v, Exception):
+                raise v
+
+        def release(self, val):
+            self._on_hold = False
+            self._start_gate.put(val)
 
         def _register_fixture(self, name, fixture):
             self._fixtures[name] = self.Value(fixture)
@@ -71,14 +95,6 @@ _getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem
 
 def _getscopeitem_redirect(self, scope):
     if scope == "global":
-        if False and hasattr(self.config.option, "mproc_numcores"):
-            manager = Global.Manager(self.config, self._pyfuncitem, self._fixturedef.argname)
-
-            @functools.wraps(self._pyfuncitem)
-            def wrap(*args, **kargs):
-                return manager.invoke_fixture(self._fixturedef.argname, *args, **kargs).value()
-
-            self._pyfuncitem = wrap
         return self._pyfuncitem.getparent(_pytest.main.Session)
     else:
         return _getscopeitem_orig(self, scope)
@@ -188,11 +204,16 @@ def pytest_fixture_setup(fixturedef, request):
             return fixturedef.cached_result[0]
         my_cache_key = fixturedef.cache_key(request)
         try:
+            request.config.option.mproc_manager.hold()
             result = request.config.option.mproc_manager.invoke_fixture(name).value()
         except _pytest.fixtures.TEST_OUTCOME:
             fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
             global_fixturedefs[name] = (None, my_cache_key, sys.exc_info())
             raise
+        if isinstance(result, Exception):
+            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
+            global_fixturedefs[name] = (None, my_cache_key, sys.exc_info())
+            raise result
         fixturedef.cached_result = (result, my_cache_key, None)
         global_fixturedefs[name] = (result, my_cache_key, None)
         return result
@@ -209,20 +230,45 @@ def pytest_runtestloop(session):
         return  # should never really get here, but for consistency
 
     worker = getattr(session.config.option, "mproc_worker", None)
+    generated = []
     if worker is None and hasattr(session.config.option, "mproc_numcores"):
+
         for item in session.items:
+            if session.shouldfail:
+                break
             if hasattr(item, "_request"):
                 request = item._request
-                for name in item._fixtureinfo.argnames:
-                    def handle_fixturedef(name: str):
-                        fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
-                        if not fixturedef or fixturedef[0].scope != 'global' or name in global_fixtures:
-                            return
+
+                def process_fixturedef(name: str):
+                    fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
+                    if fixturedef and fixturedef[0].scope == 'global' and name not in global_fixtures:
                         global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
-                        session.config.option.mproc_manager.register_fixture(name, global_fixtures[name](*fixturedef[0].argnames))
+                        val = global_fixtures[name](*fixturedef[0].argnames)
+                        if inspect.isgenerator(val):
+                            generated.append(val)
+                            val = next(val)
+                        try:
+                            session.config.option.mproc_manager.register_fixture(name, val)
+                        except TypeError as e:
+                            session.config.option.mproc_manager.register_fixture(name, e)
+                            session.should_fail = f">>> Cannot pickle global fixture object: {e}"
+                        except Exception as e:
+                            session.config.option.mproc_manager.register_fixture(name, e)
+                            session.should_fail = f">>> Exception in multiprocess communication: {e}"
+
+                    if fixturedef:
                         for argname in fixturedef[0].argnames:
-                            handle_fixturedef(argname)
-                    handle_fixturedef(name)
+                            process_fixturedef(argname)
+
+                for name in item._fixtureinfo.argnames:
+                    process_fixturedef(name)
+                    if session.shouldfail:
+                        break
+    if session.shouldfail:
+        session.config.option.mproc_manager.release(session.Interrupted(session.shouldfail))
+        session.config.coordinator.kill()
+        raise session.Failed(session.shouldfail)
+    session.config.option.mproc_manager.release(True)
     if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
         # return of None indicates other hook impls will be executed to do the task at hand
         # aka, let the basic hook handle it from here, no distributed processing to be done
@@ -239,6 +285,12 @@ def pytest_runtestloop(session):
                 return False
     else:
         worker.test_loop(session)
+    for item in generated:
+        try:
+            next(item)
+            raise Exception("Generator did not stop")
+        except StopIteration:
+            pass
     return True
 
 

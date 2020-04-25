@@ -62,6 +62,11 @@ class Coordinator:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
 
+    def kill(self):
+        for proc in self._processes:
+            if proc:
+                proc.terminate()
+
     def stop(self, delay=None):
         # shouldn't be any procs left, but just in case
         for proc in self._processes:
