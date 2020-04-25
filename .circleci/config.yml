@@ -46,6 +46,8 @@ jobs:
              python3 setup.py sdist
       - store_artifacts:
           path: test/test-reports/
+          destination: python_app
+      - store_artifacts:
           path: test/output*.txt
           destination: python_app
       - store_artifacts:

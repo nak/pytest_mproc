@@ -52,11 +52,12 @@ else
     echo -e "\e[32mPASSED: \e[39m User-based traceback present as expected in user-based test fixture exception"
 fi;
 
-echo "-> Improper global fixture depdnency"
+echo "-> Improper global fixture dependency"
 PYTHONPATH=`pwd`/../src:`pwd`/.. pytest -s ../testcode/error_cases/fixture_wrong_dependency.py >& output_dep.txt || export error_dep=10
 
 if test -z "`grep \"ScopeMismatch: You tried to access the 'session' scoped fixture 'fixture_session' with a 'global' scoped request object, involved factories\" output_dep.txt`"; then
    echo -e "\e[31mFAILED: \e[39m Failed to report improper dependency of global test fixture on lesser (session) fixture"
+   cat output_dep.txt
    exit 8
 else
    echo -e "\e[32mPASSED: \e[39m Reported improper dependency of global test fixture on lesser (session) fixture"
