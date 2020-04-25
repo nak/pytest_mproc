@@ -133,3 +133,64 @@ depend on other globally scoped fixtures.
    def globally_scoped_fixture()
        ...
 
+
+Tips for Using Global Scope Fixture
+-----------------------------------
+Admittedly, one has to think about how multiprocessing works to know what can and cannot be returned from a global
+test fixture.  Since they are singltons, one useful tip if you are using (singleton) classes (such as manager classses) to
+encaspulate logic, it is best not to put anything other than what is necessary as instance variables, and delegate
+them to class variable.  Also, you should design your fixture so that any other test not depending on it is not blocked
+while on that fixture.  Example code is shown blow
+
+
+.. code-block:: python
+
+   import pytest
+   import multiprocessing
+
+   class Manager:
+
+        # not picklable, so keep at class level
+       _proc: multiprocessing.Process = None
+
+       @staticmethod
+       def start(hostname: str, port: int) -> Nont:
+           ...
+           start_some_service(hostname, port)
+
+       @classmethod
+       def setup_resources(cls) -> Nont:
+            hostname, port = '127.0.0.1', 32873
+            cls._proc = multiprocessing.Procss(target=start, args=(hostname, port))
+           ...
+           return hostname, port
+
+       @classmethod
+       def shutdown(cls, hostname:str , port: int) -> None:
+
+       def __init__(self):
+           assert self._proc is not None, "Attempt top instantiate singleton more then once"
+           # hostname and port are a str and int so easily Picklable
+           self._hostname, self._port = self.setup_resources()
+
+       def __enter__() -> "Manager":
+           return self
+
+       def __exit__(self, *args, **kargs):
+           self.shudown(self._hostname, self._port)
+           self._proc.join(timeout=5)
+
+       def hostname(self):
+            return self._hostname
+
+        def port(self):
+            return self._port
+
+
+    @pytest.fixture(scope='global')
+    def resource():
+        # called only once across all processes and for all tests
+        with Manager() as manager:
+            yield manager.hostname, manager.port
+
+
