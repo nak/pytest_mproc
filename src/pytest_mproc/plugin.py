@@ -2,12 +2,13 @@
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
 import functools
+import sys
 from multiprocessing.managers import BaseManager
+from typing import Any
 
 import _pytest
 _pytest.fixtures.scopes.insert(0, "global")
 _pytest.fixtures.scopenum_function = _pytest.fixtures.scopes.index("function")
-import contextlib
 import pytest
 
 from multiprocessing import cpu_count
@@ -21,25 +22,33 @@ class Global(_pytest.main.Session):
 
         ADDRESS = ('127.0.0.1', 33981)
 
+        class Value:
+
+            def __init__(self, value: Any):
+                self._value = value
+
+            def value(self):
+                return self._value
+
         def __init__(self, config):
             super().__init__(self.ADDRESS, authkey=b'pass')
             self._fixtures = {}
             if hasattr(config.option, "mproc_worker"):
                 # client
                 Global.Manager.register("invoke_fixture")
+                Global.Manager.register("sem")
                 super().connect()
             else:
+                # server:
                 Global.Manager.register("invoke_fixture", self._invoke)
                 Global.Manager.register("register_fixture", self._register_fixture)
                 super().start()
 
         def _register_fixture(self, name, fixture):
-            self._fixtures[name] = fixture
+            self._fixtures[name] = self.Value(fixture)
 
         def _invoke(self, fixture_name):
             return self._fixtures[fixture_name]
-
-    _manager = None
 
     def __init__(self, config):
         super().__init__(config)
@@ -67,7 +76,7 @@ def _getscopeitem_redirect(self, scope):
 
             @functools.wraps(self._pyfuncitem)
             def wrap(*args, **kargs):
-                return manager.invoke_fixture(self._fixturedef.argname, *args, **kargs)
+                return manager.invoke_fixture(self._fixturedef.argname, *args, **kargs).value()
 
             self._pyfuncitem = wrap
         return self._pyfuncitem.getparent(_pytest.main.Session)
@@ -167,8 +176,32 @@ def pytest_configure(config):
         config.coordinator.start()
 
 
+global_fixturedefs = {}
+
+
+@pytest.mark.tryfirst
+def pytest_fixture_setup(fixturedef, request):
+    if fixturedef.scope == 'global':
+        name = fixturedef.argname
+        if name in global_fixturedefs:
+            fixturedef.cached_result = global_fixturedefs[name]
+            return fixturedef.cached_result[0]
+        my_cache_key = fixturedef.cache_key(request)
+        try:
+            result = request.config.option.mproc_manager.invoke_fixture(name).value()
+        except _pytest.fixtures.TEST_OUTCOME:
+            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
+            global_fixturedefs[name] = (None, my_cache_key, sys.exc_info())
+            raise
+        fixturedef.cached_result = (result, my_cache_key, None)
+        global_fixturedefs[name] = (result, my_cache_key, None)
+        return result
+    return _pytest.fixtures.pytest_fixture_setup(fixturedef, request)
+
+
 @pytest.mark.tryfirst
 def pytest_runtestloop(session):
+    global_fixtures = {}
     if session.testsfailed and not session.config.option.continue_on_collection_errors:
         raise session.Interrupted("%d errors during collection" % session.testsfailed)
 
@@ -177,16 +210,19 @@ def pytest_runtestloop(session):
 
     worker = getattr(session.config.option, "mproc_worker", None)
     if worker is None and hasattr(session.config.option, "mproc_numcores"):
-        global_fixtures = {}
         for item in session.items:
             if hasattr(item, "_request"):
                 request = item._request
                 for name in item._fixtureinfo.argnames:
-                    fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
-                    if not fixturedef or fixturedef[0].scope != 'global' or name in global_fixtures:
-                        continue
-                    global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
-                    session.config.option.mproc_manager.register_fixture(name, global_fixtures[name](fixturedef[0].argnames))
+                    def handle_fixturedef(name: str):
+                        fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
+                        if not fixturedef or fixturedef[0].scope != 'global' or name in global_fixtures:
+                            return
+                        global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
+                        session.config.option.mproc_manager.register_fixture(name, global_fixtures[name](*fixturedef[0].argnames))
+                        for argname in fixturedef[0].argnames:
+                            handle_fixturedef(argname)
+                    handle_fixturedef(name)
     if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
         # return of None indicates other hook impls will be executed to do the task at hand
         # aka, let the basic hook handle it from here, no distributed processing to be done

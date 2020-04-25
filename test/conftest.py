@@ -6,7 +6,12 @@ import pytest
 def dummy():
     pass
 
+
+class V:
+    value = 41
+
+
 @pytest.fixture(scope='global')
 def global_fix(dummy):
-    return 42
-
+    V.value += 1
+    return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once

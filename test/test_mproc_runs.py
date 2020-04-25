@@ -38,7 +38,8 @@ def test_some_alg1(global_fix):
 
 
 @pytest.mark.parametrize('data', ['a%s' % i for i in range(1000)])
-def test_some_alg2(data, some_fixture):
+def test_some_alg2(data, some_fixture, global_fix):
+    assert global_fix == 42
     Something().some_alg2(data)
 
 
