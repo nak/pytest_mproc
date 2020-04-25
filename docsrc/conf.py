@@ -47,7 +47,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # a list of builtin themes.
 #
 html_theme = 'alabaster'
-html_theme_options - {
+html_theme_options = {
     'page_width': '80%'
 }
 
