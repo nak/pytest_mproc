@@ -28,6 +28,23 @@ To begin using pytest_mproc, just install:
 
 % pip install pytest-mproc
 
+Currently, *pytest_mproc* is only usable in the context of a single host with multiple cores, although future
+support may be added for distribute testing across multiple nodes.
+
+Why Use *pytest_mproc* over *pytest-xdist*?
+===========================================
+
+*pytest_mproc* has several advantages over xdist, depending on your situation:
+
+#. Overhead of startup is more efficient, and start-up time does not grow with increasing number of cores
+#. It uses a pull model, so that each worker pulls the next test from a master queue.  There is no need to figure
+out how to divy up the tests beforehand.  The disadvantage is that the developer needs to know how long roughly each
+test takes and prioritize the longer running tests first (*@pytest.mark.tryfirst*) .
+#. It provides a 'global' scope test fixture to provide a single instance of a fixture across all tests, regardless of
+how many nodes
+#. It allows you to programatically group together a bunch of tests to run serially on a single worker process (and
+run these first)
+
 
 Usage
 =====
