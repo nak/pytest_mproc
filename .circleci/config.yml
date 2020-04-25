@@ -28,8 +28,8 @@ jobs:
           name: Run tests
           command: |
             . venv/bin/activate
+            python setup.py install
             cd test
-            cp conftest.py.template conftest.py
             ./run_test.sh
             cd ..
       - run:
