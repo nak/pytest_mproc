@@ -1,0 +1,87 @@
+version: 2.1
+jobs:
+  build:
+    # directory where steps are run
+    working_directory: ~/pytest_mpdist
+    docker:
+      # CircleCI Python images available at: https://hub.docker.com/r/circleci/python/
+      - image: circleci/python:3.7.4
+        environment:
+          PYTHONASYNCIODEBUG: 1
+          PYTHONPATH: ../src:.
+    steps:
+      - checkout
+      - restore_cache:
+          key: deps1-{{ .Branch }}-{{ checksum "requirements.txt" }}
+      - run:
+          name: setup python venv
+          command: |
+            /usr/local/bin/python3 -m venv venv
+            . venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+      - save_cache:
+          key: deps1-{{ .Branch }}-{{ checksum "requirements.txt" }}
+          paths:
+            - "venv"
+      - run:
+          name: Run tests
+          command: |
+            . venv/bin/activate
+            cd test
+            cp conftest.py.template conftest.py
+            ./run_test.sh
+      - run:
+          name: docs
+          command: |
+            . venv/bin/activate
+            pip install sphinx
+            cd docsrc
+            make github
+      - run:
+          name: Setup dist
+          command: |
+             . venv/bin/activate
+             test -d dist && rm -r dist || echo "no dist"
+             python3 setup.py sdist
+      - store_artifacts:
+          path: test/test-reports/
+          destination: python_app
+      - store_artifacts:
+          path: dist
+          destination: dist
+  publish-github-release:
+    docker:
+      - image: cibuilds/github:0.10
+    steps:
+      - attach_workspace:
+          at: ./dist
+      - run:
+          context: pypi-release
+          name: "Publish Release on GitHub"
+          command: |
+            /usr/local/bin/python3 -m venv venv
+            . venv/bin/activate
+            pip install twine
+            twine upload dist/*
+
+workflows:
+  version: 2
+  main:
+    jobs:
+      - build:
+        filters:
+          branches:
+            ignore: /.*/
+          tags:
+            only: /^\d+\.\d+\.\d+$/
+      - publish-github-release:
+          requires:
+            - build
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^\d+\.\d+\.\d+$/
+
+
