@@ -34,16 +34,19 @@ fi;
 
 echo "Running off-nominal cases..."
 echo "->  Exception in fixture"
-PYTHONPATH=`pwd`/../src:`pwd`/.. pytest -s ../testcode/error_cases/fixture_errors.py >& output_fixture_exception.txt
-if test -n "`grep INTERNAL output_fixture_exception.txt`"; then
+OUTPUT_EXC=output_fixture_exception.txt
+PYTHONPATH=`pwd`/../src:`pwd`/.. pytest -s ../testcode/error_cases/fixture_errors.py >& $OUTPUT_EXC
+if test -n "`grep INTERNAL $OUTPUT_EXC`"; then
   echo -e "\e[31mFAILED: \e[39mFound INTERNAL error markers in user-based exception in fixture"
+  cat $OUTPUT_EXC
   exit 3;
 else
     echo -e "\e[32mPASSED: \e[39m No internal errors persent in user-side exception"
 fi;
 
 if test -z "`grep Traceback output_fixture_exception.txt`"; then
-   echo -e "\e[31mFAILED: \e[39m UFailed to produce traceback from user-exception in global test fixture"
+   echo -e "\e[31mFAILED: \e[39m Failed to produce traceback from user-exception in global test fixture"
+   cat $OUTPUT_EXC
    exit 7
 else
     echo -e "\e[32mPASSED: \e[39m User-based traceback present as expected in user-based test fixture exception"
