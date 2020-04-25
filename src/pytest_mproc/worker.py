@@ -7,6 +7,7 @@ from datetime import datetime
 import pytest
 from _pytest.config import _prepareconfig, ConftestImportFailure
 import pytest_cov.embed
+import resource
 
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
@@ -52,6 +53,8 @@ class WorkerSession:
         self._reports = []
         self._count = 0
         self._session_start_time = time.time()
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        self._session_start_rusage = rusage
         self._buffered_results = []
         self._buffer_size = 10
         self._timestamp = datetime.utcnow()
@@ -101,9 +104,10 @@ class WorkerSession:
         for items in session.items:
             # test item comes through as a unique string nodeid of the test
             # We use the pytest-collected mapping we squirrelled away to look up the
-            # actual _pytest.pythone.Function test callable
-            for item in items:
-                item = session._named_items[item]
+            # actual _pytest.python.Function test callable
+            # NOTE: session.items is an iterator, as wet upon construction of WorkerSession
+            for item_name in items:
+                item = session._named_items[item_name]
                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
                 # very much like that in _pytest.main:
                 try:
@@ -151,9 +155,25 @@ class WorkerSession:
 
         :param exitstatus: exit status of the test suite run
         """
-        self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time))
+        self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time,
+                           self._utilization(resource.getrusage(resource.RUSAGE_SELF))))
         self._flush()
         self._result_q.close()
+
+    def _utilization(self, rusage: resource):
+        if self._last_execution_time < 0:
+            return -1, -1
+        if self._count == 0:
+            return 0.0, 0.0, rusage.ru_maxrss
+        time_span = self._last_execution_time - self._session_start_time
+        if sys.platform.lower() == 'darwin':
+            # OS X is in bytes
+            delta_mem = (rusage.ru_maxrss - self._session_start_rusage.ru_maxrss)/1000.0
+        else:
+            delta_mem = (rusage.ru_maxrss - self._session_start_rusage.ru_maxrss)
+        return ((rusage.ru_utime - self._session_start_rusage.ru_utime)/time_span)*100.0, \
+               ((rusage.ru_stime - self._session_start_rusage.ru_stime)/time_span)*100.0, \
+               delta_mem
 
 
 def main(index, test_q, result_q, num_processes):
@@ -211,5 +231,5 @@ def main(index, test_q, result_q, num_processes):
             config._ensure_unconfigure()
     except Exception as e:
         result_q.put(('exception', e))
-        result_q.put(('exit', (index, -1, -1)))
+        result_q.put(('exit', (index, -1, -1, (-1. -1, -1, -1))))
 

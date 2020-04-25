@@ -129,10 +129,12 @@ class Coordinator:
                     sys.stdout.write("\n%s FAILED\n" % report.nodeid)
             elif typ == 'exit':
                 # process is complete, so close it and set to None
-                index, worker_count, exitstatus, duration = data  # which process and count of tests run
+                index, worker_count, exitstatus, duration, rusage = data  # which process and count of tests run
                 name = "worker-%d" % (index + 1)
-                self._process_status_text[index] = "Process %s executed %d tests in %.2f seconds\n" % (
-                    name, worker_count, duration)
+                ucpu, scpu, unshared_mem = rusage
+                self._process_status_text[index] = f"Process {name} executed {worker_count} tests in {duration:.2f} " +\
+                                                   f"seconds; User CPU: {ucpu:.2f}%, Sys CPU: {scpu:.2f}%, " +\
+                                                   f"Mem consumed: {unshared_mem/1000.0}M\n"
                 try:
                     self._processes[index].join(5)
                 except Exception as e:
