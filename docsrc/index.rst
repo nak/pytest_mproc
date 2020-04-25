@@ -161,12 +161,14 @@ while on that fixture.  Example code is shown blow
        @classmethod
        def setup_resources(cls) -> Nont:
             hostname, port = '127.0.0.1', 32873
+            # service is started i the background so as not to hold up the system
             cls._proc = multiprocessing.Procss(target=start, args=(hostname, port))
            ...
            return hostname, port
 
        @classmethod
        def shutdown(cls, hostname:str , port: int) -> None:
+            ...
 
        def __init__(self):
            assert self._proc is not None, "Attempt top instantiate singleton more then once"
@@ -194,3 +196,5 @@ while on that fixture.  Example code is shown blow
             yield manager.hostname, manager.port
 
 
+*pytest_mproc* guarantees that all fixtures are in place before worker clients in other processes access them, so as
+not to cause a race condition.
