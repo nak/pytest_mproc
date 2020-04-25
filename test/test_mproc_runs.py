@@ -7,7 +7,6 @@ sys.path.append(os.path.join(os.path.basename(__file__), "..", "testcode"))
 
 import pytest
 
-from testcode.dummy_src.something import to_be_run_under_test
 from testcode.testsomething import Something
 
 @pytest.fixture()
