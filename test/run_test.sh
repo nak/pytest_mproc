@@ -5,6 +5,7 @@ if test -n "`grep \"== 1 failed, 1004 passed\" output.txt`"; then
  echo  -e "\e[32mPASSED: \e[39m Pass/fail counts as expected"
 else
  echo -e "\e[31mFAILED: \e[39mPass/fail counts not as expected"
+ cat output.txt
  exit 1
 fi;
 
@@ -14,5 +15,6 @@ if test -n "`grep \"== 1 failed, 1004 passed\" output.txt`"; then
  echo  -e "\e[32mPASSED: \e[39m Pass/fail counts as expected"
 else
  echo -e "\e[31mFAILED: \e[39mPass/fail counts not as expected"
+ cat output2.txt
  exit 1
 fi;

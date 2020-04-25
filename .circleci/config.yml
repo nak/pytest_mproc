@@ -2,7 +2,7 @@ version: 2.1
 jobs:
   build:
     # directory where steps are run
-    working_directory: ~/pytest_mpdist
+    working_directory: ~/pytest_mproc
     docker:
       # CircleCI Python images available at: https://hub.docker.com/r/circleci/python/
       - image: circleci/python:3.7.4
