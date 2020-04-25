@@ -6,12 +6,13 @@ sys.path.append(os.path.basename(__file__))
 sys.path.append(os.path.join(os.path.basename(__file__), "..", "testcode"))
 
 import pytest
-
 from testcode.testsomething import Something
+
 
 @pytest.fixture()
 def some_fixture():
     return 1
+
 
 @pytest_mproc.group("group")
 def test_group_m2():
