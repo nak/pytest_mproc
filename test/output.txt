@@ -1,52 +1,32 @@
 ============================= test session starts ==============================
-platform linux -- Python 3.7.2, pytest-4.5.0, py-1.8.0, pluggy-0.11.0
+platform linux -- Python 3.7.3, pytest-5.2.2, py-1.8.0, pluggy-0.13.0
 rootdir: /home/jrusnak/workspace/pytest_mproc
-plugins: metadata-1.8.0, html-1.20.0, cov-2.7.1
+plugins: mproc-2.0.2, metadata-1.8.0, html-2.0.1, cov-2.8.1, asyncio-0.10.0
 collected 1005 items
+INTERNALERROR> Traceback (most recent call last):
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/_pytest/main.py", line 193, in wrap_session
+INTERNALERROR>     session.exitstatus = doit(config, session) or 0
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/_pytest/main.py", line 237, in _main
+INTERNALERROR>     config.hook.pytest_runtestloop(session=session)
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/pluggy/hooks.py", line 286, in __call__
+INTERNALERROR>     return self._hookexec(self, self.get_hookimpls(), kwargs)
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/pluggy/manager.py", line 92, in _hookexec
+INTERNALERROR>     return self._inner_hookexec(hook, methods, kwargs)
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/pluggy/manager.py", line 86, in <lambda>
+INTERNALERROR>     firstresult=hook.spec.opts.get("firstresult") if hook.spec else False,
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/pluggy/callers.py", line 203, in _multicall
+INTERNALERROR>     gen.send(outcome)
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/pluggy/callers.py", line 80, in get_result
+INTERNALERROR>     raise ex[1].with_traceback(ex[2])
+INTERNALERROR>   File "/home/jrusnak/workspace/venv3.7dm/lib/python3.7/site-packages/pluggy/callers.py", line 187, in _multicall
+INTERNALERROR>     res = hook_impl.function(*args)
+INTERNALERROR>   File "/home/jrusnak/workspace/pytest_mproc/src/pytest_mproc/plugin.py", line 188, in pytest_runtestloop
+INTERNALERROR>     session.config.option.mproc_manager.register_fixture(name, func())
+INTERNALERROR> TypeError: global_fix() missing 1 required positional argument: 'dummy'
 
-###### INITIALIZE ############
-
-
-test_mproc_runs.py ......................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................F
-test/test_mproc_runs.py::test_some_alg3 FAILED
-......
-=============================== STATS ================================
-Process worker-1 executed 252 tests in 1.53 seconds
-Process worker-2 executed 253 tests in 1.57 seconds
-Process worker-3 executed 247 tests in 1.53 seconds
-Process worker-4 executed 253 tests in 1.53 seconds
-
-###### FINALIZE ############
-
-
-
-=================================== FAILURES ===================================
-________________________________ test_some_alg3 ________________________________
-
-    def test_some_alg3():
->       Something().some_alg3()
-
-test_mproc_runs.py:46: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-self = <testcode.testsomething.Something object at 0x7fcdb5780e10>
-
-    def some_alg3(self):
-        to_be_run_under_test()
->       assert False
-E       AssertionError
-
-../testcode/testsomething.py:28: AssertionError
-
------------ coverage: platform linux, python 3.7.2-final-0 -----------
-Name                                                                   Stmts   Miss  Cover
-------------------------------------------------------------------------------------------
-/home/jrusnak/workspace/pytest_mproc/testcode/__init__.py                  0      0   100%
-/home/jrusnak/workspace/pytest_mproc/testcode/dummy_src/__init__.py        0      0   100%
-/home/jrusnak/workspace/pytest_mproc/testcode/dummy_src/something.py       2      0   100%
-/home/jrusnak/workspace/pytest_mproc/testcode/testsomething.py            17      0   100%
-------------------------------------------------------------------------------------------
-TOTAL                                                                     19      0   100%
-Coverage HTML written to dir htmlcov
-
-==================== 1 failed, 1004 passed in 2.77 seconds =====================
+============================ no tests ran in 1.28s =============================
+Error in atexit._run_exitfuncs:
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.7/multiprocessing/popen_fork.py", line 28, in poll
+    pid, sts = os.waitpid(self.pid, flag)
+KeyboardInterrupt

@@ -1,8 +1,3 @@
-.. pytest_mproc documentation master file, created by
-   sphinx-quickstart on Sat Feb  8 16:47:29 2020.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
-
 Welcome to pytest_mproc's documentation!
 =========================================
 
@@ -91,48 +86,33 @@ Likewise, you can use the same annotation on test class to group all test method
 This is useful if the tests are using a common resource for testing and parallelized execution of tests might
 result in interference.
 
-Global Initializers/Finalizers
-==============================
+A 'global'-ly Scoped Fixture
+============================
+
+As is the case with *pytest_xdist* plugin, *pytest_mproc* uses multiprocessing module to achieve parallel concurrency.  This
+raises interesting behaviors about 'session' scoped fixtures.  Each subprocess that is launched will create its own
+session-level fixture;  in other words, you can think of a session as a per-process concept, with one session-level
+fixture per process.  This is often not obvious to test developers. Many times, a global fixture is needed, with a
+single instantiation across all processes and tests.  An example might be setting up a single test database.
+
+To achieve this, *pytest_mproc* adds a new scope: 'global'. Behind the scenes, the system uses pythons *multiprocessing*
+module's BaseManager to provide this feature.  This is mostly transparent to the developer, with one notable exception.
+In order to communicate a fixture globally across multiple *Process*es, the object returned (or yielded) from a
+globally scoped fixture must be Picklable.
+
+The 'global' scope is a level above 'session' in the hierarchy.  That means that globally scoped fixtures can only
+depend on other globally scoped fixtures.
 
 .. warning::
-    Much like pytest-xdist, session level variables are called once for EACH THREAD.  So if you run on 4 cores, each
-    session-scoped fixture will run 4 times.  This is because forking is used to parallelize tests.
+    Values returned or yielded from a fixture with scope'global' must be picklable so as to be shared across multiple
+    independent subprocesses.
 
-To add an initializer and finalzier to be called only once before all tests execute and after all tests executed,
-respectively, use fixture from the pytest_mproc_utils package:
 
 .. code-block:: python
 
-   from pytest_mproc.utils import global_initializer, global_finalizer
-   @pytest_mproc_global_initializer
-   def initualizer():
-       pass
+   import pytest
 
-   @pytest_mproc_global_finalizer
-   def finalizer():
-       pass
-
-Global Session Context Manager
-==============================
-
-Alternatively, you can use a context manager (either a function with a single yield or a class with __enter__ and __exit__ methods). The function,
-or the __init__ method in the case of a class, must not take any arguments.
-
-.. code-block:: python
-
-   from pytest_mproc.utils import global_session_context
-
-   @global_session_context
-   class ContextManager:
-
-       def __enter__(self):
-           # setup some resource globally once for all tests/processes being run
-           return self
-
-       def __exit__(self):
-           # teardown/shutdown resources set up on enter
-           pass
-
-
-
+   @pytest.fixture(scope='global')
+   def globally_scoped_fixture()
+       ...
 

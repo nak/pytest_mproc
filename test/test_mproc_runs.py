@@ -9,7 +9,6 @@ import pytest
 
 from testcode.dummy_src.something import to_be_run_under_test
 from testcode.testsomething import Something
-from pytest_mproc.utils import global_finalizer, global_initializer, global_session_context
 
 @pytest.fixture()
 def some_fixture():
@@ -33,7 +32,8 @@ class TestGrouped:
         assert TestGrouped.proc_id == os.getpid()
 
 
-def test_some_alg1():
+def test_some_alg1(global_fix):
+    assert global_fix == 42
     Something().some_alg1()
 
 
@@ -44,31 +44,4 @@ def test_some_alg2(data, some_fixture):
 
 def test_some_alg3():
     Something().some_alg3()
-
-
-@global_initializer("some_fixture")
-def initializer():
-    print("\n###### INITIALIZE ############\n")
-
-
-@global_finalizer("some_fixture")
-def finalizer():
-    print("\n###### FINALIZE ############\n")
-
-
-@global_session_context()
-def sess_context():
-    print("\n>>> IN GLOBAL SESSION CONTEXT\n")
-    yield
-    print("\n>>> OUT OF GLOBAL SESSION CONTEXT\n")
-
-
-@global_session_context("some_fixture")
-class CM:
-
-    def __enter__(self):
-        print("\n>>> IN CLASS GLOBAL SESSION CONTEXT\n")
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        print("\b>>> OUT OF CLASS GLOBAL SESSION CONTEXT\n")
 

@@ -16,3 +16,4 @@ def group(name):
             raise Exception("group decorator can only decorate class or function object")
         return object
     return decorator_group
+

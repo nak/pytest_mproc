@@ -1,12 +1,83 @@
 """
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
+import functools
+from multiprocessing.managers import BaseManager
+
+import _pytest
+_pytest.fixtures.scopes.insert(0, "global")
+_pytest.fixtures.scopenum_function = _pytest.fixtures.scopes.index("function")
 import contextlib
 import pytest
 
 from multiprocessing import cpu_count
 from pytest_mproc.coordinator import Coordinator
-from pytest_mproc.utils import _GlobalFixtures, is_degraded
+from pytest_mproc.utils import is_degraded
+
+
+class Global(_pytest.main.Session):
+
+    class Manager(BaseManager):
+
+        ADDRESS = ('127.0.0.1', 33981)
+
+        def __init__(self, config):
+            super().__init__(self.ADDRESS, authkey=b'pass')
+            self._fixtures = {}
+            if hasattr(config.option, "mproc_worker"):
+                # client
+                Global.Manager.register("invoke_fixture")
+                super().connect()
+            else:
+                Global.Manager.register("invoke_fixture", self._invoke)
+                Global.Manager.register("register_fixture", self._register_fixture)
+                super().start()
+
+        def _register_fixture(self, name, fixture):
+            self._fixtures[name] = fixture
+
+        def _invoke(self, fixture_name):
+            return self._fixtures[fixture_name]
+
+    _manager = None
+
+    def __init__(self, config):
+        super().__init__(config)
+
+    def setup(self):
+        raise Exception("UNIMPL")
+
+    def gethookproxy(self, fspath):
+        raise Exception("UNIMPL")
+
+    def isinitpath(self, path):
+        return path in self.session._initialpaths
+
+    def collect(self):
+        raise Exception("UNIMPL")
+
+
+_getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem
+
+
+def _getscopeitem_redirect(self, scope):
+    if scope == "global":
+        if False and hasattr(self.config.option, "mproc_numcores"):
+            manager = Global.Manager(self.config, self._pyfuncitem, self._fixturedef.argname)
+
+            @functools.wraps(self._pyfuncitem)
+            def wrap(*args, **kargs):
+                return manager.invoke_fixture(self._fixturedef.argname, *args, **kargs)
+
+            self._pyfuncitem = wrap
+        return self._pyfuncitem.getparent(_pytest.main.Session)
+    else:
+        return _getscopeitem_orig(self, scope)
+
+
+_pytest.fixtures.FixtureRequest._getscopeitem = _getscopeitem_redirect
+_pytest.fixtures.scopename2class.update({"global": Global})
+_pytest.fixtures.scope2props['global'] = ()
 
 
 def parse_numprocesses(s):
@@ -82,9 +153,8 @@ def pytest_cmdline_main(config):
 
 @pytest.mark.trylast
 def pytest_configure(config):
+    config.option.mproc_manager = Global.Manager(config)
     worker = getattr(config.option, "mproc_worker", None)
-    if not worker:
-        config.context_managers = [(cm(), fixtures) for cm, fixtures in _GlobalFixtures.session_contexts]
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
         return  # return of None indicates other hook impls will be executed to do the task at hand
     # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
@@ -106,96 +176,36 @@ def pytest_runtestloop(session):
         return  # should never really get here, but for consistency
 
     worker = getattr(session.config.option, "mproc_worker", None)
-    session.config.context_managers = [cm for cm, fixtures in session.config.context_managers if not fixtures or
-                                       [a for a in fixtures if any([a in item._fixtureinfo.argnames
-                                                                    for item in session.items])]] if worker is None else []
+    if worker is None and hasattr(session.config.option, "mproc_numcores"):
+        for item in session.items:
+            if hasattr(item, "_request"):
+                request = item._request
+                for name in item._fixtureinfo.argnames:
+                    fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
+                    if not fixturedef or fixturedef[0].scope != 'global':
+                        continue
+                    func = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
+                    session.config.option.mproc_manager.register_fixture(name, func(fixturedef[0].argnames))
     if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
-        for func, args in _GlobalFixtures.initializers:
-            try:
-                if not args:
-                    func()
-                else:
-                    for item in session.items:
-                        if [a for a in args if a in item._fixtureinfo.argnames]:
-                            func()
-                            break
-            except Exception as e:
-                print(f"\n>>>> ERROR in global initializer {func}. Aborting! <<<<<\n {str(e)}\n")
-                if hasattr(session.config, 'coordinator'):
-                    session.config.coordinator.stop(None)
-                return False
-        for cm in session.config.context_managers:
-            try:
-                cm.__enter__()
-            except Exception as e:
-                print(f"\n>>>> ERROR upon enter of global session context {cm}. Aborting! <<<<<\n {str(e)}\n")
-                if hasattr(session.config, 'coordinator'):
-                    session.config.coordinator.stop(None)
-                return False
+        # return of None indicates other hook impls will be executed to do the task at hand
+        # aka, let the basic hook handle it from here, no distributed processing to be done
         return
 
-    if worker is None:
-        for func, args in _GlobalFixtures.initializers:
-            try:
-                if not args:
-                    func()
-                else:
-                    for item in session.items:
-                        if [a for a in args if a in item._fixtureinfo.argnames]:
-                            func()
-                            break
-            except Exception as e:
-                print(f">>>> ERROR in global initializer. Aborting! <<<<<\n {str(e)}")
-                if hasattr(session.config, 'coordinator'):
-                    session.config.coordinator.stop(None)
-                return False
-    if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
-        return  # return of None indicates other hook impls will be executed to do the task at hand
     if not session.config.getvalue("collectonly") and worker is None:
-        try:
-            # main coordinator loop:
-            with contextlib.ExitStack() as stack, session.config.coordinator as coordinator:
-                try:
-                    for cm in session.config.context_managers:
-                            stack.enter_context(cm)
-                except Exception as e:
-                    print(f"\n>>>> ERROR upon entering global session context {cm}:\n {str(e)}\n")
-                    return False
-                try:
-                    coordinator.set_items(session.items)
-                    coordinator.run(session)
-                except Exception as e:
-                    print(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n")
-                    return False
-        except Exception as e:
-            print(f"\n>>>> ERROR upon exit of global session context:\n {str(e)}\n")
-        finally:
-            session.config.coordinator.stop(None)
+        # main coordinator loop:
+        with session.config.coordinator as coordinator:
+            try:
+                coordinator.set_items(session.items)
+                coordinator.run(session)
+            except Exception as e:
+                print(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n")
+                return False
     else:
         worker.test_loop(session)
     return True
 
 
-def pytest_sessionfinish(session, *args):
+def pytest_sessionfinish(session):
     worker = getattr(session.config.option, "mproc_worker", None)
-    if not worker:
-        if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option,
-                                                                                                "mproc_disabled"):
-            if hasattr(session.config, "context_managers"):
-                for cm in reversed(session.config.context_managers):
-                    try:
-                        cm.__exit__(None, None, None)  # exceptions are tracked as part of test reporting, not through cm
-                    except Exception as e:
-                        print(f">>>> ERROR upon exit of global session context {cm}; Ignoring:\n {str(e)}")
-        # only executing in main thread and none of the worker threads:
-        for func, args in reversed(_GlobalFixtures.finalizers):
-            try:
-                if not args:
-                    func()
-                else:
-                    for item in session.items:
-                        if [a for a in args if a in item._fixtureinfo.argnames]:
-                            func()
-                            break
-            except Exception as e:
-                print(f">>>> ERROR in global finalizer {func};  In=gnoring:\n {str(e)}")
+    if worker is None and hasattr(session.config.option, "mproc_manager"):
+        session.config.option.mproc_manager.shutdown()
