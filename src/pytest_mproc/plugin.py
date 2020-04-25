@@ -177,15 +177,16 @@ def pytest_runtestloop(session):
 
     worker = getattr(session.config.option, "mproc_worker", None)
     if worker is None and hasattr(session.config.option, "mproc_numcores"):
+        global_fixtures = {}
         for item in session.items:
             if hasattr(item, "_request"):
                 request = item._request
                 for name in item._fixtureinfo.argnames:
                     fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
-                    if not fixturedef or fixturedef[0].scope != 'global':
+                    if not fixturedef or fixturedef[0].scope != 'global' or name in global_fixtures:
                         continue
-                    func = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
-                    session.config.option.mproc_manager.register_fixture(name, func(fixturedef[0].argnames))
+                    global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
+                    session.config.option.mproc_manager.register_fixture(name, global_fixtures[name](fixturedef[0].argnames))
     if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
         # return of None indicates other hook impls will be executed to do the task at hand
         # aka, let the basic hook handle it from here, no distributed processing to be done
