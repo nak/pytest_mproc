@@ -19,4 +19,8 @@ setuptools.setup(
     keywrds='pytest distributed multiprocessing',
     url='https://github.com/jrusnakli/pytest_mpdist',
     download_url="https://github.com/jrusnakli/pytest_mpdist/dist/%s" % VERSION,
+    install_requires=[
+        'pytest',
+        'pytest-cov'
+    ]
 )
