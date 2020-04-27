@@ -1,12 +1,17 @@
 """
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
+import getpass
 import inspect
+import os
+import shutil
 import socket
 import sys
+import tempfile
 import traceback
-from contextlib import closing
+from contextlib import closing, contextmanager
 from multiprocessing.managers import BaseManager
+from pathlib import Path
 from typing import Any
 
 import _pytest
@@ -310,7 +315,61 @@ def pytest_sessionfinish(session):
     worker = getattr(session.config.option, "mproc_worker", None)
     if worker is None and hasattr(session.config.option, "mproc_manager"):
         try:
-            pass
-            #session.config.option.mproc_manager.shutdown()
+            session.config.option.mproc_manager.shutdown()
         except Exception as e:
             print(">>> Error shutting down mproc manager")
+
+
+################
+# Process-safe temp dir
+###############
+
+class TmpDirFactory:
+
+    """
+    tmpdir is not process/thread safe when used in a multiprocessing environment.  Failures on setup can
+    occur (even if infrequently) under certain rae conditoins.  This provides a safe mechanism for
+    creating temporary directories utilizng s a global-scope fixture
+    """
+    _root_tmp_dir = tempfile.mkdtemp(prefix=f"pytest_mproc-{getpass.getuser()}-{os.getpid()}")
+
+    def __init__(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        print(">>>>>>> REMOVING TEMPDIR ROOT")
+        shutil.rmtree(self._root_tmp_dir)
+
+    @contextmanager
+    def create_tmp_dir(self, cleanup_immediately: bool = True):
+        """
+        :param cleanup_immediately: if True, rm the directory and all contents when associated fixture is no longer
+           in use, otherwise wait until end of test session when everything is cleaned up
+        :return: newly create temp directory unique across all Process's
+        """
+        tmpdir = tempfile.mkdtemp(dir=self._root_tmp_dir)
+        try:
+            yield Path(tmpdir)
+        finally:
+            if cleanup_immediately:
+                shutil.rmtree(tmpdir)
+
+
+@pytest.fixture(scope='global')
+def mp_tmpdir_factory():
+    """
+    :return: a factory for creating unique tmp directories, unique across all Process's
+    """
+    with TmpDirFactory() as factory:
+        yield factory
+
+
+@pytest.fixture()
+def mp_tmp_dir(mp_tmpdir_factory: TmpDirFactory):
+    # tmpdir is not thread safe and can fail on test setup when running on a highly loaded very parallelized system
+    # so use this instead
+    with mp_tmpdir_factory.create_tmp_dir("PYTEST_MPROC_LAZY_CLEANUP" not in os.environ) as tmp_dir:
+        yield tmp_dir

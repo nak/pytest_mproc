@@ -198,3 +198,12 @@ while on that fixture.  Example code is shown blow
 
 *pytest_mproc* guarantees that all fixtures are in place before worker clients in other processes access them, so as
 not to cause a race condition.
+
+A Safe *tmpdir* Fixture
+=======================
+
+*pytest_mproc* provides its own fixtures for creating temporary directories: *mp_tmpdir_factory*, a fixture with a
+"*create_tmpdir*" method for creating multiple temporary directories within a test procedure, and a
+*mp_tmpdi* directory for creating a single temporary directory.  Other plugins providing similar featurs can have
+race conditions causing intermittent (if infrequent) failures.  This plugin guarantees to be free of race conditions
+and safe in the context of *pytest_mproc*'s concrurrent test framework.
