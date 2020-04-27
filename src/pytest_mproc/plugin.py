@@ -208,7 +208,7 @@ def pytest_fixture_setup(fixturedef, request):
         if name in global_fixturedefs:
             fixturedef.cached_result = global_fixturedefs[name]
             return fixturedef.cached_result[0]
-        my_cache_key = fixturedef.cache_key(request)
+        my_cache_key =request.param_index if not hasattr(request, "param") else request.param
         try:
             request.config.option.mproc_manager.hold()
             result = request.config.option.mproc_manager.invoke_fixture(name).value()
@@ -266,9 +266,8 @@ def pytest_runtestloop(session):
         return  # should never really get here, but for consistency
 
     worker = getattr(session.config.option, "mproc_worker", None)
-    generated = []
-    if worker is None and hasattr(session.config.option, "mproc_numcores"):
-
+    session.config.option.generated = []
+    if worker is None:
         for item in session.items:
             if session.shouldfail:
                 break
@@ -276,7 +275,7 @@ def pytest_runtestloop(session):
 
                 for name in item._fixtureinfo.argnames:
                     if name not in global_fixtures:
-                        generated += process_fixturedef(name, item, session, global_fixtures)
+                        session.config.option.generated += process_fixturedef(name, item, session, global_fixtures)
                     if session.shouldfail:
                         break
     if session.shouldfail:
@@ -285,6 +284,7 @@ def pytest_runtestloop(session):
         if not worker and hasattr(session.config, 'coordinator'):
             session.config.coordinator.kill()
         raise session.Failed(session.shouldfail)
+    # signals any workers waiting on global fixture(s) to continue
     session.config.option.mproc_manager.release(True)
     if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
         # return of None indicates other hook impls will be executed to do the task at hand
@@ -302,12 +302,7 @@ def pytest_runtestloop(session):
                 return False
     else:
         worker.test_loop(session)
-    for item in generated:
-        try:
-            next(item)
-            raise Exception("Generator did not stop")
-        except StopIteration:
-            pass
+
     return True
 
 
@@ -317,8 +312,14 @@ def pytest_sessionfinish(session):
         try:
             session.config.option.mproc_manager.shutdown()
         except Exception as e:
-            print(">>> Error shutting down mproc manager")
-
+            print(">>> INTERNAL Error shutting down mproc manager")
+    generated = getattr(session.config.option, "generated", [])
+    for item in generated:
+        try:
+            next(item)
+            raise Exception(f"Fixture generator did not stop {item}")
+        except StopIteration:
+            pass
 
 ################
 # Process-safe temp dir
