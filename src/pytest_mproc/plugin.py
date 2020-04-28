@@ -47,7 +47,9 @@ class Global(_pytest.main.Session):
                 return self._value
 
         def __init__(self, config):
-            super().__init__(self.ADDRESS, authkey=b'pass')
+            port = getattr(config.option, "mproc_server_port", None)
+            address = (socket.gethostname(), port) if port is not None else self.ADDRESS
+            super().__init__(address, authkey=b'pass')
             self._fixtures = {}
             self._on_hold = True
             if hasattr(config.option, "mproc_worker"):
@@ -155,6 +157,14 @@ def pytest_addoption(parser):
             type=bool,
             help="disable any parallel mproc testing, overriding all other mproc arguments",
         )
+    group._addoption(
+        "--server_port",
+        dest="mproc_server_port",
+        metavar="mproc_server_port",
+        action="store",
+        type=int,
+        help="port on which you wish to run server (for multi-host runs only)"
+    )
 
 
 @pytest.mark.tryfirst
