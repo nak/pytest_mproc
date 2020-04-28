@@ -341,7 +341,6 @@ class TmpDirFactory:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        print(">>>>>>> REMOVING TEMPDIR ROOT")
         shutil.rmtree(self._root_tmp_dir)
 
     @contextmanager

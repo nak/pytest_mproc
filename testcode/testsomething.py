@@ -15,14 +15,15 @@ class Something:
 
     @pytest_mproc.group("group")
     def group_m1(self):
+        to_be_run_under_test(100000)
         Something.proc_id = os.getpid()
 
     def some_alg2(self, data):
-        to_be_run_under_test()
+        to_be_run_under_test(1)
 
     def some_alg1(self):
         assert True
 
     def some_alg3(self):
-        to_be_run_under_test()
+        to_be_run_under_test(1)
         assert False

@@ -18,7 +18,7 @@ def some_fixture():
     return 1
 
 
-@pytest_mproc.group("group")
+@pytest_mproc.group("group", 1)
 def test_group_m2():
     Something().group_m1()
     assert Something.proc_id == os.getpid()

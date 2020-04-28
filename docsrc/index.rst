@@ -103,6 +103,26 @@ Likewise, you can use the same annotation on test class to group all test method
 This is useful if the tests are using a common resource for testing and parallelized execution of tests might
 result in interference.
 
+.. note:: Grouped tests are always placed at the front of the test queue  -- i.e, always scheduled to run before
+ungrouped tests
+
+A Matter of Priority
+--------------------
+You can also specify a priority of scheduling for groups.  The group annotation takes an optional priority as
+the second argument:
+
+.. code-block:: python
+
+   import pytest_mproc
+
+   @pytest.mpro.group("Prioritzed_Group", priority=1)
+   def test_function():
+      pass
+
+Groups with lower interger priority value are scheduled before those with a higher priority value.  Thus, a
+group with priority *0* will be scheduled before a group with priority *1*.  The default priority is *0* if
+not specified.
+
 A 'global'-ly Scoped Fixture
 ============================
 

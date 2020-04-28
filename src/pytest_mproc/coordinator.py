@@ -1,13 +1,15 @@
 """
 This package contains code to coordinate execution from a main thread to worker threads (processes)
 """
-
+import resource
 import select
 import sys
 import time
 
 from _pytest.config import _prepareconfig
 from multiprocessing import Process, Queue
+
+from pytest_mproc import resource_utilization
 from pytest_mproc.worker import main as worker_main
 
 
@@ -52,9 +54,10 @@ class Coordinator:
         self._tests = [t for t in tests if t not in grouped]
         groups = {}
         for g in grouped:
-            groups.setdefault(g._pyfuncitem.obj._pytest_group, []).append(g)
-        for test_list in groups.values():
-            self._tests.insert(0, test_list)
+            name, priority = g._pyfuncitem.obj._pytest_group
+            groups.setdefault((name, priority), []).append(g)
+        for key in sorted(groups.keys(), key=lambda x: x[1]):
+            self._tests.insert(0, groups[key])
 
     def __enter__(self):
         return self
@@ -95,13 +98,21 @@ class Coordinator:
         out = '%s %s %s\n' % (s * sep_len, txt, s * (sep_len + sep_extra))
         sys.stdout.write(out)
 
-    def _output_summary(self):
+    def _output_summary(self, time_span: float, ucpu: float, scpu: float, unshared_mem: float):
         """
         Output the summary of test execution
         """
         self._write_sep('=', "STATS")
+        sys.stdout.write("User CPU, System CPU utilization, Add'l memory during run\n")
+        sys.stdout.write("---------------------------------------------------------\n")
         for msg in self._process_status_text:
             sys.stdout.write(msg)
+        sys.stdout.write("\n")
+        sys.stdout.write(
+            f"Process Coordinator executed in {time_span:.2f} seconds. " +
+            f"User CPU: {ucpu:.2f}%, Sys CPU: {scpu:.2f}%, " +
+            f"Mem consumed: {unshared_mem/1000.0}M\n"
+        )
         length = sum([1 if not isinstance(t, list) else len(t) for t in self._tests])
         if self._count != length:
             self._write_sep('!', "{} tests unaccounted for {} out of {}".format(length - self._count,
@@ -159,6 +170,8 @@ class Coordinator:
 
         :param session: Pytest test session, to get session or config information
         """
+        start_rusage = resource.getrusage(resource.RUSAGE_SELF)
+        start_time = time.time()
         reader_mapping = {q._reader: q for q in self._result_qs}
 
         def read_results(timeout=0):
@@ -189,8 +202,14 @@ class Coordinator:
         while any([q is not None for q in self._result_qs]):
             read_results(timeout=1)
         self._test_q.close()
+        end_rusage = resource.getrusage(resource.RUSAGE_SELF)
+        time_span = time.time() - start_time
+        ucpu, scpu, addl_mem_usg = resource_utilization(time_span=time_span,
+                                                        start_rusage=start_rusage,
+                                                        end_rusage=end_rusage)
+
         sys.stdout.write("\r\n")
-        self._output_summary()
+        self._output_summary(time_span, ucpu, scpu, addl_mem_usg)
 
 
 if __name__ == "__main__":

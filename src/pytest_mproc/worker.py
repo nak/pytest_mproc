@@ -2,12 +2,13 @@ import os
 import socket
 import sys
 import time
-from datetime import datetime
 
 import pytest
 from _pytest.config import _prepareconfig, ConftestImportFailure
 import pytest_cov.embed
 import resource
+
+from pytest_mproc import resource_utilization
 
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
@@ -39,6 +40,10 @@ except Exception:
     pycov_present = False
 
 
+"""maximum time between reporting status back to coordinator"""
+MAX_REPORTING_INTERVAL = 1.0  # seconds
+
+
 class WorkerSession:
     """
     Handles reporting of test status and the like
@@ -53,12 +58,11 @@ class WorkerSession:
         self._reports = []
         self._count = 0
         self._session_start_time = time.time()
-        rusage = resource.getrusage(resource.RUSAGE_SELF)
-        self._session_start_rusage = rusage
         self._buffered_results = []
-        self._buffer_size = 10
-        self._timestamp = datetime.utcnow()
+        self._buffer_size = 20
+        self._timestamp = time.time()
         self._last_execution_time = time.time()
+        self._resource_utilization = -1, -1, -1
 
     def _put(self, kind, data):
         """
@@ -68,7 +72,7 @@ class WorkerSession:
         :param data: test result data to publih to queue
         """
         self._buffered_results.append((kind, data))
-        if len(self._buffered_results) >= self._buffer_size or (datetime.utcnow() - self._timestamp).total_seconds() > 1:
+        if len(self._buffered_results) >= self._buffer_size or (time.time() - self._timestamp) > MAX_REPORTING_INTERVAL:
             self._flush()
 
     def _flush(self):
@@ -78,7 +82,7 @@ class WorkerSession:
         if self._buffered_results:
             self._result_q.put(self._buffered_results)
             self._buffered_results = []
-            self._timestamp = datetime.utcnow()
+            self._timestamp = time.time()
 
     def test_loop(self, session):
         """
@@ -88,38 +92,45 @@ class WorkerSession:
 
         :param session:  Where the tests generator is kept
         """
-        if pycov_present:
-            global my_cov
-            try:
-                my_cov = pytest_cov.embed.active_cov
-            except:
-                my_cov = None
-
-        if session.testsfailed and not session.config.option.continue_on_collection_errors:
-            raise session.Failed("%d errors during collection" % session.testsfailed)
-
-        if session.config.option.collectonly:
-            return  # should never really get here, but for consistency
-
-        for items in session.items:
-            # test item comes through as a unique string nodeid of the test
-            # We use the pytest-collected mapping we squirrelled away to look up the
-            # actual _pytest.python.Function test callable
-            # NOTE: session.items is an iterator, as wet upon construction of WorkerSession
-            for item_name in items:
-                item = session._named_items[item_name]
-                item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
-                # very much like that in _pytest.main:
+        start_time = time.time()
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        try:
+            if pycov_present:
+                global my_cov
                 try:
-                    if session.shouldfail:
-                        raise session.Failed(session.shouldfail)
-                except AttributeError:
-                    pass  # some version of pytest do not have this attribute
-                if session.shouldstop:
-                    raise session.Interrupted(session.shouldstop)
-                # count tests that have been run
-                self._count += 1
-                self._last_execution_time = time.time()
+                    my_cov = pytest_cov.embed.active_cov
+                except:
+                    my_cov = None
+
+            if session.testsfailed and not session.config.option.continue_on_collection_errors:
+                raise session.Failed("%d errors during collection" % session.testsfailed)
+
+            if session.config.option.collectonly:
+                return  # should never really get here, but for consistency
+
+            for items in session.items:
+                # test item comes through as a unique string nodeid of the test
+                # We use the pytest-collected mapping we squirrelled away to look up the
+                # actual _pytest.python.Function test callable
+                # NOTE: session.items is an iterator, as wet upon construction of WorkerSession
+                for item_name in items:
+                    item = session._named_items[item_name]
+                    item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
+                    # very much like that in _pytest.main:
+                    try:
+                        if session.shouldfail:
+                            raise session.Failed(session.shouldfail)
+                    except AttributeError:
+                        pass  # some version of pytest do not have this attribute
+                    if session.shouldstop:
+                        raise session.Interrupted(session.shouldstop)
+                    # count tests that have been run
+                    self._count += 1
+                    self._last_execution_time = time.time()
+        finally:
+            self._resource_utilization = resource_utilization(time_span=time.time() - start_time,
+                                                              start_rusage=rusage,
+                                                              end_rusage=resource.getrusage(resource.RUSAGE_SELF))
 
     @pytest.mark.tryfirst
     def pytest_collection_finish(self, session):
@@ -156,24 +167,9 @@ class WorkerSession:
         :param exitstatus: exit status of the test suite run
         """
         self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time,
-                           self._utilization(resource.getrusage(resource.RUSAGE_SELF))))
+                           self._resource_utilization))
         self._flush()
         self._result_q.close()
-
-    def _utilization(self, rusage: resource):
-        if self._last_execution_time < 0:
-            return -1, -1
-        if self._count == 0:
-            return 0.0, 0.0, rusage.ru_maxrss
-        time_span = self._last_execution_time - self._session_start_time
-        if sys.platform.lower() == 'darwin':
-            # OS X is in bytes
-            delta_mem = (rusage.ru_maxrss - self._session_start_rusage.ru_maxrss)/1000.0
-        else:
-            delta_mem = (rusage.ru_maxrss - self._session_start_rusage.ru_maxrss)
-        return ((rusage.ru_utime - self._session_start_rusage.ru_utime)/time_span)*100.0, \
-               ((rusage.ru_stime - self._session_start_rusage.ru_stime)/time_span)*100.0, \
-               delta_mem
 
 
 def main(index, test_q, result_q, num_processes):
