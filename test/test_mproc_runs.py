@@ -36,7 +36,7 @@ class TestGrouped:
         assert TestGrouped.proc_id == os.getpid()
 
 
-def test_some_alg1(global_fix):
+def test_some_alg1(global_fix, mp_tmpdir_factory):
     assert global_fix == 42
     Something().some_alg1()
 

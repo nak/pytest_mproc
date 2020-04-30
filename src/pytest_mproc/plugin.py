@@ -8,6 +8,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 import traceback
 from contextlib import closing, contextmanager
 from multiprocessing.managers import BaseManager
@@ -15,8 +16,12 @@ from pathlib import Path
 from typing import Any
 
 import _pytest
+_pytest.fixtures.scopes.insert(0, "node")
 _pytest.fixtures.scopes.insert(0, "global")
 _pytest.fixtures.scopenum_function = _pytest.fixtures.scopes.index("function")
+_pytest.fixtures.scope2props['global'] = ()
+_pytest.fixtures.scope2props['node'] = ()
+
 import pytest
 
 from multiprocessing import cpu_count, Queue
@@ -31,56 +36,158 @@ def find_free_port():
         return s.getsockname()[1]
 
 
-class Global(_pytest.main.Session):
+class FixtureManager(BaseManager):
+    class Value:
 
-    class Manager(BaseManager):
+        def __init__(self, value: Any):
+            self._value = value
 
-        ADDRESS = ('127.0.0.1', find_free_port())
-        _start_gate = Queue()
+        def value(self):
+            return self._value
 
-        class Value:
+    def __init__(self, host, port, is_master: bool):
+        self._fixtures = {}
+        self._is_master = is_master
+        if not is_master:
+            self.__class__.register("register_fixture")
+            self.__class__.register("invoke_fixture")
+            self.__class__.register("get_start_gate")
+        else:
+            self._start_gate = Queue()
+            self.__class__.register("get_start_gate", lambda: self._start_gate)
+            self.__class__.register("register_fixture", self._register_fixture)
+            self.__class__.register("invoke_fixture", self._invoke)
+        super().__init__((host, port), authkey=b'pass')
+        self._on_hold = True
 
-            def __init__(self, value: Any):
-                self._value = value
+    def hold(self):
+        if not self._on_hold:
+            return
+        start_gate = self.get_start_gate()
+        v = start_gate.get()
+        self._on_hold = False
+        start_gate.put(v)
+        if isinstance(v, Exception):
+            raise v
 
-            def value(self):
-                return self._value
+    def release(self, val):
+        self._on_hold = False
+        self._start_gate.put(val)
+
+    def _register_fixture(self, name, fixture):
+        assert name not in self._fixtures, f"INTERNAL ERROR: {name} already in {self._fixtures}"
+        self._fixtures[name] = self.Value(fixture)
+
+    def _invoke(self, fixture_name):
+        return self._fixtures[fixture_name]
+
+    def get_fixturedef(self, fixturedef, param_index, ):
+        name = fixturedef.argname
+        if name in self.fixturedefs:
+            fixturedef.cached_result = self.fixturedefs[name]
+            return fixturedef.cached_result[0]
+        my_cache_key = param_index
+        try:
+            self.hold()
+            result = self.invoke_fixture(name).value()
+        except _pytest.fixtures.TEST_OUTCOME:
+            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
+            self.fixturedefs[name] = (None, my_cache_key, sys.exc_info())
+            raise
+        if isinstance(result, Exception):
+            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
+            self.fixturedefs[name] = (None, my_cache_key, sys.exc_info())
+            raise result
+        fixturedef.cached_result = (result, my_cache_key, None)
+        self.fixturedefs[name] = (result, my_cache_key, None)
+        return result
+
+
+class Node(_pytest.main.Session):
+
+    class Manager(FixtureManager):
+        PORT = find_free_port()
+        fixturedefs = {}
 
         def __init__(self, config):
-            port = getattr(config.option, "mproc_server_port", None)
-            address = (socket.gethostname(), port) if port is not None else self.ADDRESS
-            super().__init__(address, authkey=b'pass')
-            self._fixtures = {}
-            self._on_hold = True
-            if hasattr(config.option, "mproc_worker"):
-                # client
-                Global.Manager.register("invoke_fixture")
-                Global.Manager.register("sem")
+            # scope to node: only run on localhost with random port
+            is_master = not hasattr(config.option, "mproc_worker")
+            super().__init__('127.0.0.1', self.PORT, is_master)
+            if is_master:
+                super().start()
+            else:
                 super().connect()
+
+
+class Global(_pytest.main.Session):
+
+    class Manager(FixtureManager):
+
+        fixturedefs = {}
+
+        DEFAULT_PORT = find_free_port()
+
+        def __init__(self, config, is_master_flag: bool = True):
+            self._satellite_worker_count = 0
+            self._test_q_exhausted = False
+            self.is_master = is_master_flag and getattr(config.option, "mproc_worker", None) is None and config.option.is_master
+            if not self.is_master:
+                # client
+                Global.Manager.register("get_test_queue")
+                Global.Manager.register("get_results_queue")
+                Global.Manager.register("register_satellite")
+                Global.Manager.register("signal_satellite_done")
             else:
                 # server:
-                Global.Manager.register("invoke_fixture", self._invoke)
-                Global.Manager.register("register_fixture", self._register_fixture)
+                self._test_q = Queue()
+                self._result_q = Queue()
+                Global.Manager.register("get_test_queue", lambda: self._test_q)
+                Global.Manager.register("get_results_queue", lambda: self._result_q)
+                Global.Manager.register("register_satellite", self._register_satellite)
+                Global.Manager.register("signal_satellite_done", self._signal_satellite_done)
+                Global.Manager.register("signal_test_q_exhausted", self._signal_test_q_exhausted)
+            super().__init__(config.option.mproc_server_host, config.option.mproc_server_port or self.DEFAULT_PORT,
+                             self.is_master)
+            if self.is_master:
                 super().start()
+            else:
+                tries_left = 60
+                if not config.option.is_master:
+                    os.write(sys.stderr.fileno(), b"Waiting for server...")
+                while tries_left:
+                    try:
+                        super().connect()
+                        break
+                    except ConnectionRefusedError as e:
+                        if not config.option.is_master:
+                            os.write(sys.stderr.fileno(), b".")
+                        tries_left -= 1
+                        if tries_left == 0:
+                            os.write(sys.stderr.fileno(), b"\n")
+                            raise Exception(f"Failed to connect to server {config.option.mproc_server_host} port " +
+                                            f"{config.option.mproc_server_port or self.DEFAULT_PORT}: {str(e)}")
+                        time.sleep(0.5)
+                if not config.option.is_master:
+                    os.write(sys.stderr.fileno(), b"\nConnected\n")
 
-        def hold(self):
-            if not self._on_hold:
+        def _register_satellite(self, count: int):
+            self._satellite_worker_count += count
+            if self._test_q_exhausted:
+                for _ in range(count):
+                    self._test_q.put(None)
+
+        def _signal_satellite_done(self, count: int):
+            if count == 0:
                 return
-            v = self._start_gate.get()
-            self._on_hold = False
-            self._start_gate.put(v)
-            if isinstance(v, Exception):
-                raise v
+            self._satellite_worker_count -= count
+            if self._satellite_worker_count <= 0:
+                self._result_q.put(None)
 
-        def release(self, val):
-            self._on_hold = False
-            self._start_gate.put(val)
-
-        def _register_fixture(self, name, fixture):
-            self._fixtures[name] = self.Value(fixture)
-
-        def _invoke(self, fixture_name):
-            return self._fixtures[fixture_name]
+        def _signal_test_q_exhausted(self):
+            if not self._test_q_exhausted:
+                for _ in range(self._satellite_worker_count):
+                    self._test_q.put(None)
+                self._test_q_exhausted = True
 
     def __init__(self, config):
         super().__init__(config)
@@ -102,16 +209,14 @@ _getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem
 
 
 def _getscopeitem_redirect(self, scope):
-    if scope == "global":
+    if scope == "global" or scope == "node":
         return self._pyfuncitem.getparent(_pytest.main.Session)
     else:
         return _getscopeitem_orig(self, scope)
 
 
 _pytest.fixtures.FixtureRequest._getscopeitem = _getscopeitem_redirect
-_pytest.fixtures.scopename2class.update({"global": Global})
-_pytest.fixtures.scope2props['global'] = ()
-
+_pytest.fixtures.scopename2class.update({"global": Global, "node": Node})
 
 def parse_numprocesses(s):
     """
@@ -158,12 +263,20 @@ def pytest_addoption(parser):
             help="disable any parallel mproc testing, overriding all other mproc arguments",
         )
     group._addoption(
-        "--server_port",
+        "--as-server",
         dest="mproc_server_port",
         metavar="mproc_server_port",
         action="store",
         type=int,
         help="port on which you wish to run server (for multi-host runs only)"
+    )
+    group._addoption(
+        "--as-client",
+        dest="mproc_client_connect",
+        metavar="mproc_client_connect",
+        action="store",
+        type=str,
+        help="host:port specification of master node to connect to as client"
     )
 
 
@@ -175,11 +288,49 @@ def pytest_cmdline_main(config):
 
     Mostly taken from other implementations (such as xdist)
     """
+    worker = getattr(config.option, "mproc_worker", None)
+    # validation
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
+        config.option.is_master = True
+        config.option.mproc_server_host = '127.0.0.1'
+        config.option.mproc_server_port = find_free_port()
+        config.option.mproc_manager = Global.Manager(config)
+        config.option.mproc_node_manager = Node.Manager(config)
         print(">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
               "not running multiprocessing <<<<<")
         return
     config.option.numprocesses = config.option.mproc_numcores  # this is what pycov uses to determine we are distributed
+    mproc_server_port = getattr(config.option, 'mproc_server_port', None)
+    mproc_client_connect = getattr(config.option, "mproc_client_connect", None)
+    if mproc_client_connect and mproc_server_port:
+        raise pytest.UsageError("Cannot specify both -as-master and --as-client at same time")
+    elif mproc_server_port:
+        config.option.is_master = True
+        config.option.mproc_server_host = socket.gethostbyname(socket.gethostname())
+        if not worker:
+            print(f"Running as master: {config.option.mproc_server_host}:{mproc_server_port}")
+        if config.option.numprocesses < 0:
+            raise pytest.UsageError("Number of cores must be greater than or equal to zero when running as a master")
+    elif mproc_client_connect:
+        config.option.is_master = False
+        try:
+            host, port = mproc_client_connect.rsplit(':', maxsplit=1)
+        except Exception:
+            raise pytest.UsageError("--as-client must be specified in form '<host>:<port>' of the master node")
+        try:
+            port = int(port)
+        except ValueError:
+            raise pytest.UsageError("When specifying connection as client, port must be an integer value")
+        config.option.mproc_server_host = host
+        config.option.mproc_server_port = port
+        if config.option.numprocesses < 1:
+            raise pytest.UsageError("Number of cores must be 1 or more when running as client")
+    else:
+        config.option.is_master = True  # we're the only node running
+        config.option.mproc_server_host = '127.0.0.1'
+        config.option.mproc_server_port = None
+        if config.option.numprocesses < 1:
+            raise pytest.UsageError("Number of cores must be 1 or more when running on a single node")
     # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
     config.option.dist = "no"
     val = config.getvalue
@@ -190,75 +341,77 @@ def pytest_cmdline_main(config):
                 raise pytest.UsageError(
                     "--pdb is incompatible with distributing tests."
                 )  # noqa: E501
-
-
-@pytest.mark.trylast
-def pytest_configure(config):
-    config.option.mproc_manager = Global.Manager(config)
-    worker = getattr(config.option, "mproc_worker", None)
-    if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
-        return  # return of None indicates other hook impls will be executed to do the task at hand
-    # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
-    config.option.dist = "no"
+    config.coordinator = None
     if not worker:
         # in main thread,
         # instantiate coordinator here and start to kick off processing on workers early, so they can
         # process config info in parallel to this thread
-        config.coordinator = Coordinator(config.option.mproc_numcores)
-        config.coordinator.start()
+        config.coordinator = Coordinator(config.option.mproc_numcores,
+                                         is_master=config.option.is_master)
+    config.option.mproc_manager = Global.Manager(config)
+    if not worker:
+        config.coordinator.start(config)
+    config.option.mproc_node_manager = Node.Manager(config)
 
 
-global_fixturedefs = {}
+@pytest.mark.trylast
+def pytest_configure(config):
+    worker = getattr(config.option, "mproc_worker", None)
+    server_host = getattr(config.option, "mproc_server_host", None)
+    if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
+        return  # return of None indicates other hook impls will be executed to do the task at hand
+    # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
+    config.option.dist = "no"
 
 
 @pytest.mark.tryfirst
 def pytest_fixture_setup(fixturedef, request):
-    if fixturedef.scope == 'global':
-        name = fixturedef.argname
-        if name in global_fixturedefs:
-            fixturedef.cached_result = global_fixturedefs[name]
-            return fixturedef.cached_result[0]
-        my_cache_key =request.param_index if not hasattr(request, "param") else request.param
-        try:
-            request.config.option.mproc_manager.hold()
-            result = request.config.option.mproc_manager.invoke_fixture(name).value()
-        except _pytest.fixtures.TEST_OUTCOME:
-            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
-            global_fixturedefs[name] = (None, my_cache_key, sys.exc_info())
-            raise
-        if isinstance(result, Exception):
-            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
-            global_fixturedefs[name] = (None, my_cache_key, sys.exc_info())
-            raise result
-        fixturedef.cached_result = (result, my_cache_key, None)
-        global_fixturedefs[name] = (result, my_cache_key, None)
-        return result
+    if fixturedef.scope == 'node':
+        param_index = request.param_index if not hasattr(request, "param") else request.param
+        return request.config.option.mproc_node_manager.get_fixturedef(fixturedef, param_index)
+    elif fixturedef.scope == 'global':
+        return request.config.option.mproc_manager.get_fixturedef(fixturedef, request)
     return _pytest.fixtures.pytest_fixture_setup(fixturedef, request)
 
 
-def process_fixturedef(name: str, item, session, global_fixtures):
+def process_fixturedef(name: str, item, session, global_fixtures, node_fixtures):
     try:
         request = item._request
         fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
         generated = []
         if fixturedef and fixturedef[0].scope == 'global' and name not in global_fixtures:
-            global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
-            val = global_fixtures[name](*fixturedef[0].argnames)
+            if session.config.option.is_master:
+                global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
+                val = global_fixtures[name](*fixturedef[0].argnames)
+                if inspect.isgenerator(val):
+                    generated.append(val)
+                    val = next(val)
+                try:
+                    session.config.option.mproc_manager.register_fixture(name, val)
+                except TypeError as e:
+                    request.config.option.mproc_manager.register_fixture(name, e)
+                    session.should_fail = f">>> Cannot pickle global fixture object: {e}"
+                except Exception as e:
+                    request.config.option.mproc_manager.register_fixture(name, e)
+                    session.should_fail = f">>> Exception in multiprocess communication: {e}"
+        if fixturedef and fixturedef[0].scope == 'node' and name not in node_fixtures:
+            node_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
+            val = node_fixtures[name](*fixturedef[0].argnames)
             if inspect.isgenerator(val):
                 generated.append(val)
                 val = next(val)
             try:
-                session.config.option.mproc_manager.register_fixture(name, val)
+                session.config.option.mproc_node_manager.register_fixture(name, val)
             except TypeError as e:
-                request.config.option.mproc_manager.register_fixture(name, e)
+                request.config.option.mproc_node_manager.register_fixture(name, e)
                 session.should_fail = f">>> Cannot pickle global fixture object: {e}"
             except Exception as e:
-                request.config.option.mproc_manager.register_fixture(name, e)
+                request.config.option.mproc_node_manager.register_fixture(name, e)
                 session.should_fail = f">>> Exception in multiprocess communication: {e}"
 
         if fixturedef:
             for argname in fixturedef[0].argnames:
-                generated += process_fixturedef(argname, item, session, global_fixtures)
+                generated += process_fixturedef(argname, item, session, global_fixtures, node_fixtures)
         return generated
     except Exception as e:
         print(traceback.format_exc())
@@ -269,6 +422,7 @@ def process_fixturedef(name: str, item, session, global_fixtures):
 @pytest.mark.tryfirst
 def pytest_runtestloop(session):
     global_fixtures = {}
+    node_fixtures = {}
     if session.testsfailed and not session.config.option.continue_on_collection_errors:
         raise session.Interrupted("%d errors during collection" % session.testsfailed)
 
@@ -284,18 +438,25 @@ def pytest_runtestloop(session):
             if hasattr(item, "_request"):
 
                 for name in item._fixtureinfo.argnames:
-                    if name not in global_fixtures:
-                        session.config.option.generated += process_fixturedef(name, item, session, global_fixtures)
+                    if name not in global_fixtures and name not in node_fixtures:
+                        session.config.option.generated += process_fixturedef(name, item, session,
+                                                                              global_fixtures, node_fixtures)
                     if session.shouldfail:
                         break
     if session.shouldfail:
         print(f">>> Fixture ERROR: {session.shouldfail}")
-        session.config.option.mproc_manager.release(session.Failed(session.shouldfail))
+        if session.config.option.is_master:
+            session.config.option.mproc_manager.release(session.Failed(session.shouldfail))
+        if worker is None:
+            session.config.option.mproc_node_manager.release(session.Failed(session.shouldfail))
         if not worker and hasattr(session.config, 'coordinator'):
             session.config.coordinator.kill()
         raise session.Failed(session.shouldfail)
     # signals any workers waiting on global fixture(s) to continue
-    session.config.option.mproc_manager.release(True)
+    if worker is None and session.config.option.is_master:
+        session.config.option.mproc_manager.release(True)
+    if worker is None:
+        session.config.option.mproc_node_manager.release(True)
     if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
         # return of None indicates other hook impls will be executed to do the task at hand
         # aka, let the basic hook handle it from here, no distributed processing to be done
@@ -319,8 +480,14 @@ def pytest_runtestloop(session):
 def pytest_sessionfinish(session):
     worker = getattr(session.config.option, "mproc_worker", None)
     if worker is None and hasattr(session.config.option, "mproc_manager"):
+        if session.config.option.mproc_manager.is_master:
+            try:
+                session.config.option.mproc_manager.shutdown()
+            except Exception as e:
+                print(">>> INTERNAL Error shutting down mproc manager")
+    if worker is None and hasattr(session.config.option, "mproc_node_manager"):
         try:
-            session.config.option.mproc_manager.shutdown()
+            session.config.option.mproc_node_manager.shutdown()
         except Exception as e:
             print(">>> INTERNAL Error shutting down mproc manager")
     generated = getattr(session.config.option, "generated", [])
@@ -334,6 +501,7 @@ def pytest_sessionfinish(session):
 ################
 # Process-safe temp dir
 ###############
+
 
 class TmpDirFactory:
 
@@ -368,7 +536,7 @@ class TmpDirFactory:
                 shutil.rmtree(tmpdir)
 
 
-@pytest.fixture(scope='global')
+@pytest.fixture(scope='node')
 def mp_tmpdir_factory():
     """
     :return: a factory for creating unique tmp directories, unique across all Process's

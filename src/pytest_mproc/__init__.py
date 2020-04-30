@@ -21,12 +21,15 @@ def group(name, priority:int = 0):
 
 def resource_utilization(time_span: float, start_rusage, end_rusage):
     if time_span <= 0.001:
-        return -1, -1, end_rusage.ru_maxrss
+        return -1, -1, -1, end_rusage.ru_maxrss
     if sys.platform.lower() == 'darwin':
         # OS X is in bytes
         delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss) / 1000.0
     else:
         delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss)
-    return ((end_rusage.ru_utime - start_rusage.ru_utime) / time_span) * 100.0, \
-           ((end_rusage.ru_stime - start_rusage.ru_stime) / time_span) * 100.0, \
+    ucpu_secs = end_rusage.ru_utime - start_rusage.ru_utime
+    scpu_secs = end_rusage.ru_stime - start_rusage.ru_stime
+    return time_span, \
+           (ucpu_secs / time_span) * 100.0, \
+           (scpu_secs / time_span) * 100.0, \
            delta_mem

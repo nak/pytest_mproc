@@ -62,7 +62,7 @@ class WorkerSession:
         self._buffer_size = 20
         self._timestamp = time.time()
         self._last_execution_time = time.time()
-        self._resource_utilization = -1, -1, -1
+        self._resource_utilization = -1, -1, -1, -1
 
     def _put(self, kind, data):
         """
@@ -104,6 +104,7 @@ class WorkerSession:
 
             if session.testsfailed and not session.config.option.continue_on_collection_errors:
                 raise session.Failed("%d errors during collection" % session.testsfailed)
+                raise session.Failed("%d errors during collection" % session.testsfailed)
 
             if session.config.option.collectonly:
                 return  # should never really get here, but for consistency
@@ -128,9 +129,11 @@ class WorkerSession:
                     self._count += 1
                     self._last_execution_time = time.time()
         finally:
-            self._resource_utilization = resource_utilization(time_span=time.time() - start_time,
+            end_usage = resource.getrusage(resource.RUSAGE_SELF)
+            time_span = self._last_execution_time - start_time
+            self._resource_utilization = resource_utilization(time_span=time_span,
                                                               start_rusage=rusage,
-                                                              end_rusage=resource.getrusage(resource.RUSAGE_SELF))
+                                                              end_rusage=end_usage)
 
     @pytest.mark.tryfirst
     def pytest_collection_finish(self, session):
@@ -150,7 +153,7 @@ class WorkerSession:
     def pytest_internalerror(self, excrepr):
         self._put('error_message', excrepr)
 
-    @pytest.mark.try_first
+    @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_logreport(self, report):
         """
         report only status of calls (not setup or teardown), unless there was an error in those
@@ -159,7 +162,9 @@ class WorkerSession:
         :param report: report to draw info from
         """
         self._put('test_status', report)
+        return True
 
+    @pytest.hookimpl(tryfirst=True)
     def pytest_sessionfinish(self, exitstatus):
         """
         output failure information and final exit status back to coordinator
@@ -169,10 +174,10 @@ class WorkerSession:
         self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time,
                            self._resource_utilization))
         self._flush()
-        self._result_q.close()
+        return True
 
 
-def main(index, test_q, result_q, num_processes):
+def main(index, test_q, result_q, num_processes, node_mgr_port: int):
     """
     main worker function, launched as a multiprocessing Process
 
@@ -180,6 +185,8 @@ def main(index, test_q, result_q, num_processes):
     :param test_q: to draw test names for execution
     :param result_q: to post status and results
     """
+    from .plugin import Node
+    Node.Manager.PORT = node_mgr_port
     args = sys.argv[1:]
     try:
         def generator():
@@ -228,4 +235,3 @@ def main(index, test_q, result_q, num_processes):
     except Exception as e:
         result_q.put(('exception', e))
         result_q.put(('exit', (index, -1, -1, (-1. -1, -1, -1))))
-

@@ -22,6 +22,12 @@ def global_fix(dummy):
     return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
 
 
+@pytest.fixture(scope='node')
+def node_level_fixture():
+    V.value += 1
+    return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
+
+
 @pytest.mark.trylast
 def pytest_sessionfinish(session):
     if not hasattr(session.config.option, "mproc_worker"):

@@ -2,9 +2,9 @@
 This package contains code to coordinate execution from a main thread to worker threads (processes)
 """
 import resource
-import select
 import sys
 import time
+from typing import List, Any
 
 from _pytest.config import _prepareconfig
 from multiprocessing import Process, Queue
@@ -18,32 +18,63 @@ class Coordinator:
     Context manager for kicking of worker Processes to conduct test execution via pytest hooks
     """
 
-    def __init__(self, num_processes):
+    def __init__(self, num_processes, is_master: bool):
         """
         :param num_processes: number of parallel executions to be conducted
         """
         self._num_processes = num_processes
         self._tests = []  # set later
-
+        self._is_master = is_master
         # test_q is for sending test nodeid's to worked
         # result_q is for receiving results as messages, exceptions, test status or any exceptions thrown
-        self._result_qs = [Queue() for _ in range(num_processes)]
-        self._test_q = Queue()
         self._processes = []
         self._count = 0
+        self._rusage = []
         self._session_start_time = time.time()
-        self._process_status_text = ["" for _ in range(num_processes)]
+        self._test_q: Queue = None  # set on call to start()
+        self._result_q: Queue = None  # set on call to start()
 
-    def start(self):
+    @classmethod
+    def do_work(cls, config, num_processes: int, test_q: Queue, result_q: Queue):
+        processes : List[Process] = []
+        for index in range(num_processes):
+            from .plugin import Node
+            proc = Process(target=worker_main, args=(index, test_q, result_q, num_processes, Node.Manager.PORT))
+            processes.append(proc)
+            proc.start()
+        for proc in processes:
+            proc.join()
+        from .plugin import Global
+        client = Global.Manager(config, False)
+        client.signal_satellite_done(num_processes)
+
+    def populate_test_queue(self, tests: List[Any], config):
+        for test in tests:
+            # Function objects in pytest are not pickle-able, so have to send string nodeid and
+            # do lookup on worker side
+            item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
+            self._test_q.put(item)
+            # signal all workers test q is exhausted:
+        from .plugin import Global
+        client = Global.Manager(config, False)
+        client.signal_test_q_exhausted()
+        #for _ in range(self._num_processes):
+        #    self._test_q.put(None)
+
+    def start(self, config):
         """
         Start all worker processes
 
         :return: this object
         """
-        for index in range(self._num_processes):
-            proc = Process(target=worker_main, args=(index, self._test_q, self._result_qs[index], self._num_processes))
-            self._processes.append(proc)
-            proc.start()
+        from .plugin import Global
+        client = Global.Manager(config, False)
+        client.register_satellite(self._num_processes)
+        self._test_q: Queue = client.get_test_queue()
+        self._result_q: Queue = client.get_results_queue()
+        self._worker_manager_process = Process(target=self.do_work,
+                                               args=(config, self._num_processes, self._test_q, self._result_q))
+        self._worker_manager_process.start()
         return self
 
     def set_items(self, tests):
@@ -105,8 +136,10 @@ class Coordinator:
         self._write_sep('=', "STATS")
         sys.stdout.write("User CPU, System CPU utilization, Add'l memory during run\n")
         sys.stdout.write("---------------------------------------------------------\n")
-        for msg in self._process_status_text:
-            sys.stdout.write(msg)
+        for index, (count, duration, ucpu, scpu, mem) in enumerate(self._rusage):
+            sys.stdout.write(f"Process Worker-{index} executed {count} tests in {duration:.2f} " +\
+                             f"seconds; User CPU: {ucpu:.2f}%, Sys CPU: {scpu:.2f}%, " +\
+                             f"Mem consumed: {unshared_mem/1000.0}M\n")
         sys.stdout.write("\n")
         sys.stdout.write(
             f"Process Coordinator executed in {time_span:.2f} seconds. " +
@@ -119,7 +152,7 @@ class Coordinator:
                             self._count, length))
         sys.stdout.flush()
 
-    def _process_worker_message(self, session, typ, data):
+    def _process_worker_message(self, session, typ, data, ):
         """
         Process a message (as a worker) from the coordinating process
 
@@ -141,19 +174,8 @@ class Coordinator:
             elif typ == 'exit':
                 # process is complete, so close it and set to None
                 index, worker_count, exitstatus, duration, rusage = data  # which process and count of tests run
-                name = "worker-%d" % (index + 1)
-                ucpu, scpu, unshared_mem = rusage
-                self._process_status_text[index] = f"Process {name} executed {worker_count} tests in {duration:.2f} " +\
-                                                   f"seconds; User CPU: {ucpu:.2f}%, Sys CPU: {scpu:.2f}%, " +\
-                                                   f"Mem consumed: {unshared_mem/1000.0}M\n"
-                try:
-                    self._processes[index].join(5)
-                except Exception as e:
-                    pass
-                self._processes[index].terminate()
-                self._processes[index] = None
-                self._result_qs[index].close()
-                self._result_qs[index] = None
+                time_span, ucpu, scpu, unshared_mem = rusage
+                self._rusage.append((worker_count, time_span, ucpu, scpu, unshared_mem))
             elif typ == 'error_message':
                 error_msg_text = data
                 sys.stdout.write("{}\n".format(error_msg_text))
@@ -164,6 +186,13 @@ class Coordinator:
         except Exception as e:
             sys.stdout.write("INTERNAL_ERROR> %s\n" % str(e))
 
+    def read_results(self, session):
+        items = self._result_q.get()
+        while items is not None:
+            for kind, data in items:
+                self._process_worker_message(session, kind, data)
+            items = self._result_q.get()
+
     def run(self, session):
         """
         Populate test queue and continue to process messages from worker Processes until they complete
@@ -172,39 +201,20 @@ class Coordinator:
         """
         start_rusage = resource.getrusage(resource.RUSAGE_SELF)
         start_time = time.time()
-        reader_mapping = {q._reader: q for q in self._result_qs}
 
-        def read_results(timeout=0):
-            available_qs = [q._reader for q in self._result_qs if q is not None]
-            (inputs, _, _) = select.select(available_qs, [], [], timeout)
-            while inputs:
-                for input in inputs:
-                    items = reader_mapping[input].get()
-                    for kind, data in items:
-                        self._process_worker_message(session, kind, data)
-                available_qs = [q._reader for q in self._result_qs if q is not None]
-                (inputs, _, _) = select.select(available_qs, [], [], timeout)
-
-        #while any(self._result_qs):
-        for test in self._tests:
-            if all([q is None for q in self._result_qs]):
-                raise Exception("Tests remain but no workers left to process them!")
-            read_results()
-            # Function objects in pytest are not pickle-able, so have to send string nodeid and
-            # do lookup on worker side
-            item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
-            self._test_q.put(item)
-
-        read_results()
-        for _ in self._processes:
-            self._test_q.put(None)  # signals end
-
-        while any([q is not None for q in self._result_qs]):
-            read_results(timeout=1)
-        self._test_q.close()
+        # we are the root node, so populate the tests
+        if self._is_master:
+            populate_tests_process = Process(target=self.populate_test_queue, args=(self._tests, session.config))
+            populate_tests_process.start()
+            self.read_results(session)  # only master will read results and post reports through pytest
+            populate_tests_process.join(timeout=1)  # should never time out since workers are done
+        self._worker_manager_process.join()
+        if self._is_master:
+            self._test_q.close()
+            self._result_q.close()
         end_rusage = resource.getrusage(resource.RUSAGE_SELF)
         time_span = time.time() - start_time
-        ucpu, scpu, addl_mem_usg = resource_utilization(time_span=time_span,
+        time_span, ucpu, scpu, addl_mem_usg = resource_utilization(time_span=time_span,
                                                         start_rusage=start_rusage,
                                                         end_rusage=end_rusage)
 
