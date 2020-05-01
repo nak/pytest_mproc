@@ -242,6 +242,7 @@ will act as clients -- executing tests and reporting status back the the master 
 use the "--as-server" command line argument, specifying the port the server will listen on:
 
 .. code-block:: shell
+
    % pytest --num_cores <N> --as-server <port> ...
 
 If N is zero, the process will wait indefinitely for workers on other nodes to be created to do the testing.  In
@@ -252,6 +253,7 @@ remaining the queue and execute in parallel to the master.
 To start the client nodes:
 
 .. code-block:: shell
+
    % pytest --num_cores <N> --as-client <host>:<port>
 
 Here, N must be greater than or equal to 1;  multiple workers can be invoked on a node, with possibly multiple client
@@ -275,6 +277,7 @@ machines (so thinkg carefully about what you are providing in your *global* fixt
 To declare a fixture to be scoped to a node:
 
 .. code-block:: python
+
    @pytest.fixture(scope='node')
    def node_scoped_fixture_function():
        ...
