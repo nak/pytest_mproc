@@ -273,7 +273,8 @@ def pytest_runtestloop(session):
             session.config.mproc_global_manager.release(session.Failed(session.shouldfail))
         if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
             session.config.mproc_node_manager.release(session.Failed(session.shouldfail))
-            session.config.coordinator.kill()
+            if hasattr(session.config, "coordinator"):
+                session.config.coordinator.kill()
         raise session.Failed(session.shouldfail)
     # signals any workers waiting on global fixture(s) to continue
     if mpconfig.role == RoleEnum.MASTER:
