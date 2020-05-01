@@ -1,5 +1,7 @@
 import inspect
+import socket
 import sys
+from contextlib import closing
 
 
 def group(name, priority:int = 0):
@@ -33,3 +35,10 @@ def resource_utilization(time_span: float, start_rusage, end_rusage):
            (ucpu_secs / time_span) * 100.0, \
            (scpu_secs / time_span) * 100.0, \
            delta_mem
+
+
+def find_free_port():
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]

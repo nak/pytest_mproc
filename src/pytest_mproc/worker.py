@@ -9,6 +9,8 @@ import pytest_cov.embed
 import resource
 
 from pytest_mproc import resource_utilization
+from pytest_mproc.config import MPManagerConfig, RoleEnum
+from pytest_mproc.fixtures import Global
 
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
@@ -49,7 +51,8 @@ class WorkerSession:
     Handles reporting of test status and the like
     """
 
-    def __init__(self, index, result_q, test_generator):
+    def __init__(self, index, result_q, test_generator, is_remote: bool):
+        self._is_remote = is_remote
         self._result_q = result_q
         self._index = index
         self._test_generator = test_generator
@@ -71,6 +74,8 @@ class WorkerSession:
         :param kind: kind of data
         :param data: test result data to publih to queue
         """
+        if self._is_remote and kind == 'test_status':
+            os.write(sys.stderr.fileno(), b'.')
         self._buffered_results.append((kind, data))
         if len(self._buffered_results) >= self._buffer_size or (time.time() - self._timestamp) > MAX_REPORTING_INTERVAL:
             self._flush()
@@ -108,7 +113,6 @@ class WorkerSession:
 
             if session.config.option.collectonly:
                 return  # should never really get here, but for consistency
-
             for items in session.items:
                 # test item comes through as a unique string nodeid of the test
                 # We use the pytest-collected mapping we squirrelled away to look up the
@@ -177,7 +181,7 @@ class WorkerSession:
         return True
 
 
-def main(index, test_q, result_q, num_processes, node_mgr_port: int):
+def main(index, mpconfig: MPManagerConfig, is_remote: bool):
     """
     main worker function, launched as a multiprocessing Process
 
@@ -185,8 +189,9 @@ def main(index, test_q, result_q, num_processes, node_mgr_port: int):
     :param test_q: to draw test names for execution
     :param result_q: to post status and results
     """
-    from .plugin import Node
-    Node.Manager.PORT = node_mgr_port
+    client = Global.Manager(mpconfig, force_as_client=True)
+    test_q = client.get_test_queue()
+    result_q = client.get_results_queue()
     args = sys.argv[1:]
     try:
         def generator():
@@ -211,7 +216,7 @@ def main(index, test_q, result_q, num_processes, node_mgr_port: int):
         # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
         config.pluginmanager.unregister(name="terminal")
         # register our listener, and configure to let pycov-test knoew that we are a slave (aka worker) thread
-        worker = WorkerSession(index, result_q, generator())
+        worker = WorkerSession(index, result_q, generator(), is_remote)
         config.pluginmanager.register(worker, "mproc_worker")
         config.option.mproc_worker = worker
         # setup slave info;  this is important to have something defined for these fields
@@ -219,14 +224,16 @@ def main(index, test_q, result_q, num_processes, node_mgr_port: int):
         # and that this a worker(slave) process
         workerinput = {'slaveid': "worker-%d" % index,
                        'workerid': "worker-%d" % index,
-                       "workercount": num_processes,
-                       "slavecount": num_processes,
+                       "workercount": mpconfig.num_processes,
+                       "slavecount": mpconfig.num_processes,
                        'cov_master_host': socket.gethostname(),
                        'cov_slave_output': os.path.join(os.getcwd(), "worker-%d" % index),
                        'cov_master_topdir': os.getcwd()
                        }
         config.slaveinput = workerinput
         config.slaveoutput = workerinput
+        config.option.mpconfig = mpconfig
+        assert(mpconfig.role == RoleEnum.WORKER)
         try:
             # and away we go....
             config.hook.pytest_cmdline_main(config=config)

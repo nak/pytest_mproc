@@ -10,7 +10,9 @@ from _pytest.config import _prepareconfig
 from multiprocessing import Process, Queue
 
 from pytest_mproc import resource_utilization
+from pytest_mproc.config import MPManagerConfig, RoleEnum
 from pytest_mproc.worker import main as worker_main
+from pytest_mproc.fixtures import Global
 
 
 class Coordinator:
@@ -18,13 +20,13 @@ class Coordinator:
     Context manager for kicking of worker Processes to conduct test execution via pytest hooks
     """
 
-    def __init__(self, num_processes, is_master: bool):
+    def __init__(self, config: MPManagerConfig):
         """
         :param num_processes: number of parallel executions to be conducted
         """
-        self._num_processes = num_processes
+        self._num_processes = config.num_processes
         self._tests = []  # set later
-        self._is_master = is_master
+        self._role = config.role
         # test_q is for sending test nodeid's to worked
         # result_q is for receiving results as messages, exceptions, test status or any exceptions thrown
         self._processes = []
@@ -33,87 +35,6 @@ class Coordinator:
         self._session_start_time = time.time()
         self._test_q: Queue = None  # set on call to start()
         self._result_q: Queue = None  # set on call to start()
-
-    @classmethod
-    def do_work(cls, config, num_processes: int, test_q: Queue, result_q: Queue):
-        processes : List[Process] = []
-        for index in range(num_processes):
-            from .plugin import Node
-            proc = Process(target=worker_main, args=(index, test_q, result_q, num_processes, Node.Manager.PORT))
-            processes.append(proc)
-            proc.start()
-        for proc in processes:
-            proc.join()
-        from .plugin import Global
-        client = Global.Manager(config, False)
-        client.signal_satellite_done(num_processes)
-
-    def populate_test_queue(self, tests: List[Any], config):
-        for test in tests:
-            # Function objects in pytest are not pickle-able, so have to send string nodeid and
-            # do lookup on worker side
-            item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
-            self._test_q.put(item)
-            # signal all workers test q is exhausted:
-        from .plugin import Global
-        client = Global.Manager(config, False)
-        client.signal_test_q_exhausted()
-        #for _ in range(self._num_processes):
-        #    self._test_q.put(None)
-
-    def start(self, config):
-        """
-        Start all worker processes
-
-        :return: this object
-        """
-        from .plugin import Global
-        client = Global.Manager(config, False)
-        client.register_satellite(self._num_processes)
-        self._test_q: Queue = client.get_test_queue()
-        self._result_q: Queue = client.get_results_queue()
-        self._worker_manager_process = Process(target=self.do_work,
-                                               args=(config, self._num_processes, self._test_q, self._result_q))
-        self._worker_manager_process.start()
-        return self
-
-    def set_items(self, tests):
-        """
-        :param tests: the items containing the pytest hooks to the tests to be run
-        """
-        grouped = [t for t in tests if getattr(t._pyfuncitem.obj, "_pytest_group", None)]
-        self._tests = [t for t in tests if t not in grouped]
-        groups = {}
-        for g in grouped:
-            name, priority = g._pyfuncitem.obj._pytest_group
-            groups.setdefault((name, priority), []).append(g)
-        for key in sorted(groups.keys(), key=lambda x: x[1]):
-            self._tests.insert(0, groups[key])
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
-
-    def kill(self):
-        for proc in self._processes:
-            if proc:
-                proc.terminate()
-
-    def stop(self, delay=None):
-        # shouldn't be any procs left, but just in case
-        for proc in self._processes:
-            if proc:
-                try:
-                    if delay is not None:
-                        proc.join(delay)
-                except Exception:
-                    pass
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
 
     @staticmethod
     def _write_sep(s, txt):
@@ -147,12 +68,12 @@ class Coordinator:
             f"Mem consumed: {unshared_mem/1000.0}M\n"
         )
         length = sum([1 if not isinstance(t, list) else len(t) for t in self._tests])
-        if self._count != length:
+        if self._count != length and self._role == RoleEnum.MASTER:
             self._write_sep('!', "{} tests unaccounted for {} out of {}".format(length - self._count,
                             self._count, length))
         sys.stdout.flush()
 
-    def _process_worker_message(self, session, typ, data, ):
+    def _process_worker_message(self, hook, typ, data, ):
         """
         Process a message (as a worker) from the coordinating process
 
@@ -168,7 +89,7 @@ class Coordinator:
                 report = data
                 if report.when == 'call' or (report.when == 'setup' and not report.passed):
                     self._count += 1
-                session.config.hook.pytest_runtest_logreport(report=report)
+                hook.pytest_runtest_logreport(report=report)
                 if report.failed:
                     sys.stdout.write("\n%s FAILED\n" % report.nodeid)
             elif typ == 'exit':
@@ -186,12 +107,90 @@ class Coordinator:
         except Exception as e:
             sys.stdout.write("INTERNAL_ERROR> %s\n" % str(e))
 
-    def read_results(self, session):
+    def read_results(self, hook):
         items = self._result_q.get()
         while items is not None:
+            if isinstance(items, Exception):
+                raise Exception
             for kind, data in items:
-                self._process_worker_message(session, kind, data)
+                self._process_worker_message(hook, kind, data)
             items = self._result_q.get()
+
+    def do_work(self, mpconfig: MPManagerConfig):
+        processes : List[Process] = []
+        for index in range(mpconfig.num_processes):
+            args = mpconfig.__dict__
+            args.update({'role': RoleEnum.WORKER})
+            worker_config = MPManagerConfig(**args)
+            proc = Process(target=worker_main, args=(index, worker_config, mpconfig.role != RoleEnum.MASTER))
+            processes.append(proc)
+            proc.start()
+        for proc in processes:
+            proc.join()
+        client = Global.Manager(mpconfig, force_as_client=True)
+        client.signal_satellite_done(mpconfig.num_processes)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+    def populate_test_queue(self, tests: List[Any], mpconfig: MPManagerConfig):
+        for test in tests:
+            # Function objects in pytest are not pickle-able, so have to send string nodeid and
+            # do lookup on worker side
+            item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
+            self._test_q.put(item)
+            # signal all workers test q is exhausted:
+        client = Global.Manager(mpconfig, force_as_client=True)
+        client.signal_test_q_exhausted()
+
+    def start(self, mpconfig: MPManagerConfig):
+        """
+        Start all worker processes
+
+        :return: this object
+        """
+        client = Global.Manager(mpconfig, force_as_client=True)
+        client.register_satellite(mpconfig.num_processes)
+        self._test_q: Queue = client.get_test_queue()
+        self._result_q: Queue = client.get_results_queue()
+        self._worker_manager_process = Process(target=self.do_work, args=(mpconfig,))
+        self._worker_manager_process.start()
+        return self
+
+    def set_items(self, tests):
+        """
+        :param tests: the items containing the pytest hooks to the tests to be run
+        """
+        grouped = [t for t in tests if getattr(t._pyfuncitem.obj, "_pytest_group", None)]
+        self._tests = [t for t in tests if t not in grouped]
+        groups = {}
+        for g in grouped:
+            name, priority = g._pyfuncitem.obj._pytest_group
+            groups.setdefault((name, priority), []).append(g)
+        for key in sorted(groups.keys(), key=lambda x: x[1]):
+            self._tests.insert(0, groups[key])
+
+    def kill(self):
+        for proc in self._processes:
+            if proc:
+                proc.terminate()
+
+    def stop(self, delay=None):
+        # shouldn't be any procs left, but just in case
+        for proc in self._processes:
+            if proc:
+                try:
+                    if delay is not None:
+                        proc.join(delay)
+                except Exception:
+                    pass
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
 
     def run(self, session):
         """
@@ -201,22 +200,22 @@ class Coordinator:
         """
         start_rusage = resource.getrusage(resource.RUSAGE_SELF)
         start_time = time.time()
-
+        mpconfig = session.config.option.mpconfig
         # we are the root node, so populate the tests
-        if self._is_master:
-            populate_tests_process = Process(target=self.populate_test_queue, args=(self._tests, session.config))
+        if mpconfig.role == RoleEnum.MASTER:
+            populate_tests_process = Process(target=self.populate_test_queue, args=(self._tests, mpconfig))
             populate_tests_process.start()
-            self.read_results(session)  # only master will read results and post reports through pytest
+            self.read_results(session.config.hook)  # only master will read results and post reports through pytest
             populate_tests_process.join(timeout=1)  # should never time out since workers are done
         self._worker_manager_process.join()
-        if self._is_master:
+        if mpconfig.role == RoleEnum.MASTER:
             self._test_q.close()
             self._result_q.close()
         end_rusage = resource.getrusage(resource.RUSAGE_SELF)
         time_span = time.time() - start_time
         time_span, ucpu, scpu, addl_mem_usg = resource_utilization(time_span=time_span,
-                                                        start_rusage=start_rusage,
-                                                        end_rusage=end_rusage)
+                                                                   start_rusage=start_rusage,
+                                                                   end_rusage=end_rusage)
 
         sys.stdout.write("\r\n")
         self._output_summary(time_span, ucpu, scpu, addl_mem_usg)

@@ -227,3 +227,56 @@ A Safe *tmpdir* Fixture
 *mp_tmpdir* directory for creating a single temporary directory.  Other plugins providing similar featurs can have
 race conditions causing intermittent (if infrequent) failures.  This plugin guarantees to be free of race conditions
 and safe in the context of *pytest_mproc*'s concrurrent test framework.
+
+Advanced: Testing on a Distributed Set of Machines
+==================================================
+
+*pytest_mproc* has support for running test distributed across multiple mahcines.
+
+.. caution::
+   This feature may not be as robust aginast fault tolerance.  The basic functionality exists, but robustness
+   against exception in fixtures, etc., has not been fully tested
+
+The concept is that one node will act as the master node, collecting and reporting test status, while all others
+will act as clients -- executing tests and reporting status back the the master node.  To start the master node,
+use the "--as-server" command line argument, specifying the port the server will listen on:
+
+.. code-block:: shell
+   % pytest --num_cores <N> --as-server <port> ...
+
+If N is zero, the process will wait indefinitely for workers on other nodes to be created to do the testing.  In
+this case, not tests will be executed on the master node.  If N > 0, then test execution will start immediately
+on the master node following test setup;  as workers on other nodes come on line, they will pull tests from those
+remaining the queue and execute in parallel to the master.
+
+To start the client nodes:
+
+.. code-block:: shell
+   % pytest --num_cores <N> --as-client <host>:<port>
+
+Here, N must be greater than or equal to 1;  multiple workers can be invoked on a node, with possibly multiple client
+nodes. The client will attempt to connect to the master for a period of 30 seconds at which point it gives up and
+exits with na error.
+
+.. note::
+   *pytest_mproc* does not have the facilities to launch testing on other external nodes.  The checkout of code on
+   client machines and execution of the pytest command on client nodes falls outside of *pytest_mproc*'s scope
+
+
+'*node*' Scoped Fixtures
+------------------------
+
+With the system now allowing execution of mutliple workers on a single machine, and execution across multiple machines,
+this introduces a new level of scoping of fixtures:  *node*-scoped fixtures.  A fixture scoped to '*node*' is
+instantiated once per node and such instance is only available to workers on that node.  The '*global*'-scoped fixtures
+still hold the meaning of being scoped to the entirety of testing, one instance available to all workers across all
+machines (so thinkg carefully about what you are providing in your *global* fixture!).
+
+To declare a fixture to be scoped to a node:
+
+.. code-block:: python
+   @pytest.fixture(scope='node')
+   def node_scoped_fixture_function():
+       ...
+
+
