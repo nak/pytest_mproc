@@ -9,7 +9,7 @@ from pytest_mproc.plugin import TmpDirFactory
 
 @pytest.fixture(scope='global')
 def dummy():
-    pass
+    return [None]
 
 
 class V:

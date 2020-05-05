@@ -109,7 +109,6 @@ class WorkerSession:
 
             if session.testsfailed and not session.config.option.continue_on_collection_errors:
                 raise session.Failed("%d errors during collection" % session.testsfailed)
-                raise session.Failed("%d errors during collection" % session.testsfailed)
 
             if session.config.option.collectonly:
                 return  # should never really get here, but for consistency
@@ -186,8 +185,6 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
     main worker function, launched as a multiprocessing Process
 
     :param index: index assigned to the worker Process
-    :param test_q: to draw test names for execution
-    :param result_q: to post status and results
     """
     client = Global.Manager(mpconfig, force_as_client=True)
     test_q = client.get_test_queue()

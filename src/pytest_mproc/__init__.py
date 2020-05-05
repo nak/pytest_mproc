@@ -4,7 +4,7 @@ import sys
 from contextlib import closing
 
 
-def group(name, priority:int = 0):
+def group(name, priority: int = 0):
     """
     Decorator for grouping tests or a class of tests
     :param name: unique name for group of tests to be serialized under execution

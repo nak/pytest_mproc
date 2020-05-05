@@ -7,7 +7,6 @@ from typing import Any
 
 import _pytest
 
-from pytest_mproc import find_free_port
 from pytest_mproc.config import MPManagerConfig, RoleEnum
 
 _getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem

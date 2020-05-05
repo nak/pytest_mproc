@@ -44,7 +44,7 @@ else
     echo -e "\e[32mPASSED: \e[39m No internal errors persent in user-side exception"
 fi;
 
-if test -z "`grep Traceback output_fixture_exception.txt`"; then
+if test -z "`grep "Exception: Forced exception for test purposes" output_fixture_exception.txt`"; then
    echo -e "\e[31mFAILED: \e[39m Failed to produce traceback from user-exception in global test fixture"
    cat $OUTPUT_EXC
    exit 7

@@ -189,7 +189,9 @@ def pytest_configure(config):
 
 @pytest.mark.tryfirst
 def pytest_fixture_setup(fixturedef, request):
-    if fixturedef.scope == 'node':
+    if not getattr(request.config.option, "mproc_numcores"):
+        pass
+    elif fixturedef.scope == 'node':
         param_index = request.param_index if not hasattr(request, "param") else request.param
         return request.config.mproc_node_manager.get_fixturedef(fixturedef, param_index)
     elif fixturedef.scope == 'global':
@@ -210,6 +212,8 @@ def process_fixturedef(name: str, item, session, global_fixtures, node_fixtures)
                 generated.append(val)
                 val = next(val)
             try:
+                if val is None:
+                    raise ValueError(f"Cannot have None global fixture value from fixture '{name}'")
                 session.config.mproc_global_manager.register_fixture(name, val)
             except TypeError as e:
                 request.config.mproc_global_manager.register_fixture(name, e)
@@ -225,6 +229,8 @@ def process_fixturedef(name: str, item, session, global_fixtures, node_fixtures)
                 generated.append(val)
                 val = next(val)
             try:
+                if val is None:
+                    raise ValueError("Cannot have None node-level fixture value from fixture '{name}'")
                 session.config.mproc_node_manager.register_fixture(name, val)
             except TypeError as e:
                 request.config.mproc_node_manager.register_fixture(name, e)
@@ -254,6 +260,11 @@ def pytest_runtestloop(session):
     if session.config.option.collectonly:
         return  # should never really get here, but for consistency
 
+    if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
+        # return of None indicates other hook impls will be executed to do the task at hand
+        # aka, let the basic hook handle it from here, no distributed processing to be done
+        return
+
     session.generated_fixtures = []
     if mpconfig.role != RoleEnum.WORKER:
         for item in session.items:
@@ -281,10 +292,6 @@ def pytest_runtestloop(session):
         session.config.mproc_global_manager.release(True)
     if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
         session.config.mproc_node_manager.release(True)
-    if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
-        # return of None indicates other hook impls will be executed to do the task at hand
-        # aka, let the basic hook handle it from here, no distributed processing to be done
-        return
 
     if mpconfig.role != RoleEnum.WORKER:
         if not session.config.getvalue("collectonly"):
