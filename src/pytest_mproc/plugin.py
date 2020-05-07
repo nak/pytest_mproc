@@ -332,12 +332,20 @@ def pytest_sessionfinish(session):
         except Exception as e:
             print(">>> INTERNAL Error shutting down mproc manager")
     generated = getattr(session, "generated_fixtures", [])
+    errors = []
     for item in generated:
         try:
-            next(item)
-            raise Exception(f"Fixture generator did not stop {item}")
-        except StopIteration:
-            pass
+            try:
+                next(item)
+                raise Exception(f"Fixture generator did not stop {item}")
+            except StopIteration:
+                pass
+        except Exception as e:
+            print(f">>> Error in exit of fixture context {e}")
+            errors.append(e)
+    if errors:
+        raise pytest.UsageError(">>> One or more global or node-level fixtures threw an Exception on exit from context") \
+            from errors[0]
 
 ################
 # Process-safe temp dir
