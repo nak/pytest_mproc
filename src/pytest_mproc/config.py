@@ -1,5 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from multiprocessing import Queue
+from typing import Dict, List, Optional
 
 from pytest_mproc import find_free_port
 
@@ -18,5 +20,5 @@ class MPManagerConfig:
     global_mgr_port: int
     node_mgr_host: str = '127.0.0.1'
     node_mgr_port: int = find_free_port()
-
-
+    global_fixtures: Optional[Dict] = None
+    node_fixtures: Optional[Dict] = None

@@ -40,65 +40,26 @@ class FixtureManager(BaseManager):
         self._fixtures = {}
         self._is_master = is_master
         if not is_master:
-            self.__class__.register("register_fixture")
-            self.__class__.register("invoke_fixture")
             self.__class__.register("get_start_gate")
+            self.__class__.register("get_fixtures")
+            self.__class__.register("register_fixtures")
         else:
             self._start_gate = Queue()
+            self._gate = Queue()
             self.__class__.register("get_start_gate", lambda: self._start_gate)
-            self.__class__.register("register_fixture", self._register_fixture)
-            self.__class__.register("invoke_fixture", self._invoke)
+            self.__class__.register("get_fixtures", self._get_fixtures)
+            self.__class__.register("register_fixtures", self._register_fixtures)
         super().__init__((host, port), authkey=b'pass')
         self._on_hold = True
 
-    def hold(self):
-        """
-        Hold up processing node or global level fixturedef (as worker thread) until master thread has processed
-        all of those types of fixtures
-        """
-        if not self._on_hold:
-            return
-        start_gate = self.get_start_gate()
-        v = start_gate.get()
-        self._on_hold = False
-        start_gate.put(v)
-        if isinstance(v, Exception):
-            raise v
+    def _get_fixtures(self):
+        v =self._gate.get()
+        self._gate.put(v)
+        return self._global_fixturedefs
 
-    def release(self, val):
-        """
-        Called from master thread to signal worker threads all node/global fixtures are catalogued
-        """
-        self._on_hold = False
-        self._start_gate.put(val)
-
-    def _register_fixture(self, name, fixture):
-        assert name not in self._fixtures, f"INTERNAL ERROR: {name} already in {self._fixtures}"
-        self._fixtures[name] = self.Value(fixture)
-
-    def _invoke(self, fixture_name):
-        return self._fixtures[fixture_name]
-
-    def get_fixturedef(self, fixturedef, param_index, ):
-        name = fixturedef.argname
-        if name in self.fixturedefs:
-            fixturedef.cached_result = self.fixturedefs[name]
-            return fixturedef.cached_result[0]
-        my_cache_key = param_index
-        try:
-            self.hold()
-            result = self.invoke_fixture(name).value()
-        except _pytest.fixtures.TEST_OUTCOME:
-            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
-            self.fixturedefs[name] = (None, my_cache_key, sys.exc_info())
-            raise
-        if isinstance(result, Exception):
-            fixturedef.cached_result = (None, my_cache_key, sys.exc_info())
-            self.fixturedefs[name] = (None, my_cache_key, sys.exc_info())
-            raise result
-        fixturedef.cached_result = (result, my_cache_key, None)
-        self.fixturedefs[name] = (result, my_cache_key, None)
-        return result
+    def _register_fixtures(self, fixturedefs):
+        self._gate.put(True)
+        self._global_fixturedefs = fixturedefs
 
 
 class Node(_pytest.main.Session):
@@ -106,11 +67,11 @@ class Node(_pytest.main.Session):
     class Manager(FixtureManager):
         fixturedefs = {}
 
-        def __init__(self, config: MPManagerConfig):
+        def __init__(self, config: MPManagerConfig, force_as_client: bool = False):
             # scope to node: only run on localhost with random port
-            as_master =config.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]
+            as_master = not force_as_client and (config.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR])
             super().__init__(config.node_mgr_host, config.node_mgr_port, as_master)
-            if as_master:
+            if as_master and not force_as_client:
                 super().start()
             else:
                 super().connect()
@@ -125,6 +86,8 @@ class Global(_pytest.main.Session):
         def __init__(self, config: MPManagerConfig, force_as_client: bool = False):
             self._satellite_worker_count = 0
             self._test_q_exhausted = False
+            self._mpconfig = config
+            self._global_fixturedefs = {}
             if config.role != RoleEnum.MASTER or force_as_client:
                 # client
                 Global.Manager.register("get_test_queue")

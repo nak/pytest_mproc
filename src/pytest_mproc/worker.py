@@ -2,6 +2,7 @@ import os
 import socket
 import sys
 import time
+from multiprocessing import Queue
 
 import pytest
 from _pytest.config import _prepareconfig, ConftestImportFailure
@@ -51,7 +52,7 @@ class WorkerSession:
     Handles reporting of test status and the like
     """
 
-    def __init__(self, index, result_q, test_generator, is_remote: bool):
+    def __init__(self, index, result_q: Queue, test_generator, is_remote: bool):
         self._is_remote = is_remote
         self._result_q = result_q
         self._index = index
@@ -186,19 +187,22 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
 
     :param index: index assigned to the worker Process
     """
+
+    def generator():
+        try:
+            test = test_q.get()
+            while test:
+                yield test
+                test = test_q.get()
+        except Empty:
+            raise StopIteration
+
     client = Global.Manager(mpconfig, force_as_client=True)
     test_q = client.get_test_queue()
     result_q = client.get_results_queue()
     args = sys.argv[1:]
+    worker = WorkerSession(index, result_q, generator(), is_remote)
     try:
-        def generator():
-            try:
-                test = test_q.get()
-                while test:
-                    yield test
-                    test = test_q.get()
-            except Empty:
-                raise StopIteration
 
         try:
             # use pytest's usual method to prepare configuration
@@ -208,12 +212,12 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
             # to xdist's use of rsync
             config = _prepareconfig(args, plugins=[])
         except ConftestImportFailure as e:
-            result_q.put(('exception', e))
+            worker._put(('exception', e))
+            worker._flush()
         # unregister terminal (don't want to output to stdout from worker)
         # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
         config.pluginmanager.unregister(name="terminal")
         # register our listener, and configure to let pycov-test knoew that we are a slave (aka worker) thread
-        worker = WorkerSession(index, result_q, generator(), is_remote)
         config.pluginmanager.register(worker, "mproc_worker")
         config.option.mproc_worker = worker
         # setup slave info;  this is important to have something defined for these fields
@@ -229,7 +233,10 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
                        }
         config.slaveinput = workerinput
         config.slaveoutput = workerinput
+        mpconfig.role = RoleEnum.WORKER
         config.option.mpconfig = mpconfig
+        config.option.mpconfig.node_fixtures = None
+        config.option.mpconfig.global_fixtures = None
         assert(mpconfig.role == RoleEnum.WORKER)
         try:
             # and away we go....
@@ -237,5 +244,6 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
         finally:
             config._ensure_unconfigure()
     except Exception as e:
-        result_q.put(('exception', e))
-        result_q.put(('exit', (index, -1, -1, (-1. -1, -1, -1))))
+        worker._put('exception', e)
+        worker._put('exit', (index, -1, -1, (-1. -1, -1, -1)))
+        worker._flush()

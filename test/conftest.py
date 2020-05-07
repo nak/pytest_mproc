@@ -1,6 +1,8 @@
 #import explicitly, as entrypoint not present during test  (only after setup.py and dist file created)
 #from pytest_mproc.plugin import *  # noqa
+import multiprocessing
 import os
+from multiprocessing import Queue
 
 import pytest
 
@@ -10,6 +12,15 @@ from pytest_mproc.plugin import TmpDirFactory
 @pytest.fixture(scope='global')
 def dummy():
     return [None]
+
+
+@pytest.fixture(scope='node')
+def queue_fixture():
+    # cannot be shared at global level, so must be node-scoped
+    # (will raise  mnultiprocessing.context.AuthenticationError: digest sent was rejected
+    #  when sharing queue across machines)
+    m = multiprocessing.Manager()
+    return m.Queue()
 
 
 class V:
@@ -28,7 +39,7 @@ def node_level_fixture():
     return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
 
 
-@pytest.mark.trylast
-def pytest_sessionfinish(session):
-    if not hasattr(session.config.option, "mproc_worker"):
-        assert not os.path.exists(TmpDirFactory._root_tmp_dir), f"Failed to cleanup temp dirs"
+#@pytest.mark.trylast
+#def pytest_sessionfinish(session):
+#    if not hasattr(session.config.option, "mproc_worker"):
+#       assert not os.path.exists(TmpDirFactory._root_tmp_dir), f"Failed to cleanup temp dirs"
