@@ -19,10 +19,19 @@ from pytest_mproc.fixtures import Node, Global
 
 import pytest
 import _pytest.terminal
+import socket
 
 from multiprocessing import cpu_count
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.utils import is_degraded
+
+
+def _get_ip_addr():
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except Exception:
+        print(">>> Cannot get ip address of host.  Return 127.0.0.1 (localhost)")
+        return "127.0.0.1"
 
 
 def parse_numprocesses(s):
@@ -111,7 +120,7 @@ def pytest_cmdline_main(config):
                             (mproc_server_port is None and mproc_client_connect is None)) else \
         RoleEnum.COORDINATOR
     if role == RoleEnum.MASTER:
-        print(f"Running as {role}: {socket.gethostbyname(socket.gethostname())}:{mproc_server_port}")
+        print(f"Running as {role}: {_get_ip_addr()}:{mproc_server_port}")
 
     # validation
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
@@ -130,7 +139,7 @@ def pytest_cmdline_main(config):
     elif mproc_server_port:
         if config.option.numprocesses < 0:
             raise pytest.UsageError("Number of cores must be greater than or equal to zero when running as a master")
-        mpconfig = MPManagerConfig(global_mgr_host=socket.gethostbyname(socket.gethostname()),
+        mpconfig = MPManagerConfig(global_mgr_host=_get_ip_addr(),
                                    global_mgr_port=mproc_server_port,
                                    role=role,
                                    num_processes=config.option.mproc_numcores)
@@ -248,6 +257,8 @@ def process_fixturedef(name: str, item, session, global_fixtures, node_fixtures)
         return generated
     except Exception as e:
         print(traceback.format_exc())
+        if hasattr(session.config, "coordinator"):
+            session.config.coordinator.kill()
         session.shouldfail = str(e)
         return generated
 
