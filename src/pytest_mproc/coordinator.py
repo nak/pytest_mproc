@@ -2,12 +2,13 @@
 This package contains code to coordinate execution from a main thread to worker threads (processes)
 """
 import resource
+import signal
 import sys
 import time
 from typing import List, Any
 
 from _pytest.config import _prepareconfig
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Semaphore
 
 from pytest_mproc import resource_utilization
 from pytest_mproc.config import MPManagerConfig, RoleEnum
@@ -29,7 +30,6 @@ class Coordinator:
         self._role = config.role
         # test_q is for sending test nodeid's to worked
         # result_q is for receiving results as messages, exceptions, test status or any exceptions thrown
-        self._processes = []
         self._count = 0
         self._rusage = []
         self._session_start_time = time.time()
@@ -116,7 +116,7 @@ class Coordinator:
                 self._process_worker_message(hook, kind, data)
             items = self._result_q.get()
 
-    def do_work(self, mpconfig: MPManagerConfig):
+    def do_work(self, mpconfig: MPManagerConfig, start_sem: Semaphore):
         processes : List[Process] = []
         for index in range(mpconfig.num_processes):
             args = mpconfig.__dict__
@@ -125,6 +125,17 @@ class Coordinator:
             proc = Process(target=worker_main, args=(index, worker_config, mpconfig.role != RoleEnum.MASTER))
             processes.append(proc)
             proc.start()
+
+        def kill_all(*args, **kargs):
+            for _ in range(self._num_processes):
+                self._test_q.put(None)
+            for proc in processes:
+                proc.terminate()
+                proc.join(timeout=2)
+                processes.remove(proc)
+
+        signal.signal(signal.SIGTERM, kill_all)
+        start_sem.release()
         for proc in processes:
             proc.join()
         client = Global.Manager(mpconfig, force_as_client=True)
@@ -134,7 +145,10 @@ class Coordinator:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
+        try:
+            self._worker_manager_process.join(timeout=2)
+        except Exception:
+            self.kill()
 
     def populate_test_queue(self, tests: List[Any], mpconfig: MPManagerConfig):
         for test in tests:
@@ -156,8 +170,10 @@ class Coordinator:
         client.register_satellite(mpconfig.num_processes)
         self._test_q: Queue = client.get_test_queue()
         self._result_q: Queue = client.get_results_queue()
-        self._worker_manager_process = Process(target=self.do_work, args=(mpconfig,))
+        start_sem = Semaphore(0)
+        self._worker_manager_process = Process(target=self.do_work, args=(mpconfig, start_sem))
         self._worker_manager_process.start()
+        start_sem.acquire()
         return self
 
     def set_items(self, tests):
@@ -174,23 +190,8 @@ class Coordinator:
             self._tests.insert(0, groups[key])
 
     def kill(self):
-        for proc in self._processes:
-            if proc:
-                proc.terminate()
-
-    def stop(self, delay=None):
-        # shouldn't be any procs left, but just in case
-        for proc in self._processes:
-            if proc:
-                try:
-                    if delay is not None:
-                        proc.join(delay)
-                except Exception:
-                    pass
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+        self._worker_manager_process.terminate()
+        self._worker_manager_process.join(timeout=5)
 
     def run(self, session):
         """

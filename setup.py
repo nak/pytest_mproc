@@ -7,7 +7,7 @@ setuptools.setup(
     author='John Rusnak',
     author_email='jrusnak@linkedin.com',
     version=VERSION,
-    description="low-startup-overhead, scalabe, distributed-testing pytest plugin",
+    description="low-startup-overhead, scalable, distributed-testing pytest plugin",
     package_dir={'': 'src'},
     packages=setuptools.find_packages('src'),
     entry_points={

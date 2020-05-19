@@ -18,7 +18,6 @@ def _getscopeitem_redirect(self, scope):
     else:
         return _getscopeitem_orig(self, scope)
 
-
 _pytest.fixtures.scopes.insert(0, "node")
 _pytest.fixtures.scopes.insert(0, "global")
 _pytest.fixtures.scopenum_function = _pytest.fixtures.scopes.index("function")

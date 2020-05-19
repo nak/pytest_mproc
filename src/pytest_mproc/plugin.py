@@ -5,7 +5,7 @@ import getpass
 import inspect
 import os
 import shutil
-import socket
+import sys
 import tempfile
 import traceback
 from contextlib import contextmanager, suppress
@@ -24,7 +24,6 @@ import socket
 from multiprocessing import cpu_count
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.utils import is_degraded
-
 
 def _get_ip_addr():
     try:
@@ -198,8 +197,6 @@ def pytest_configure(config):
 
 @pytest.mark.tryfirst
 def pytest_fixture_setup(fixturedef, request):
-    if not getattr(request.config.option, "mproc_numcores") or fixturedef.scope not in ['node', 'global']:
-        return _pytest.fixtures.pytest_fixture_setup(fixturedef, request)
     my_cache_key = fixturedef.cache_key(request)
     if request.config.option.mpconfig.role == RoleEnum.WORKER:
         if request.config.option.mpconfig.global_fixtures is None:
@@ -208,7 +205,27 @@ def pytest_fixture_setup(fixturedef, request):
         if request.config.option.mpconfig.node_fixtures is None:
             client = Node.Manager(request.config.option.mpconfig, force_as_client=True)
             request.config.option.mpconfig.node_fixtures = client.get_fixtures()
+        if fixturedef.scope == 'global':
+            fixturedef.cached_result = (request.config.option.mpconfig.global_fixtures.get(fixturedef.argname),
+                                        my_cache_key,
+                                        None)
+            return request.config.option.mpconfig.global_fixtures.get(fixturedef.argname)
+        elif fixturedef.scope == 'node':
+            fixturedef.cached_result = (request.config.option.mpconfig.node_fixtures.get(fixturedef.argname),
+                                        my_cache_key,
+                                        None)
+            return request.config.option.mpconfig.node_fixtures.get(fixturedef.argname)
+        else:
+            return
 
+    if not getattr(request.config.option, "mproc_numcores") or fixturedef.scope not in ['node', 'global']:
+        return
+    if not hasattr(request.config, "generated_fixtures"):
+        request.config.generated_fixtures = []
+    if request.config.option.mpconfig.global_fixtures is None:
+        request.config.option.mpconfig.global_fixtures = {}
+    if request.config.option.mpconfig.node_fixtures is None:
+        request.config.option.mpconfig.node_fixtures = {}
     if fixturedef.scope == 'node':
         assert request.config.option.mpconfig.node_fixtures.get(fixturedef.argname) is not None
         fixturedef.cached_result = (request.config.option.mpconfig.node_fixtures.get(fixturedef.argname),
@@ -226,44 +243,33 @@ def pytest_fixture_setup(fixturedef, request):
         # return request.config.mproc_global_manager.get_fixturedef(fixturedef, request)
 
 
-def process_fixturedef(name: str, item, session, global_fixtures, node_fixtures):
-    generated = []
-    try:
-        mpconfig: MPManagerConfig = session.config.option.mpconfig
-        assert mpconfig.role != RoleEnum.WORKER
-        request = item._request
-        fixturedef = item._fixtureinfo.name2fixturedefs.get(name, None)
-        if fixturedef:
-            for argname in fixturedef[0].argnames:
-                generated += process_fixturedef(argname, item, session, global_fixtures, node_fixtures)
-        if not fixturedef or fixturedef[0].scope not in ['global', 'node']:
-            return generated
-        if mpconfig.role == RoleEnum.MASTER and fixturedef and fixturedef[0].scope == 'global' and name not in global_fixtures:
-            global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
-            val = global_fixtures[name](*fixturedef[0].argnames)
-            if inspect.isgenerator(val):
-                generated.append(val)
-                val = next(val)
-            mpconfig.global_fixtures[name] = val
-        if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR] and fixturedef and \
-                fixturedef[0].scope == 'node' and name not in node_fixtures:
-            node_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef[0], request)
-            val = node_fixtures[name](*fixturedef[0].argnames)
-            if inspect.isgenerator(val):
-                generated.append(val)
-                val = next(val)
-            mpconfig.node_fixtures[name] = val
-
-        return generated
-    except Exception as e:
-        print(traceback.format_exc())
-        if hasattr(session.config, "coordinator"):
-            session.config.coordinator.kill()
-        session.shouldfail = str(e)
-        return generated
+def process_fixturedef(fixturedef, request):
+    generated = request.config.generated_fixtures
+    global_fixtures = request.config.option.mpconfig.global_fixtures
+    node_fixtures = request.config.option.mpconfig.node_fixtures
+    config = request.config
+    mpconfig: MPManagerConfig = config.option.mpconfig
+    if not fixturedef or fixturedef.scope not in ['global', 'node']:
+        return
+    name = fixturedef.argname
+    assert mpconfig.role != RoleEnum.WORKER
+    if mpconfig.role == RoleEnum.MASTER and fixturedef.scope == 'global' and name not in global_fixtures:
+        global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
+        val = global_fixtures[name](*fixturedef.argnames)
+        if inspect.isgenerator(val):
+            generated.append(val)
+            val = next(val)
+        mpconfig.global_fixtures[name] = val
+    if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR] and fixturedef.scope == 'node'\
+            and name not in node_fixtures:
+        node_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
+        val = node_fixtures[name](*fixturedef.argnames)
+        if inspect.isgenerator(val):
+            generated.append(val)
+            val = next(val)
+        mpconfig.node_fixtures[name] = val
 
 
-@pytest.mark.tryfirst
 def pytest_runtestloop(session):
     if session.testsfailed and not session.config.option.continue_on_collection_errors:
         raise session.Interrupted("%d errors during collection" % session.testsfailed)
@@ -277,7 +283,7 @@ def pytest_runtestloop(session):
         return
 
     mpconfig = session.config.option.mpconfig
-    session.generated_fixtures = []
+    session.config.generated_fixtures = []
     if mpconfig.role != RoleEnum.WORKER:
         if mpconfig.global_fixtures is None:
             mpconfig.global_fixtures = {}
@@ -288,21 +294,31 @@ def pytest_runtestloop(session):
                 break
             if hasattr(item, "_request"):
                 for name in item._fixtureinfo.argnames:
-                    if name not in mpconfig.global_fixtures and name not in mpconfig.node_fixtures:
-                        session.generated_fixtures += process_fixturedef(name, item, session,
-                                                                         mpconfig.global_fixtures,
-                                                                         mpconfig.node_fixtures)
-                    if session.shouldfail:
+                    try:
+                        if name not in mpconfig.global_fixtures and name not in mpconfig.node_fixtures:
+                            fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
+                            if not fixturedef:
+                                continue
+                            for argname in fixturedef.argnames:
+                                fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
+                                process_fixturedef(fixdef, item._request)
+
+                            process_fixturedef(fixturedef, item._request)
+                    except Exception as e:
+                        import traceback
+                        session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'"
+                        print(f">>> Fixture ERROR: {traceback.format_exc()}")
                         break
-        if mpconfig.role == RoleEnum.MASTER:
-            session.config.mproc_global_manager.register_fixtures(mpconfig.global_fixtures)
-        session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
+
     if session.shouldfail:
-        print(f">>> Fixture ERROR: {session.shouldfail}")
         if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
             if hasattr(session.config, "coordinator"):
                 session.config.coordinator.kill()
         raise session.Failed(session.shouldfail)
+    elif mpconfig.role != RoleEnum.WORKER:
+        if mpconfig.role == RoleEnum.MASTER:
+            session.config.mproc_global_manager.register_fixtures(mpconfig.global_fixtures)
+        session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
 
     if mpconfig.role != RoleEnum.WORKER:
         if not session.config.getvalue("collectonly"):
@@ -342,7 +358,7 @@ def pytest_sessionfinish(session):
             session.config.mproc_node_manager.shutdown()
         except Exception as e:
             print(">>> INTERNAL Error shutting down mproc manager")
-    generated = getattr(session, "generated_fixtures", [])
+    generated = getattr(session.config, "generated_fixtures", [])
     errors = []
     for item in generated:
         try:

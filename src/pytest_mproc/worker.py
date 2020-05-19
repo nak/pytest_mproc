@@ -113,7 +113,7 @@ class WorkerSession:
 
             if session.config.option.collectonly:
                 return  # should never really get here, but for consistency
-            for items in session.items:
+            for items in session.items_generator:
                 # test item comes through as a unique string nodeid of the test
                 # We use the pytest-collected mapping we squirrelled away to look up the
                 # actual _pytest.python.Function test callable
@@ -151,7 +151,7 @@ class WorkerSession:
         :return: the generator of tests to run
         """
         session._named_items = {item.nodeid: item for item in session.items}
-        session.items = self._test_generator
+        session.items_generator = self._test_generator
         return session.items
 
     def pytest_internalerror(self, excrepr):
@@ -187,7 +187,6 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
 
     :param index: index assigned to the worker Process
     """
-
     def generator():
         try:
             test = test_q.get()
