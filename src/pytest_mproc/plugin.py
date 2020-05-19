@@ -5,9 +5,7 @@ import getpass
 import inspect
 import os
 import shutil
-import sys
 import tempfile
-import traceback
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
@@ -24,6 +22,7 @@ import socket
 from multiprocessing import cpu_count
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.utils import is_degraded
+
 
 def _get_ip_addr():
     try:
@@ -187,6 +186,13 @@ def pytest_cmdline_main(config):
     config.mproc_node_manager = Node.Manager(mpconfig)
 
 
+def pytest_sessionstart(session):
+    with suppress(Exception):
+        reporter = session.config.pluginmanager.getplugin('terminalreporter')
+        if reporter:
+                reporter._session = session
+
+
 @pytest.mark.trylast
 def pytest_configure(config):
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
@@ -276,7 +282,8 @@ def pytest_runtestloop(session):
 
     if session.config.option.collectonly:
         return  # should never really get here, but for consistency
-
+    if len(session.items) == 0:
+        return
     if getattr(session.config.option, "mproc_numcores", None) is None or is_degraded() or getattr(session.config.option, "mproc_disabled"):
         # return of None indicates other hook impls will be executed to do the task at hand
         # aka, let the basic hook handle it from here, no distributed processing to be done
