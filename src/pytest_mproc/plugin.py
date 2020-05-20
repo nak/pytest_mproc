@@ -277,6 +277,9 @@ def process_fixturedef(fixturedef, request):
 
 
 def pytest_runtestloop(session):
+    reporter = session.config.pluginmanager.getplugin('terminalreporter')
+    if reporter:
+        reporter.tests_count = len(session.items)
     if session.testsfailed and not session.config.option.continue_on_collection_errors:
         raise session.Interrupted("%d errors during collection" % session.testsfailed)
 
