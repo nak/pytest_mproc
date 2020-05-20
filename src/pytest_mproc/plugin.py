@@ -323,9 +323,16 @@ def pytest_runtestloop(session):
                 session.config.coordinator.kill()
         raise session.Failed(session.shouldfail)
     elif mpconfig.role != RoleEnum.WORKER:
-        if mpconfig.role == RoleEnum.MASTER:
-            session.config.mproc_global_manager.register_fixtures(mpconfig.global_fixtures)
-        session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
+        try:
+            if mpconfig.role == RoleEnum.MASTER:
+                session.config.mproc_global_manager.register_fixtures(mpconfig.global_fixtures)
+            session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
+        except Exception as e:
+            session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'"
+            print(f">>>> Error registering node/global level fixture(s): {str(e)}")
+            if hasattr(session.config, "coordinator"):
+                session.config.coordinator.kill()
+            raise session.Failed(session.shouldfail)
 
     if mpconfig.role != RoleEnum.WORKER:
         if not session.config.getvalue("collectonly"):
