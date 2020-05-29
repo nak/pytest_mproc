@@ -284,6 +284,9 @@ def pytest_runtestloop(session):
         raise session.Interrupted("%d errors during collection" % session.testsfailed)
 
     if session.config.option.collectonly:
+        if session.config.option.mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
+            if hasattr(session.config, "coordinator"):
+                session.config.coordinator.kill()
         return  # should never really get here, but for consistency
     if len(session.items) == 0:
         return
