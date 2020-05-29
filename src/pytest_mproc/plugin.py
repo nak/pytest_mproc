@@ -102,6 +102,8 @@ def pytest_cmdline_main(config):
 
     Mostly taken from other implementations (such as xdist)
     """
+    if config.option.collectonly:
+        return
     worker = getattr(config.option, "mproc_worker", None)
     mproc_server_port = getattr(config.option, 'mproc_server_port', None)
     mproc_client_connect = getattr(config.option, "mproc_client_connect", None)
@@ -277,6 +279,8 @@ def process_fixturedef(fixturedef, request):
 
 
 def pytest_runtestloop(session):
+    if session.config.option.collectonly:
+        return
     reporter = session.config.pluginmanager.getplugin('terminalreporter')
     if reporter:
         reporter.tests_count = len(session.items)
@@ -360,6 +364,8 @@ def pytest_runtestloop(session):
 
 
 def pytest_terminal_summary(terminalreporter: _pytest.terminal.TerminalReporter, exitstatus, config):
+    if config.option.collectonly:
+        return
     if config.option.mpconfig.role != RoleEnum.MASTER:
         terminalreporter.line(">>>>>>>>>> This is a satellite processing node. "
                               "Please see master node output for actual test summary <<<<<<<<<<<<",
@@ -367,6 +373,8 @@ def pytest_terminal_summary(terminalreporter: _pytest.terminal.TerminalReporter,
 
 
 def pytest_sessionfinish(session):
+    if session.config.option.collectonly:
+        return
     mpconfig = session.config.option.mpconfig
     if mpconfig.role == RoleEnum.MASTER:
         try:
