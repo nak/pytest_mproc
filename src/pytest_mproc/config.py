@@ -1,7 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from multiprocessing import Queue
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from pytest_mproc import find_free_port
 

@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from traceback import format_exc
 
 import _pytest
 
@@ -21,7 +22,7 @@ import socket
 
 from multiprocessing import cpu_count
 from pytest_mproc.coordinator import Coordinator
-from pytest_mproc.utils import is_degraded
+from pytest_mproc.utils import is_degraded, BasicReporter
 
 
 def _get_ip_addr():
@@ -104,6 +105,8 @@ def pytest_cmdline_main(config):
     """
     if config.option.collectonly:
         return
+
+    reporter = BasicReporter()
     worker = getattr(config.option, "mproc_worker", None)
     mproc_server_port = getattr(config.option, 'mproc_server_port', None)
     mproc_client_connect = getattr(config.option, "mproc_client_connect", None)
@@ -120,7 +123,7 @@ def pytest_cmdline_main(config):
                             (mproc_server_port is None and mproc_client_connect is None)) else \
         RoleEnum.COORDINATOR
     if role == RoleEnum.MASTER:
-        print(f"Running as {role}: {_get_ip_addr()}:{mproc_server_port}")
+        reporter.write(f"Running as {role}: {_get_ip_addr()}:{mproc_server_port}\n", green=True)
 
     # validation
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
@@ -131,8 +134,8 @@ def pytest_cmdline_main(config):
             num_processes=0)
         config.mproc_global_manager = Global.Manager(config.option.mpconfig)
         config.mproc_node_manager = Node.Manager(config.option.mpconfig)
-        print(">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
-              "not running multiprocessing <<<<<")
+        reporter.write(">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
+              "not running multiprocessing <<<<<\n", yellow=True)
         return
     elif hasattr(config.option, "mpconfig"):
         mpconfig = config.option.mpconfig
@@ -183,9 +186,11 @@ def pytest_cmdline_main(config):
         # process config info in parallel to this thread
         config.coordinator = Coordinator(mpconfig)
     config.mproc_global_manager = Global.Manager(mpconfig)
+    config.mproc_node_manager = Node.Manager(mpconfig)
     if role != RoleEnum.WORKER:
         config.coordinator.start(mpconfig)
-    config.mproc_node_manager = Node.Manager(mpconfig)
+    elif hasattr(config.option, "connect_sem"):
+        config.option.connect_sem.release()
 
 
 def pytest_sessionstart(session):
@@ -208,10 +213,10 @@ def pytest_fixture_setup(fixturedef, request):
     my_cache_key = fixturedef.cache_key(request)
     if request.config.option.mpconfig.role == RoleEnum.WORKER:
         if request.config.option.mpconfig.global_fixtures is None:
-            client = Global.Manager(request.config.option.mpconfig, force_as_client=True)
+            client = request.config.mproc_global_manager # Global.Manager(request.config.option.mpconfig, force_as_client=True)
             request.config.option.mpconfig.global_fixtures = client.get_fixtures()
         if request.config.option.mpconfig.node_fixtures is None:
-            client = Node.Manager(request.config.option.mpconfig, force_as_client=True)
+            client = request.config.mproc_node_manager # Node.Manager(request.config.option.mpconfig, force_as_client=True)
             request.config.option.mpconfig.node_fixtures = client.get_fixtures()
         if fixturedef.scope == 'global':
             fixturedef.cached_result = (request.config.option.mpconfig.global_fixtures.get(fixturedef.argname),
@@ -281,9 +286,11 @@ def process_fixturedef(fixturedef, request):
 def pytest_runtestloop(session):
     if session.config.option.collectonly:
         return
-    reporter = session.config.pluginmanager.getplugin('terminalreporter')
+    reporter: _pytest.terminal.TerminalReporter = session.config.pluginmanager.getplugin('terminalreporter')
     if reporter:
         reporter.tests_count = len(session.items)
+    if reporter is None:
+        reporter = BasicReporter()
     if session.testsfailed and not session.config.option.continue_on_collection_errors:
         raise session.Interrupted("%d errors during collection" % session.testsfailed)
 
@@ -298,7 +305,6 @@ def pytest_runtestloop(session):
         # return of None indicates other hook impls will be executed to do the task at hand
         # aka, let the basic hook handle it from here, no distributed processing to be done
         return
-
     mpconfig = session.config.option.mpconfig
     session.config.generated_fixtures = []
     if mpconfig.role != RoleEnum.WORKER:
@@ -322,9 +328,9 @@ def pytest_runtestloop(session):
 
                             process_fixturedef(fixturedef, item._request)
                     except Exception as e:
-                        import traceback
-                        session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'"
-                        print(f">>> Fixture ERROR: {traceback.format_exc()}")
+                        session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
+                            f"{format_exc()}"
+                        reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
                         break
 
     if session.shouldfail:
@@ -338,8 +344,13 @@ def pytest_runtestloop(session):
                 session.config.mproc_global_manager.register_fixtures(mpconfig.global_fixtures)
             session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
         except Exception as e:
-            session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'"
-            print(f">>>> Error registering node/global level fixture(s): {str(e)}")
+            import pickle
+            for i, v in mpconfig.node_fixtures.items():
+                reporter.write(f">>> {i}\n", red=True)
+                reporter.write(f">>> {pickle.dumps(v)}\n", red=True)
+            session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
+                f"{format_exc()}\n {mpconfig.node_fixtures}"
+            reporter.write(f">>>> Error registering node/global level fixture(s): {str(e)}\n", red=True)
             if hasattr(session.config, "coordinator"):
                 session.config.coordinator.kill()
             raise session.Failed(session.shouldfail)
@@ -352,9 +363,8 @@ def pytest_runtestloop(session):
                     coordinator.set_items(session.items)
                     coordinator.run(session)
                 except Exception as e:
-                    import traceback
-                    print(traceback.format_exc())
-                    print(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n")
+                    reporter.write(format_exc() + "\n", red=True)
+                    reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
                     return False
     elif mpconfig.role == RoleEnum.WORKER:
         worker = getattr(session.config.option, "mproc_worker")
@@ -373,6 +383,7 @@ def pytest_terminal_summary(terminalreporter: _pytest.terminal.TerminalReporter,
 
 
 def pytest_sessionfinish(session):
+    reporter = BasicReporter()
     if session.config.option.collectonly:
         return
     mpconfig = session.config.option.mpconfig
@@ -380,12 +391,14 @@ def pytest_sessionfinish(session):
         try:
             session.config.mproc_global_manager.shutdown()
         except Exception as e:
-            print(">>> INTERNAL Error shutting down mproc manager")
+            reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
     if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
         try:
             session.config.mproc_node_manager.shutdown()
         except Exception as e:
-            print(">>> INTERNAL Error shutting down mproc manager")
+            reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
+        if hasattr(session.config, "coordinator"):
+            session.config.coordinator.kill()
     generated = getattr(session.config, "generated_fixtures", [])
     errors = []
     for item in generated:
@@ -396,8 +409,9 @@ def pytest_sessionfinish(session):
             except StopIteration:
                 pass
         except Exception as e:
-            print(f">>> Error in exit of fixture context {e}")
+            reporter.write(f">>> Error in exit of fixture context {e}\n", red=True)
             errors.append(e)
+
     if errors:
         raise pytest.UsageError(">>> One or more global or node-level fixtures threw an Exception on exit from context") \
             from errors[0]

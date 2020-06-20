@@ -1,7 +1,7 @@
 import os
 import sys
 import time
-from multiprocessing import Queue
+from multiprocessing import Queue, Lock
 from multiprocessing.managers import BaseManager
 from typing import Any
 
@@ -42,14 +42,23 @@ class FixtureManager(BaseManager):
             self.__class__.register("get_start_gate")
             self.__class__.register("get_fixtures")
             self.__class__.register("register_fixtures")
+            self.__class__.register("signal_test_q_exhausted")
+            self.__class__.register("wait_lock")
+            self.__class__.register("is_test_q_exhausted")
         else:
             self._start_gate = Queue()
             self._gate = Queue()
+            self._wait_lock = Lock()
+            self._wait_lock.acquire()
             self.__class__.register("get_start_gate", lambda: self._start_gate)
             self.__class__.register("get_fixtures", self._get_fixtures)
             self.__class__.register("register_fixtures", self._register_fixtures)
+            self.__class__.register("signal_test_q_exhausted", self._signal_test_q_exhausted)
+            self.__class__.register("wait_lock", lambda: self._wait_lock)
+            self.__class__.register("is_test_q_exhausted", lambda: self.Value(self._test_q_exhausted))
         super().__init__((host, port), authkey=b'pass')
         self._on_hold = True
+        self._test_q_exhausted = False
 
     def _get_fixtures(self):
         v =self._gate.get()
@@ -59,6 +68,11 @@ class FixtureManager(BaseManager):
     def _register_fixtures(self, fixturedefs):
         self._gate.put(True)
         self._global_fixturedefs = fixturedefs
+
+    def _signal_test_q_exhausted(self):
+        if not self._test_q_exhausted:
+            self._test_q_exhausted = True
+            self._wait_lock.release()
 
 
 class Node(_pytest.main.Session):
@@ -73,7 +87,15 @@ class Node(_pytest.main.Session):
             if as_master and not force_as_client:
                 super().start()
             else:
-                super().connect()
+                tries_remaining = 3
+                while tries_remaining > 0:
+                    try:
+                        super().connect()
+                        break
+                    except (ConnectionRefusedError, ConnectionAbortedError, ConnectionError, ConnectionResetError):
+                        tries_remaining -= 1
+                        print(f"Connection error when connecting worker;  {tries_remaining} tries left")
+                        time.sleep(1)
 
 
 class Global(_pytest.main.Session):
@@ -93,31 +115,32 @@ class Global(_pytest.main.Session):
                 Global.Manager.register("get_results_queue")
                 Global.Manager.register("register_satellite")
                 Global.Manager.register("signal_satellite_done")
+                Global.Manager.register("signal_test_q_populated")
             else:
                 # server:
-                self._test_q = Queue()
-                self._result_q = Queue()
+                self._test_q = Queue(maxsize=10000)
+                self._result_q = Queue(maxsize=10000)
                 Global.Manager.register("get_test_queue", lambda: self._test_q)
                 Global.Manager.register("get_results_queue", lambda: self._result_q)
                 Global.Manager.register("register_satellite", self._register_satellite)
                 Global.Manager.register("signal_satellite_done", self._signal_satellite_done)
-                Global.Manager.register("signal_test_q_exhausted", self._signal_test_q_exhausted)
+                Global.Manager.register("signal_test_q_populated", self._signal_test_q_populated)
             super().__init__(config.global_mgr_host, config.global_mgr_port, config.role == RoleEnum.MASTER)
             if config.role == RoleEnum.MASTER and not force_as_client:
                 super().start()
             else:
-                tries_left = 60
+                tries_remaining = 60
                 if config.role != RoleEnum.WORKER:
-                    os.write(sys.stderr.fileno(), b"Waiting for server...")
-                while tries_left:
+                    os.write(sys.stderr.fileno(), b"Waiting for server...\n")
+                while tries_remaining:
                     try:
                         super().connect()
                         break
-                    except ConnectionRefusedError as e:
+                    except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError) as e:
                         if config.role != RoleEnum.WORKER:
                             os.write(sys.stderr.fileno(), b".")
-                        tries_left -= 1
-                        if tries_left == 0:
+                        tries_remaining -= 1
+                        if tries_remaining == 0:
                             os.write(sys.stderr.fileno(), b"\n")
                             raise Exception(f"Failed to connect to server {config.global_mgr_host} port " +
                                             f"{config.global_mgr_port}: {str(e)}")
@@ -138,11 +161,9 @@ class Global(_pytest.main.Session):
             if self._satellite_worker_count <= 0:
                 self._result_q.put(None)
 
-        def _signal_test_q_exhausted(self):
-            if not self._test_q_exhausted:
-                for _ in range(self._satellite_worker_count):
-                    self._test_q.put(None)
-                self._test_q_exhausted = True
+        def _signal_test_q_populated(self):
+            for _ in range(self._satellite_worker_count):
+                self._test_q.put(None)
 
     def __init__(self, config):
         super().__init__(config)

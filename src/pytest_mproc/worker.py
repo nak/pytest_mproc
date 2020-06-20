@@ -2,7 +2,7 @@ import os
 import socket
 import sys
 import time
-from multiprocessing import Queue
+from multiprocessing import Queue, Semaphore
 
 import pytest
 from _pytest.config import _prepareconfig, ConftestImportFailure
@@ -12,6 +12,7 @@ import resource
 from pytest_mproc import resource_utilization
 from pytest_mproc.config import MPManagerConfig, RoleEnum
 from pytest_mproc.fixtures import Global
+from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
@@ -52,7 +53,9 @@ class WorkerSession:
     Handles reporting of test status and the like
     """
 
-    def __init__(self, index, result_q: Queue, test_generator, is_remote: bool):
+    def __init__(self, index, result_q: Queue, test_generator, is_remote: bool, mpconfig, client):
+        self._mpconfig = mpconfig
+        self._client = client
         self._is_remote = is_remote
         self._result_q = result_q
         self._index = index
@@ -68,7 +71,7 @@ class WorkerSession:
         self._last_execution_time = time.time()
         self._resource_utilization = -1, -1, -1, -1
 
-    def _put(self, kind, data):
+    def _put(self, kind, data, timeout=None):
         """
         Append test result data to queue, flushing buffered results to queue at watermark level for efficiency
 
@@ -79,14 +82,17 @@ class WorkerSession:
             os.write(sys.stderr.fileno(), b'.')
         self._buffered_results.append((kind, data))
         if len(self._buffered_results) >= self._buffer_size or (time.time() - self._timestamp) > MAX_REPORTING_INTERVAL:
-            self._flush()
+            self._flush(timeout)
 
-    def _flush(self):
+    def _flush(self, timeout=None):
         """
         fluh buffered results out to the queue.
         """
         if self._buffered_results:
-            self._result_q.put(self._buffered_results)
+            if timeout is not None:
+                self._result_q.put(self._buffered_results, timeout)
+            else:
+                self._result_q.put(self._buffered_results)
             self._buffered_results = []
             self._timestamp = time.time()
 
@@ -132,6 +138,7 @@ class WorkerSession:
                     # count tests that have been run
                     self._count += 1
                     self._last_execution_time = time.time()
+            self._client.signal_test_q_exhausted()
         finally:
             end_usage = resource.getrusage(resource.RUSAGE_SELF)
             time_span = self._last_execution_time - start_time
@@ -181,26 +188,38 @@ class WorkerSession:
         return True
 
 
-def main(index, mpconfig: MPManagerConfig, is_remote: bool):
+def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semaphore, reporter=BasicReporter()):
     """
     main worker function, launched as a multiprocessing Process
 
     :param index: index assigned to the worker Process
     """
+    client = Global.Manager(mpconfig, force_as_client=True)
+
     def generator():
         try:
-            test = test_q.get()
+            test = None
+            while test is None:
+                if client.is_test_q_exhausted().value():
+                    return
+                try:
+                    test = test_q.get(timeout=0)
+                except Empty:
+                    time.sleep(3)
+
             while test:
                 yield test
                 test = test_q.get()
+        except OSError:
+            # queue is closed; no more to process
+            pass
         except Empty:
-            raise StopIteration
+            pass
 
-    client = Global.Manager(mpconfig, force_as_client=True)
     test_q = client.get_test_queue()
     result_q = client.get_results_queue()
     args = sys.argv[1:]
-    worker = WorkerSession(index, result_q, generator(), is_remote)
+    worker = WorkerSession(index, result_q, generator(), is_remote, mpconfig, client)
     try:
 
         try:
@@ -233,9 +252,11 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
         config.slaveinput = workerinput
         config.slaveoutput = workerinput
         mpconfig.role = RoleEnum.WORKER
+        mpconfig.index = index
         config.option.mpconfig = mpconfig
         config.option.mpconfig.node_fixtures = None
         config.option.mpconfig.global_fixtures = None
+        config.option.connect_sem = connect_sem
         assert(mpconfig.role == RoleEnum.WORKER)
         try:
             # and away we go....
@@ -243,6 +264,9 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool):
         finally:
             config._ensure_unconfigure()
     except Exception as e:
-        worker._put('exception', e)
-        worker._put('exit', (index, -1, -1, (-1. -1, -1, -1)))
-        worker._flush()
+        reporter.write(f"Exception in worker thread: {str(e)}")
+        worker._put('exception', e, timeout=3)
+        worker._put('exit', (index, -1, -1, -1, (-1. -1, -1, -1)), timeout=3)
+        worker._flush(timeout=3)
+    # finally:
+    #    reporter.write(f"Worker-{index} finished\n")

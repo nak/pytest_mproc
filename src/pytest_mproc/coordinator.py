@@ -1,6 +1,7 @@
 """
 This package contains code to coordinate execution from a main thread to worker threads (processes)
 """
+import os
 import resource
 import signal
 import sys
@@ -12,6 +13,7 @@ from multiprocessing import Process, Queue, Semaphore
 
 from pytest_mproc import resource_utilization
 from pytest_mproc.config import MPManagerConfig, RoleEnum
+from pytest_mproc.utils import BasicReporter
 from pytest_mproc.worker import main as worker_main
 from pytest_mproc.fixtures import Global
 
@@ -35,6 +37,7 @@ class Coordinator:
         self._session_start_time = time.time()
         self._test_q: Queue = None  # set on call to start()
         self._result_q: Queue = None  # set on call to start()
+        self._reporter = BasicReporter()
 
     @staticmethod
     def _write_sep(s, txt):
@@ -94,52 +97,83 @@ class Coordinator:
                     sys.stdout.write("\n%s FAILED\n" % report.nodeid)
             elif typ == 'exit':
                 # process is complete, so close it and set to None
-                index, worker_count, exitstatus, duration, rusage = data  # which process and count of tests run
-                time_span, ucpu, scpu, unshared_mem = rusage
-                self._rusage.append((worker_count, time_span, ucpu, scpu, unshared_mem))
+                try:
+                    index, worker_count, exitstatus, duration, rusage = data  # which process and count of tests run
+                    time_span, ucpu, scpu, unshared_mem = rusage
+                    self._rusage.append((worker_count, time_span, ucpu, scpu, unshared_mem))
+                except:
+                    pass
+                    # self._reporter.write(f"Unable to process rusage: {data}\n")
             elif typ == 'error_message':
                 error_msg_text = data
                 sys.stdout.write("{}\n".format(error_msg_text))
             elif typ == 'exception':
                 # reraise any exception from workers
-                raise Exception("Exception in worker process: %s" % str(data))
+                raise Exception("Exception in worker process: %s" % str(data)) from data
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             sys.stdout.write("INTERNAL_ERROR> %s\n" % str(e))
 
     def read_results(self, hook):
         items = self._result_q.get()
+        exited = []
         while items is not None:
             if isinstance(items, Exception):
                 raise Exception
             for kind, data in items:
                 self._process_worker_message(hook, kind, data)
             items = self._result_q.get()
+            if items:
+                exited += [item[1][0] for item in items if item[0] == 'exit']
+                if len(exited) == self._num_processes:
+                    break
 
     def do_work(self, mpconfig: MPManagerConfig, start_sem: Semaphore):
         processes : List[Process] = []
-        for index in range(mpconfig.num_processes):
-            args = mpconfig.__dict__
-            args.update({'role': RoleEnum.WORKER})
-            worker_config = MPManagerConfig(**args)
-            proc = Process(target=worker_main, args=(index, worker_config, mpconfig.role != RoleEnum.MASTER))
-            processes.append(proc)
-            proc.start()
+        try:
+            connect_sem: List[Semaphore] = [Semaphore(0) for i in range(mpconfig.num_processes)]
+            for index in range(mpconfig.num_processes):
+                args = mpconfig.__dict__
+                args.update({'role': RoleEnum.WORKER})
+                worker_config = MPManagerConfig(**args)
+                proc = Process(target=worker_main, args=(index, worker_config, mpconfig.role != RoleEnum.MASTER,
+                                                         connect_sem[index], self._reporter))
+                processes.append(proc)
+                proc.start()
 
-        def kill_all(*args, **kargs):
-            for _ in range(self._num_processes):
-                self._test_q.put(None)
-            for proc in processes:
-                proc.terminate()
-                proc.join(timeout=2)
-                processes.remove(proc)
+            def kill_all(*args, **kargs):
+                self._reporter.write("Termination signal received;  killing all worekrs...")
+                for _ in range(self._num_processes):
+                    self._test_q.put(None, timeout=0)
+                for proc in processes:
+                    proc.terminate()
+                    proc.join(timeout=2)
+                    processes.remove(proc)
 
-        signal.signal(signal.SIGTERM, kill_all)
-        start_sem.release()
-        for proc in processes:
-            proc.join()
-        client = Global.Manager(mpconfig, force_as_client=True)
-        client.signal_satellite_done(mpconfig.num_processes)
+            signal.signal(signal.SIGTERM, kill_all)
+            start_sem.release()
+            client = Global.Manager(mpconfig, force_as_client=True)
+            client.wait_lock().acquire()
+            client.wait_lock().release()
+            for index, sem in enumerate(connect_sem):
+                if sem.acquire(timeout=0) is not True:
+                    self._reporter.write(f"Worker-{index} failed to connect in time.  Aborting thread\n", red=True)
+                    os.kill(processes[index].pid, signal.SIGTERM)
+                    processes[index].join()
+                    self._result_q.put([('exit', (index, -1, -1, -1, (-1. -1, -1, -1)))])
+                    processes[index] = None
+            for index, proc in enumerate(processes):
+                if proc:
+                    proc.join()
+            client.signal_satellite_done(mpconfig.num_processes)
+        except Exception as e:
+            import traceback
+            self._reporter.write(f">>>>>>>>>>> ERROR in worker manager process: str{e} \n{traceback.format_exc()}\n")
+            for index, proc in enumerate(processes):
+                if proc:
+                    os.kill(processes[index].pid, signal.SIGKILL)
 
     def __enter__(self):
         return self
@@ -158,7 +192,7 @@ class Coordinator:
             self._test_q.put(item)
             # signal all workers test q is exhausted:
         client = Global.Manager(mpconfig, force_as_client=True)
-        client.signal_test_q_exhausted()
+        client.signal_test_q_populated()
 
     def start(self, mpconfig: MPManagerConfig):
         """
