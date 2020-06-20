@@ -118,33 +118,35 @@ class Coordinator:
 
     def read_results(self, hook):
         items = self._result_q.get()
-        exited = []
         while items is not None:
             if isinstance(items, Exception):
                 raise Exception
             for kind, data in items:
                 self._process_worker_message(hook, kind, data)
             items = self._result_q.get()
-            if items:
-                exited += [item[1][0] for item in items if item[0] == 'exit']
-                if len(exited) == self._num_processes:
-                    break
 
     def do_work(self, mpconfig: MPManagerConfig, start_sem: Semaphore):
         processes : List[Process] = []
         try:
             connect_sem: List[Semaphore] = [Semaphore(0) for i in range(mpconfig.num_processes)]
+            batch_index = 0
             for index in range(mpconfig.num_processes):
                 args = mpconfig.__dict__
                 args.update({'role': RoleEnum.WORKER})
                 worker_config = MPManagerConfig(**args)
                 proc = Process(target=worker_main, args=(index, worker_config, mpconfig.role != RoleEnum.MASTER,
                                                          connect_sem[index], self._reporter))
-                processes.append(proc)
                 proc.start()
+                if index % 20 == 19 or index == mpconfig.num_processes-1:
+                    for j in range(batch_index, index):
+                        connect_sem[j].acquire()
+                        connect_sem[j].release()
+                        self._reporter.write(f"Worker-{j}: Connection established\n")
+                    batch_index = index + 1
+                processes.append(proc)
 
             def kill_all(*args, **kargs):
-                self._reporter.write("Termination signal received;  killing all worekrs...")
+                self._reporter.write("Termination signal received;  killing all workers...")
                 for _ in range(self._num_processes):
                     self._test_q.put(None, timeout=0)
                 for proc in processes:
@@ -157,13 +159,6 @@ class Coordinator:
             client = Global.Manager(mpconfig, force_as_client=True)
             client.wait_lock().acquire()
             client.wait_lock().release()
-            for index, sem in enumerate(connect_sem):
-                if sem.acquire(timeout=0) is not True:
-                    self._reporter.write(f"Worker-{index} failed to connect in time.  Aborting thread\n", red=True)
-                    os.kill(processes[index].pid, signal.SIGTERM)
-                    processes[index].join()
-                    self._result_q.put([('exit', (index, -1, -1, -1, (-1. -1, -1, -1)))])
-                    processes[index] = None
             for index, proc in enumerate(processes):
                 if proc:
                     proc.join()

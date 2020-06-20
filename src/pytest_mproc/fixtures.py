@@ -1,4 +1,5 @@
 import os
+import signal
 import sys
 import time
 from multiprocessing import Queue, Lock
@@ -129,12 +130,18 @@ class Global(_pytest.main.Session):
             if config.role == RoleEnum.MASTER and not force_as_client:
                 super().start()
             else:
+                def timeout(*args):
+                    raise TimeoutError()
+
+                signal.signal(signal.SIGALRM, timeout)
                 tries_remaining = 60
                 if config.role != RoleEnum.WORKER:
                     os.write(sys.stderr.fileno(), b"Waiting for server...\n")
                 while tries_remaining:
                     try:
+                        signal.alarm(1)
                         super().connect()
+                        signal.alarm(0)
                         break
                     except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError) as e:
                         if config.role != RoleEnum.WORKER:
@@ -145,6 +152,10 @@ class Global(_pytest.main.Session):
                             raise Exception(f"Failed to connect to server {config.global_mgr_host} port " +
                                             f"{config.global_mgr_port}: {str(e)}")
                         time.sleep(0.5)
+                    except TimeoutError:
+                        tries_remaining -= 1
+                        time.sleep(0.5)
+
                 if config.role != RoleEnum.WORKER:
                     os.write(sys.stderr.fileno(), b"\nConnected\n")
 
