@@ -2,7 +2,7 @@ import os
 import signal
 import sys
 import time
-from multiprocessing import Queue, Lock
+from multiprocessing import Queue, Lock, JoinableQueue
 from multiprocessing.managers import BaseManager
 from typing import Any
 
@@ -43,7 +43,6 @@ class FixtureManager(BaseManager):
             self.__class__.register("get_start_gate")
             self.__class__.register("get_fixtures")
             self.__class__.register("register_fixtures")
-            self.__class__.register("signal_test_q_exhausted")
             self.__class__.register("wait_lock")
             self.__class__.register("is_test_q_exhausted")
         else:
@@ -54,7 +53,6 @@ class FixtureManager(BaseManager):
             self.__class__.register("get_start_gate", lambda: self._start_gate)
             self.__class__.register("get_fixtures", self._get_fixtures)
             self.__class__.register("register_fixtures", self._register_fixtures)
-            self.__class__.register("signal_test_q_exhausted", self._signal_test_q_exhausted)
             self.__class__.register("wait_lock", lambda: self._wait_lock)
             self.__class__.register("is_test_q_exhausted", lambda: self.Value(self._test_q_exhausted))
         super().__init__((host, port), authkey=b'pass')
@@ -70,10 +68,6 @@ class FixtureManager(BaseManager):
         self._gate.put(True)
         self._global_fixturedefs = fixturedefs
 
-    def _signal_test_q_exhausted(self):
-        if not self._test_q_exhausted:
-            self._test_q_exhausted = True
-            self._wait_lock.release()
 
 
 class Node(_pytest.main.Session):
@@ -112,20 +106,10 @@ class Global(_pytest.main.Session):
             self._global_fixturedefs = {}
             if config.role != RoleEnum.MASTER or force_as_client:
                 # client
-                Global.Manager.register("get_test_queue")
-                Global.Manager.register("get_results_queue")
                 Global.Manager.register("register_satellite")
-                Global.Manager.register("signal_satellite_done")
-                Global.Manager.register("signal_test_q_populated")
             else:
                 # server:
-                self._test_q = Queue(maxsize=10000)
-                self._result_q = Queue(maxsize=10000)
-                Global.Manager.register("get_test_queue", lambda: self._test_q)
-                Global.Manager.register("get_results_queue", lambda: self._result_q)
                 Global.Manager.register("register_satellite", self._register_satellite)
-                Global.Manager.register("signal_satellite_done", self._signal_satellite_done)
-                Global.Manager.register("signal_test_q_populated", self._signal_test_q_populated)
             super().__init__(config.global_mgr_host, config.global_mgr_port, config.role == RoleEnum.MASTER)
             if config.role == RoleEnum.MASTER and not force_as_client:
                 super().start()
@@ -164,17 +148,6 @@ class Global(_pytest.main.Session):
             if self._test_q_exhausted:
                 for _ in range(count):
                     self._test_q.put(None)
-
-        def _signal_satellite_done(self, count: int):
-            if count == 0:
-                return
-            self._satellite_worker_count -= count
-            if self._satellite_worker_count <= 0:
-                self._result_q.put(None)
-
-        def _signal_test_q_populated(self):
-            for _ in range(self._satellite_worker_count):
-                self._test_q.put(None)
 
     def __init__(self, config):
         super().__init__(config)

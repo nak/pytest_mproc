@@ -2,7 +2,7 @@ import os
 import socket
 import sys
 import time
-from multiprocessing import Queue, Semaphore
+from multiprocessing import Queue, Semaphore, JoinableQueue
 
 import pytest
 from _pytest.config import _prepareconfig, ConftestImportFailure
@@ -53,13 +53,15 @@ class WorkerSession:
     Handles reporting of test status and the like
     """
 
-    def __init__(self, index, result_q: Queue, test_generator, is_remote: bool, mpconfig, client):
+    def __init__(self, index, result_q: JoinableQueue, test_q: JoinableQueue,
+                 test_generator, is_remote: bool, mpconfig, start_sem: Semaphore):
         self._mpconfig = mpconfig
-        self._client = client
         self._is_remote = is_remote
         self._result_q = result_q
+        self._test_q = test_q
         self._index = index
         self._test_generator = test_generator
+        self._start_sem = start_sem
 
         self._name = "worker-%d" % (index + 1)
         self._reports = []
@@ -93,6 +95,7 @@ class WorkerSession:
                 self._result_q.put(self._buffered_results, timeout)
             else:
                 self._result_q.put(self._buffered_results)
+            # self._result_q.join()
             self._buffered_results = []
             self._timestamp = time.time()
 
@@ -104,6 +107,8 @@ class WorkerSession:
 
         :param session:  Where the tests generator is kept
         """
+        self._start_sem.acquire()
+        self._start_sem.release()
         start_time = time.time()
         rusage = resource.getrusage(resource.RUSAGE_SELF)
         try:
@@ -138,7 +143,7 @@ class WorkerSession:
                     # count tests that have been run
                     self._count += 1
                     self._last_execution_time = time.time()
-            self._client.signal_test_q_exhausted()
+            self._flush()
         finally:
             end_usage = resource.getrusage(resource.RUSAGE_SELF)
             time_span = self._last_execution_time - start_time
@@ -182,44 +187,35 @@ class WorkerSession:
 
         :param exitstatus: exit status of the test suite run
         """
+        # timeouts on queues sometimes can still have process hang if there is a bottleneck, so use alarm
+        BasicReporter().write(f"Worker-{self._index} PUTTING EXIT STATUS...\n")
         self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time,
                            self._resource_utilization))
         self._flush()
+        BasicReporter().write(f"Worker-{self._index} PUT EXIT STATUS.\n")
         return True
 
 
-def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semaphore, reporter=BasicReporter()):
+def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semaphore, reporter, start_sem: Semaphore,
+         test_q: JoinableQueue, result_q: JoinableQueue):
     """
     main worker function, launched as a multiprocessing Process
 
     :param index: index assigned to the worker Process
     """
-    client = Global.Manager(mpconfig, force_as_client=True)
-
-    def generator():
+    def generator(test_q: JoinableQueue):
         try:
-            test = None
-            while test is None:
-                if client.is_test_q_exhausted().value():
-                    return
-                try:
-                    test = test_q.get(timeout=0)
-                except Empty:
-                    time.sleep(3)
-
+            test = test_q.get()
             while test:
+                test_q.task_done()
                 yield test
                 test = test_q.get()
-        except OSError:
-            # queue is closed; no more to process
-            pass
-        except Empty:
-            pass
+        finally:
+            test_q.task_done()
+            reporter.write(f"Worker-{index} test queue done\n")
 
-    test_q = client.get_test_queue()
-    result_q = client.get_results_queue()
     args = sys.argv[1:]
-    worker = WorkerSession(index, result_q, generator(), is_remote, mpconfig, client)
+    worker = WorkerSession(index, result_q, test_q, generator(test_q), is_remote, mpconfig, start_sem)
     try:
 
         try:
@@ -264,9 +260,11 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semapho
         finally:
             config._ensure_unconfigure()
     except Exception as e:
-        reporter.write(f"Exception in worker thread: {str(e)}")
+        import traceback
+        reporter.write(f"Exception in worker thread: {str(e)}\n")
+        reporter.write(f"Exception in worker thread: {traceback.format_exc()}\n")
         worker._put('exception', e, timeout=3)
-        worker._put('exit', (index, -1, -1, -1, (-1. -1, -1, -1)), timeout=3)
-        worker._flush(timeout=3)
-    # finally:
-    #    reporter.write(f"Worker-{index} finished\n")
+        worker._put('exit', (index, -1, -1, -1, (-1. -1, -1, -1)))
+        worker._flush()
+    finally:
+        reporter.write(f"Worker-{index} finished\n")

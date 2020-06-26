@@ -9,7 +9,7 @@ import time
 from typing import List, Any
 
 from _pytest.config import _prepareconfig
-from multiprocessing import Process, Queue, Semaphore
+from multiprocessing import Process, Queue, Semaphore, JoinableQueue
 
 from pytest_mproc import resource_utilization
 from pytest_mproc.config import MPManagerConfig, RoleEnum
@@ -23,6 +23,8 @@ class Coordinator:
     Context manager for kicking of worker Processes to conduct test execution via pytest hooks
     """
 
+    MAX_SIMULTANEOUS_CONNECT = 25
+
     def __init__(self, config: MPManagerConfig):
         """
         :param num_processes: number of parallel executions to be conducted
@@ -35,8 +37,9 @@ class Coordinator:
         self._count = 0
         self._rusage = []
         self._session_start_time = time.time()
-        self._test_q: Queue = None  # set on call to start()
-        self._result_q: Queue = None  # set on call to start()
+        self._test_q: JoinableQueue = None  # set on call to start()
+        self._result_q: JoinableQueue = None  # set on call to start()
+        self._end_sem = Semaphore(0)
         self._reporter = BasicReporter()
 
     @staticmethod
@@ -80,7 +83,6 @@ class Coordinator:
         """
         Process a message (as a worker) from the coordinating process
 
-        :param session: the pytest test session
         :param typ: the kind of messsage
         :param data: payload for the message to be processed
         """
@@ -118,14 +120,24 @@ class Coordinator:
 
     def read_results(self, hook):
         items = self._result_q.get()
+        #self._result_q.task_done()
+        done = []
         while items is not None:
             if isinstance(items, Exception):
                 raise Exception
             for kind, data in items:
+                if kind == 'exit':
+                    worker_index = data[0]
+                    done.append(worker_index)
+                    self._reporter.write(f"COMPLETED: {sorted(done)}\n")
                 self._process_worker_message(hook, kind, data)
+            self._reporter.write("GETTING RESULTS ...\n")
             items = self._result_q.get()
+            #self._result_q.task_done()
+            self._reporter.write(f"GOT RESULT {items} ...\n")
+        self._reporter.write("DONE GETTING RESULTS ...\n")
 
-    def do_work(self, mpconfig: MPManagerConfig, start_sem: Semaphore):
+    def do_work(self, mpconfig: MPManagerConfig, start_sem: Semaphore, end_sem: Semaphore):
         processes : List[Process] = []
         try:
             connect_sem: List[Semaphore] = [Semaphore(0) for i in range(mpconfig.num_processes)]
@@ -135,10 +147,11 @@ class Coordinator:
                 args.update({'role': RoleEnum.WORKER})
                 worker_config = MPManagerConfig(**args)
                 proc = Process(target=worker_main, args=(index, worker_config, mpconfig.role != RoleEnum.MASTER,
-                                                         connect_sem[index], self._reporter))
+                                                         connect_sem[index], self._reporter, start_sem, self._test_q,
+                                                         self._result_q))
                 proc.start()
-                if index % 20 == 19 or index == mpconfig.num_processes-1:
-                    for j in range(batch_index, index):
+                if index % self.MAX_SIMULTANEOUS_CONNECT == self.MAX_SIMULTANEOUS_CONNECT-1 or index == mpconfig.num_processes-1:
+                    for j in range(batch_index, index+1):
                         connect_sem[j].acquire()
                         connect_sem[j].release()
                         self._reporter.write(f"Worker-{j}: Connection established\n")
@@ -148,7 +161,8 @@ class Coordinator:
             def kill_all(*args, **kargs):
                 self._reporter.write("Termination signal received;  killing all workers...")
                 for _ in range(self._num_processes):
-                    self._test_q.put(None, timeout=0)
+                    self._test_q.put(None)
+                    self._test_q.join()
                 for proc in processes:
                     proc.terminate()
                     proc.join(timeout=2)
@@ -156,13 +170,15 @@ class Coordinator:
 
             signal.signal(signal.SIGTERM, kill_all)
             start_sem.release()
-            client = Global.Manager(mpconfig, force_as_client=True)
-            client.wait_lock().acquire()
-            client.wait_lock().release()
+            end_sem.acquire()
             for index, proc in enumerate(processes):
-                if proc:
-                    proc.join()
-            client.signal_satellite_done(mpconfig.num_processes)
+                self._reporter.write(f">>>>>> JOINING Worker-{index}\n")
+                proc.join(timeout=3)
+                self._reporter.write(f">>>>>> JOINED Worker-{index}\n")
+
+            self._result_q.put(None)
+            # self._result_q.join()
+            self._result_q.close()
         except Exception as e:
             import traceback
             self._reporter.write(f">>>>>>>>>>> ERROR in worker manager process: str{e} \n{traceback.format_exc()}\n")
@@ -179,15 +195,32 @@ class Coordinator:
         except Exception:
             self.kill()
 
-    def populate_test_queue(self, tests: List[Any], mpconfig: MPManagerConfig):
-        for test in tests:
-            # Function objects in pytest are not pickle-able, so have to send string nodeid and
-            # do lookup on worker side
-            item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
-            self._test_q.put(item)
-            # signal all workers test q is exhausted:
-        client = Global.Manager(mpconfig, force_as_client=True)
-        client.signal_test_q_populated()
+    def populate_test_queue(self, tests: List[Any], end_sem):
+        try:
+            count = 0
+            for test in tests:
+                # Function objects in pytest are not pickle-able, so have to send string nodeid and
+                # do lookup on worker side
+                item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
+                # self._reporter.write(f"PUTTING TEST {test}...\n")
+                self._test_q.put(item)
+                count += 1
+                if True or count % 20 == 0:
+                    self._test_q.join()
+                # self._reporter.write(f"PUT TEST  {test}\n")
+            self._test_q.join()
+            self._reporter.write("JOINING TEST QUEUE....\n")
+            for _ in range(self._num_processes):
+                # self._reporter.write(f"2222PUTTING NONE... {_}\n")
+                self._test_q.put(None)
+                # self._reporter.write(f"2222 PUT NONE... {_}\n")
+                self._test_q.join()
+                # self._reporter.write(f"2222 JOINED NONE... {_}\n")
+            self._reporter.write("JOINED TEST QUEUE....\n")
+            self._test_q.close()
+            self._reporter.write("CLOSED TEST QUEUE....\n")
+        finally:
+            end_sem.release()
 
     def start(self, mpconfig: MPManagerConfig):
         """
@@ -197,12 +230,13 @@ class Coordinator:
         """
         client = Global.Manager(mpconfig, force_as_client=True)
         client.register_satellite(mpconfig.num_processes)
-        self._test_q: Queue = client.get_test_queue()
-        self._result_q: Queue = client.get_results_queue()
+        self._test_q: JoinableQueue = JoinableQueue()
+        self._result_q: JoinableQueue = JoinableQueue()
         start_sem = Semaphore(0)
-        self._worker_manager_process = Process(target=self.do_work, args=(mpconfig, start_sem))
+        self._worker_manager_process = Process(target=self.do_work, args=(mpconfig, start_sem, self._end_sem))
         self._worker_manager_process.start()
         start_sem.acquire()
+        start_sem.release()
         return self
 
     def set_items(self, tests):
@@ -219,8 +253,9 @@ class Coordinator:
             self._tests.insert(0, groups[key])
 
     def kill(self):
+        self._reporter.write("SHUTTING DOWN...\n")
+        self._worker_manager_process.join()
         self._worker_manager_process.terminate()
-        self._worker_manager_process.join(timeout=5)
 
     def run(self, session):
         """
@@ -233,14 +268,10 @@ class Coordinator:
         mpconfig = session.config.option.mpconfig
         # we are the root node, so populate the tests
         if mpconfig.role == RoleEnum.MASTER:
-            populate_tests_process = Process(target=self.populate_test_queue, args=(self._tests, mpconfig))
+            populate_tests_process = Process(target=self.populate_test_queue, args=(self._tests, self._end_sem))
             populate_tests_process.start()
-            self.read_results(session.config.hook)  # only master will read results and post reports through pytest
-            populate_tests_process.join(timeout=1)  # should never time out since workers are done
-        self._worker_manager_process.join()
-        if mpconfig.role == RoleEnum.MASTER:
-            self._test_q.close()
-            self._result_q.close()
+        self.read_results(session.config.hook)  # only master will read results and post reports through pytest
+        populate_tests_process.join(timeout=1)  # should never time out since workers are done
         end_rusage = resource.getrusage(resource.RUSAGE_SELF)
         time_span = time.time() - start_time
         time_span, ucpu, scpu, addl_mem_usg = resource_utilization(time_span=time_span,
@@ -249,6 +280,8 @@ class Coordinator:
 
         sys.stdout.write("\r\n")
         self._output_summary(time_span, ucpu, scpu, addl_mem_usg)
+        self._reporter.write(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  MAIN THREAD DONE\n")
+        self._worker_manager_process.join()
 
 
 if __name__ == "__main__":

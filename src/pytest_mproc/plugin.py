@@ -245,15 +245,12 @@ def pytest_fixture_setup(fixturedef, request):
                                     my_cache_key,
                                     None)
         return fixturedef.cached_result[0]
-        # param_index = request.param_index if not hasattr(request, "param") else request.param
-        # return request.config.mproc_node_manager.get_fixturedef(fixturedef, param_index)
     elif fixturedef.scope == 'global':
         assert request.config.option.mpconfig.global_fixtures.get(fixturedef.argname) is not None
         fixturedef.cached_result = (request.config.option.mpconfig.global_fixtures.get(fixturedef.argname),
                                     my_cache_key,
                                     None)
         return fixturedef.cached_result[0]
-        # return request.config.mproc_global_manager.get_fixturedef(fixturedef, request)
 
 
 def process_fixturedef(fixturedef, request):
@@ -387,6 +384,9 @@ def pytest_sessionfinish(session):
     if session.config.option.collectonly:
         return
     mpconfig = session.config.option.mpconfig
+    if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
+        if hasattr(session.config, "coordinator"):
+            session.config.coordinator.kill()
     if mpconfig.role == RoleEnum.MASTER:
         try:
             session.config.mproc_global_manager.shutdown()
@@ -397,8 +397,6 @@ def pytest_sessionfinish(session):
             session.config.mproc_node_manager.shutdown()
         except Exception as e:
             reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
-        if hasattr(session.config, "coordinator"):
-            session.config.coordinator.kill()
     generated = getattr(session.config, "generated_fixtures", [])
     errors = []
     for item in generated:

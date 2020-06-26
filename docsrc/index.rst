@@ -57,7 +57,14 @@ or to specify use of all available cores:
 
 % pytest --cores auto [remaining arguments]
 
-You can also specify things like "auto*2" or "auto/2" for number of cores
+You can also specify things like "auto*2" or "auto/2" for number of cores.
+
+.. caution::
+   Overscribing CPUs will cause additional overhead.  *pytest_mproc* kicks off all worker threads up front, and
+   each worker does identical processing to independently come up with the list of tests.  When the number of
+   threads is less than or equal to the number of cores ("a batch"), this adds little overhead.  Once beyond that, each
+   additional (partial) batch will add more overhead, as the CPU must be split across multiple threads for some or all
+   cores.
 
 Disabling Mproc from Command Line
 =================================
