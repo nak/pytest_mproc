@@ -6,10 +6,11 @@ import resource
 import signal
 import sys
 import time
+from _queue import Empty
 from typing import List, Any
 
 from _pytest.config import _prepareconfig
-from multiprocessing import Process, Queue, Semaphore, JoinableQueue
+from multiprocessing import Process, Semaphore, JoinableQueue
 
 from pytest_mproc import resource_utilization
 from pytest_mproc.config import MPManagerConfig, RoleEnum
@@ -41,6 +42,8 @@ class Coordinator:
         self._result_q: JoinableQueue = None  # set on call to start()
         self._end_sem = Semaphore(0)
         self._reporter = BasicReporter()
+        self._node_fixture_q = None
+        self._exit_q = JoinableQueue()
 
     @staticmethod
     def _write_sep(s, txt):
@@ -103,6 +106,7 @@ class Coordinator:
                     index, worker_count, exitstatus, duration, rusage = data  # which process and count of tests run
                     time_span, ucpu, scpu, unshared_mem = rusage
                     self._rusage.append((worker_count, time_span, ucpu, scpu, unshared_mem))
+                    self._exit_q.put(index)
                 except:
                     pass
                     # self._reporter.write(f"Unable to process rusage: {data}\n")
@@ -120,22 +124,12 @@ class Coordinator:
 
     def read_results(self, hook):
         items = self._result_q.get()
-        #self._result_q.task_done()
-        done = []
         while items is not None:
             if isinstance(items, Exception):
                 raise Exception
             for kind, data in items:
-                if kind == 'exit':
-                    worker_index = data[0]
-                    done.append(worker_index)
-                    self._reporter.write(f"COMPLETED: {sorted(done)}\n")
                 self._process_worker_message(hook, kind, data)
-            self._reporter.write("GETTING RESULTS ...\n")
             items = self._result_q.get()
-            #self._result_q.task_done()
-            self._reporter.write(f"GOT RESULT {items} ...\n")
-        self._reporter.write("DONE GETTING RESULTS ...\n")
 
     def do_work(self, mpconfig: MPManagerConfig, start_sem: Semaphore, end_sem: Semaphore):
         processes : List[Process] = []
@@ -148,7 +142,7 @@ class Coordinator:
                 worker_config = MPManagerConfig(**args)
                 proc = Process(target=worker_main, args=(index, worker_config, mpconfig.role != RoleEnum.MASTER,
                                                          connect_sem[index], self._reporter, start_sem, self._test_q,
-                                                         self._result_q))
+                                                         self._result_q, self._node_fixture_q[index]))
                 proc.start()
                 if index % self.MAX_SIMULTANEOUS_CONNECT == self.MAX_SIMULTANEOUS_CONNECT-1 or index == mpconfig.num_processes-1:
                     for j in range(batch_index, index+1):
@@ -162,7 +156,7 @@ class Coordinator:
                 self._reporter.write("Termination signal received;  killing all workers...")
                 for _ in range(self._num_processes):
                     self._test_q.put(None)
-                    self._test_q.join()
+                    #self._test_q.join()
                 for proc in processes:
                     proc.terminate()
                     proc.join(timeout=2)
@@ -171,13 +165,17 @@ class Coordinator:
             signal.signal(signal.SIGTERM, kill_all)
             start_sem.release()
             end_sem.acquire()
+            while True:
+                try:
+                    index = self._exit_q.get(timeout=0)
+                    processes[index].terminate()
+                except Empty:
+                    break
+
             for index, proc in enumerate(processes):
-                self._reporter.write(f">>>>>> JOINING Worker-{index}\n")
                 proc.join(timeout=3)
-                self._reporter.write(f">>>>>> JOINED Worker-{index}\n")
 
             self._result_q.put(None)
-            # self._result_q.join()
             self._result_q.close()
         except Exception as e:
             import traceback
@@ -202,23 +200,15 @@ class Coordinator:
                 # Function objects in pytest are not pickle-able, so have to send string nodeid and
                 # do lookup on worker side
                 item = [t.nodeid for t in test] if isinstance(test, list) else [test.nodeid]
-                # self._reporter.write(f"PUTTING TEST {test}...\n")
                 self._test_q.put(item)
                 count += 1
-                if True or count % 20 == 0:
+                if count % 20 == 0:
                     self._test_q.join()
-                # self._reporter.write(f"PUT TEST  {test}\n")
             self._test_q.join()
-            self._reporter.write("JOINING TEST QUEUE....\n")
             for _ in range(self._num_processes):
-                # self._reporter.write(f"2222PUTTING NONE... {_}\n")
                 self._test_q.put(None)
-                # self._reporter.write(f"2222 PUT NONE... {_}\n")
                 self._test_q.join()
-                # self._reporter.write(f"2222 JOINED NONE... {_}\n")
-            self._reporter.write("JOINED TEST QUEUE....\n")
             self._test_q.close()
-            self._reporter.write("CLOSED TEST QUEUE....\n")
         finally:
             end_sem.release()
 
@@ -232,6 +222,7 @@ class Coordinator:
         client.register_satellite(mpconfig.num_processes)
         self._test_q: JoinableQueue = JoinableQueue()
         self._result_q: JoinableQueue = JoinableQueue()
+        self._node_fixture_q = [JoinableQueue() for _ in range(self._num_processes)]
         start_sem = Semaphore(0)
         self._worker_manager_process = Process(target=self.do_work, args=(mpconfig, start_sem, self._end_sem))
         self._worker_manager_process.start()
@@ -253,7 +244,6 @@ class Coordinator:
             self._tests.insert(0, groups[key])
 
     def kill(self):
-        self._reporter.write("SHUTTING DOWN...\n")
         self._worker_manager_process.join()
         self._worker_manager_process.terminate()
 
@@ -280,7 +270,6 @@ class Coordinator:
 
         sys.stdout.write("\r\n")
         self._output_summary(time_span, ucpu, scpu, addl_mem_usg)
-        self._reporter.write(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  MAIN THREAD DONE\n")
         self._worker_manager_process.join()
 
 

@@ -2,7 +2,7 @@ import os
 import socket
 import sys
 import time
-from multiprocessing import Queue, Semaphore, JoinableQueue
+from multiprocessing import Semaphore, JoinableQueue
 
 import pytest
 from _pytest.config import _prepareconfig, ConftestImportFailure
@@ -11,8 +11,6 @@ import resource
 
 from pytest_mproc import resource_utilization
 from pytest_mproc.config import MPManagerConfig, RoleEnum
-from pytest_mproc.fixtures import Global
-from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
@@ -54,11 +52,13 @@ class WorkerSession:
     """
 
     def __init__(self, index, result_q: JoinableQueue, test_q: JoinableQueue,
-                 test_generator, is_remote: bool, mpconfig, start_sem: Semaphore):
+                 test_generator, is_remote: bool, mpconfig, start_sem: Semaphore,
+                 node_fixture_q: JoinableQueue):
         self._mpconfig = mpconfig
         self._is_remote = is_remote
         self._result_q = result_q
         self._test_q = test_q
+        self._node_fixture_q = node_fixture_q
         self._index = index
         self._test_generator = test_generator
         self._start_sem = start_sem
@@ -95,7 +95,6 @@ class WorkerSession:
                 self._result_q.put(self._buffered_results, timeout)
             else:
                 self._result_q.put(self._buffered_results)
-            # self._result_q.join()
             self._buffered_results = []
             self._timestamp = time.time()
 
@@ -188,16 +187,14 @@ class WorkerSession:
         :param exitstatus: exit status of the test suite run
         """
         # timeouts on queues sometimes can still have process hang if there is a bottleneck, so use alarm
-        BasicReporter().write(f"Worker-{self._index} PUTTING EXIT STATUS...\n")
         self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time,
                            self._resource_utilization))
         self._flush()
-        BasicReporter().write(f"Worker-{self._index} PUT EXIT STATUS.\n")
         return True
 
 
 def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semaphore, reporter, start_sem: Semaphore,
-         test_q: JoinableQueue, result_q: JoinableQueue):
+         test_q: JoinableQueue, result_q: JoinableQueue, node_fixture_q: JoinableQueue):
     """
     main worker function, launched as a multiprocessing Process
 
@@ -212,10 +209,10 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semapho
                 test = test_q.get()
         finally:
             test_q.task_done()
-            reporter.write(f"Worker-{index} test queue done\n")
 
     args = sys.argv[1:]
-    worker = WorkerSession(index, result_q, test_q, generator(test_q), is_remote, mpconfig, start_sem)
+    worker = WorkerSession(index, result_q, test_q, generator(test_q), is_remote, mpconfig, start_sem,
+                           node_fixture_q)
     try:
 
         try:
@@ -250,8 +247,6 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semapho
         mpconfig.role = RoleEnum.WORKER
         mpconfig.index = index
         config.option.mpconfig = mpconfig
-        config.option.mpconfig.node_fixtures = None
-        config.option.mpconfig.global_fixtures = None
         config.option.connect_sem = connect_sem
         assert(mpconfig.role == RoleEnum.WORKER)
         try:
@@ -267,4 +262,4 @@ def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semapho
         worker._put('exit', (index, -1, -1, -1, (-1. -1, -1, -1)))
         worker._flush()
     finally:
-        reporter.write(f"Worker-{index} finished\n")
+        reporter.write(f"\nWorker-{index} finished\n")

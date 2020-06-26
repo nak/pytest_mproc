@@ -133,7 +133,7 @@ def pytest_cmdline_main(config):
             role=role,
             num_processes=0)
         config.mproc_global_manager = Global.Manager(config.option.mpconfig)
-        config.mproc_node_manager = Node.Manager(config.option.mpconfig)
+        #config.mproc_node_manager = Node.Manager(config.option.mpconfig)
         reporter.write(">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
               "not running multiprocessing <<<<<\n", yellow=True)
         return
@@ -186,7 +186,7 @@ def pytest_cmdline_main(config):
         # process config info in parallel to this thread
         config.coordinator = Coordinator(mpconfig)
     config.mproc_global_manager = Global.Manager(mpconfig)
-    config.mproc_node_manager = Node.Manager(mpconfig)
+    #config.mproc_node_manager = Node.Manager(mpconfig)
     if role != RoleEnum.WORKER:
         config.coordinator.start(mpconfig)
     elif hasattr(config.option, "connect_sem"):
@@ -213,11 +213,10 @@ def pytest_fixture_setup(fixturedef, request):
     my_cache_key = fixturedef.cache_key(request)
     if request.config.option.mpconfig.role == RoleEnum.WORKER:
         if request.config.option.mpconfig.global_fixtures is None:
-            client = request.config.mproc_global_manager # Global.Manager(request.config.option.mpconfig, force_as_client=True)
+            client = request.config.mproc_global_manager
             request.config.option.mpconfig.global_fixtures = client.get_fixtures()
         if request.config.option.mpconfig.node_fixtures is None:
-            client = request.config.mproc_node_manager # Node.Manager(request.config.option.mpconfig, force_as_client=True)
-            request.config.option.mpconfig.node_fixtures = client.get_fixtures()
+            request.config.option.mpconfig.node_fixtures = request.config.option.mproc_worker._node_fixture_q.get()
         if fixturedef.scope == 'global':
             fixturedef.cached_result = (request.config.option.mpconfig.global_fixtures.get(fixturedef.argname),
                                         my_cache_key,
@@ -339,7 +338,9 @@ def pytest_runtestloop(session):
         try:
             if mpconfig.role == RoleEnum.MASTER:
                 session.config.mproc_global_manager.register_fixtures(mpconfig.global_fixtures)
-            session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
+            #session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
+            for q in session.config.coordinator._node_fixture_q:
+                q.put(mpconfig.node_fixtures)
         except Exception as e:
             import pickle
             for i, v in mpconfig.node_fixtures.items():
@@ -392,11 +393,11 @@ def pytest_sessionfinish(session):
             session.config.mproc_global_manager.shutdown()
         except Exception as e:
             reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
-    if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
-        try:
-            session.config.mproc_node_manager.shutdown()
-        except Exception as e:
-            reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
+    #if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
+    #    try:
+    #        session.config.mproc_node_manager.shutdown()
+    #    except Exception as e:
+    #        reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
     generated = getattr(session.config, "generated_fixtures", [])
     errors = []
     for item in generated:
