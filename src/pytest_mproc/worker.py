@@ -2,15 +2,17 @@ import os
 import socket
 import sys
 import time
-from multiprocessing import Semaphore, JoinableQueue
+from multiprocessing import Semaphore, JoinableQueue, Queue, Process
+from typing import Optional, Any, Dict
 
 import pytest
-from _pytest.config import _prepareconfig, ConftestImportFailure
+from _pytest.config import _prepareconfig
 import pytest_cov.embed
 import resource
 
 from pytest_mproc import resource_utilization
-from pytest_mproc.config import MPManagerConfig, RoleEnum
+from pytest_mproc.fixtures import Node
+from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
@@ -51,20 +53,12 @@ class WorkerSession:
     Handles reporting of test status and the like
     """
 
-    def __init__(self, index, result_q: JoinableQueue, test_q: JoinableQueue,
-                 test_generator, is_remote: bool, mpconfig, start_sem: Semaphore,
-                 node_fixture_q: JoinableQueue):
-        self._mpconfig = mpconfig
-        self._is_remote = is_remote
-        self._result_q = result_q
-        self._test_q = test_q
-        self._node_fixture_q = node_fixture_q
+    def __init__(self, index, host: str, port: int, test_q: JoinableQueue, result_q: Queue):
+        self._is_remote = host != "127.0.0.1"
+        self._host = host
+        self._port = port
         self._index = index
-        self._test_generator = test_generator
-        self._start_sem = start_sem
-
         self._name = "worker-%d" % (index + 1)
-        self._reports = []
         self._count = 0
         self._session_start_time = time.time()
         self._buffered_results = []
@@ -72,6 +66,12 @@ class WorkerSession:
         self._timestamp = time.time()
         self._last_execution_time = time.time()
         self._resource_utilization = -1, -1, -1, -1
+        self._reporter = BasicReporter()
+        self._global_fixtures: Dict[str, Any] = {}
+        self._node_fixtures: Dict[str, Any] = {}
+        self._test_q = test_q
+        self._result_q = result_q
+        self._node_fixture_manager = None
 
     def _put(self, kind, data, timeout=None):
         """
@@ -98,6 +98,13 @@ class WorkerSession:
             self._buffered_results = []
             self._timestamp = time.time()
 
+    def set_up(self, test_q: JoinableQueue, result_q: Queue, exit_q: JoinableQueue, global_fixtures: Dict[str, Any]):
+        self._test_q = test_q
+        self._result_q = result_q
+        self._exit_q = exit_q
+        self._global_fixtures = global_fixtures
+        self._reporter.write(f">>>>>> SETUP {self}\n")
+
     def test_loop(self, session):
         """
         This is where the action takes place.  We override the usual implementation since
@@ -106,8 +113,6 @@ class WorkerSession:
 
         :param session:  Where the tests generator is kept
         """
-        self._start_sem.acquire()
-        self._start_sem.release()
         start_time = time.time()
         rusage = resource.getrusage(resource.RUSAGE_SELF)
         try:
@@ -161,9 +166,60 @@ class WorkerSession:
 
         :return: the generator of tests to run
         """
+        assert self._test_q is not None
+
+        def generator(test_q: JoinableQueue):
+            test = test_q.get()
+            while test:
+                test_q.task_done()
+                yield test
+                test = test_q.get()
+            test_q.task_done()
+
+        session.items_generator = generator(self._test_q)
         session._named_items = {item.nodeid: item for item in session.items}
-        session.items_generator = self._test_generator
         return session.items
+
+    @classmethod
+    def start(cls, index: int, host: str, port: int, start_sem: Semaphore,
+              test_q: JoinableQueue, result_q: Queue, node_port: int, fixture_sem: Semaphore) -> Process:
+        proc = Process(target=cls.run, args=(index, host, port, start_sem, test_q, result_q, node_port, fixture_sem))
+        proc.start()
+        return proc
+
+    @staticmethod
+    def run(index: int, host: str, port: int, start_sem: Semaphore,
+            test_q: JoinableQueue, result_q: Queue, node_port: int, fixture_sem: Semaphore) -> None:
+
+        worker = WorkerSession(index, host, port, test_q, result_q)
+        worker._node_fixture_manager = Node.Manager(as_main=False, port=node_port, name=f"Worker-{index}")
+        worker._fixture_sem = fixture_sem
+        args = sys.argv[1:]
+        config = _prepareconfig(args, plugins=[])
+        # unregister terminal (don't want to output to stdout from worker)
+        # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
+        config.pluginmanager.unregister(name="terminal")
+        # register our listener, and configure to let pycov-test knoew that we are a slave (aka worker) thread
+        config.pluginmanager.register(worker, "mproc_worker")
+        config.option.mproc_worker = worker
+        from pytest_mproc.main import Orchestrator
+        worker._client = Orchestrator.Manager(addr=(worker._host, worker._port))
+        workerinput = {'slaveid': "worker-%d" % worker._index,
+                       'workerid': "worker-%d" % worker._index,
+                       'cov_master_host': socket.gethostname(),
+                       'cov_slave_output': os.path.join(os.getcwd(),
+                                                         "worker-%d" % worker._index),
+                       'cov_master_topdir': os.getcwd()
+                       }
+        config.slaveinput = workerinput
+        config.slaveoutput = workerinput
+        start_sem.release()
+        try:
+            # and away we go....
+            config.hook.pytest_cmdline_main(config=config)
+        finally:
+            config._ensure_unconfigure()
+            worker._reporter.write(f"\nWorker-{index} finished\n")
 
     def pytest_internalerror(self, excrepr):
         self._put('error_message', excrepr)
@@ -192,74 +248,26 @@ class WorkerSession:
         self._flush()
         return True
 
-
-def main(index, mpconfig: MPManagerConfig, is_remote: bool, connect_sem: Semaphore, reporter, start_sem: Semaphore,
-         test_q: JoinableQueue, result_q: JoinableQueue, node_fixture_q: JoinableQueue):
-    """
-    main worker function, launched as a multiprocessing Process
-
-    :param index: index assigned to the worker Process
-    """
-    def generator(test_q: JoinableQueue):
-        try:
-            test = test_q.get()
-            while test:
-                test_q.task_done()
-                yield test
-                test = test_q.get()
-        finally:
-            test_q.task_done()
-
-    args = sys.argv[1:]
-    worker = WorkerSession(index, result_q, test_q, generator(test_q), is_remote, mpconfig, start_sem,
-                           node_fixture_q)
-    try:
-
-        try:
-            # use pytest's usual method to prepare configuration
-            # we have to re-generate the config in this worker Process, as we cannot pickle the more complex
-            # _pytest.python.Function objects across the Queue interface.  This is a slight bit
-            # of awkwardness and some overhead per process, but this overhead pales in significance
-            # to xdist's use of rsync
-            config = _prepareconfig(args, plugins=[])
-        except ConftestImportFailure as e:
-            worker._put(('exception', e))
-            worker._flush()
-        # unregister terminal (don't want to output to stdout from worker)
-        # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
-        config.pluginmanager.unregister(name="terminal")
-        # register our listener, and configure to let pycov-test knoew that we are a slave (aka worker) thread
-        config.pluginmanager.register(worker, "mproc_worker")
-        config.option.mproc_worker = worker
-        # setup slave info;  this is important to have something defined for these fields
-        # so that pycov can pickup on the distributed nature of the test run,
-        # and that this a worker(slave) process
-        workerinput = {'slaveid': "worker-%d" % index,
-                       'workerid': "worker-%d" % index,
-                       "workercount": mpconfig.num_processes,
-                       "slavecount": mpconfig.num_processes,
-                       'cov_master_host': socket.gethostname(),
-                       'cov_slave_output': os.path.join(os.getcwd(), "worker-%d" % index),
-                       'cov_master_topdir': os.getcwd()
-                       }
-        config.slaveinput = workerinput
-        config.slaveoutput = workerinput
-        mpconfig.role = RoleEnum.WORKER
-        mpconfig.index = index
-        config.option.mpconfig = mpconfig
-        config.option.connect_sem = connect_sem
-        assert(mpconfig.role == RoleEnum.WORKER)
-        try:
-            # and away we go....
-            config.hook.pytest_cmdline_main(config=config)
-        finally:
-            config._ensure_unconfigure()
-    except Exception as e:
-        import traceback
-        reporter.write(f"Exception in worker thread: {str(e)}\n")
-        reporter.write(f"Exception in worker thread: {traceback.format_exc()}\n")
-        worker._put('exception', e, timeout=3)
-        worker._put('exit', (index, -1, -1, -1, (-1. -1, -1, -1)))
-        worker._flush()
-    finally:
-        reporter.write(f"\nWorker-{index} finished\n")
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_fixture_setup(self, fixturedef, request):
+        my_cache_key = fixturedef.cache_key(request)
+        if not getattr(request.config.option, "mproc_numcores") or fixturedef.scope not in ['node', 'global']:
+            return
+        if fixturedef.scope == 'node':
+            if fixturedef.argname not in self._node_fixtures:
+                self._fixture_sem.acquire()
+                self._node_fixtures[fixturedef.argname] = self._node_fixture_manager.get_fixture(fixturedef.argname)
+                self._fixture_sem.release()
+            fixturedef.cached_result = (self._node_fixtures.get(fixturedef.argname),
+                                        my_cache_key,
+                                        None)
+            return self._node_fixtures.get(fixturedef.argname)
+        if fixturedef.scope == 'global':
+            if fixturedef.argname not in self._global_fixtures:
+                self._fixture_sem.acquire()
+                self._global_fixtures[fixturedef.argname] = self._client.get_fixture(fixturedef.argname)
+                self._fixture_sem.release()
+            fixturedef.cached_result = (self._global_fixtures.get(fixturedef.argname),
+                                        my_cache_key,
+                                        None)
+            return self._global_fixtures.get(fixturedef.argname)

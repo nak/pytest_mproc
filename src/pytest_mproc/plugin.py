@@ -13,8 +13,6 @@ from traceback import format_exc
 import _pytest
 
 from pytest_mproc import find_free_port
-from pytest_mproc.config import MPManagerConfig, RoleEnum
-from pytest_mproc.fixtures import Node, Global
 
 import pytest
 import _pytest.terminal
@@ -22,6 +20,7 @@ import socket
 
 from multiprocessing import cpu_count
 from pytest_mproc.coordinator import Coordinator
+from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import is_degraded, BasicReporter
 
 
@@ -109,44 +108,22 @@ def pytest_cmdline_main(config):
     reporter = BasicReporter()
     worker = getattr(config.option, "mproc_worker", None)
     mproc_server_port = getattr(config.option, 'mproc_server_port', None)
+    mproc_server_host = _get_ip_addr() if mproc_server_port is not None else "127.0.0.1"
     mproc_client_connect = getattr(config.option, "mproc_client_connect", None)
     if mproc_client_connect and mproc_server_port:
         raise pytest.UsageError("Cannot specify both -as-master and --as-client at same time")
     config.option.numprocesses = config.option.mproc_numcores  # this is what pycov uses to determine we are distributed
-    # We are a:
-    #   WORKER no matter what if mproc_worker attr is set (per worker_main routine, i.e. started as a worker thread)
-    #   MASTER if server port is specified on command line OR if neither server port nor client connection is specified
-    #      on command line. In the latter case, the request is simply to run all tests on localhost, not remtoe workers
-    #   COORDINATOR if client connect is specified
-    role = RoleEnum.WORKER if worker is not None else \
-        RoleEnum.MASTER if (mproc_server_port is not None or
-                            (mproc_server_port is None and mproc_client_connect is None)) else \
-        RoleEnum.COORDINATOR
-    if role == RoleEnum.MASTER:
-        reporter.write(f"Running as {role}: {_get_ip_addr()}:{mproc_server_port}\n", green=True)
-
+    if config.option.numprocesses and config.option.numprocesses < 0:
+        raise pytest.UsageError("Number of cores must be greater than or equal to zero when running as a master")
     # validation
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
-        config.option.mpconfig = MPManagerConfig(
-            global_mgr_host='127.0.0.1',
-            global_mgr_port=find_free_port(),
-            role=role,
-            num_processes=0)
-        config.mproc_global_manager = Global.Manager(config.option.mpconfig)
-        #config.mproc_node_manager = Node.Manager(config.option.mpconfig)
         reporter.write(">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
               "not running multiprocessing <<<<<\n", yellow=True)
         return
-    elif hasattr(config.option, "mpconfig"):
-        mpconfig = config.option.mpconfig
-    elif mproc_server_port:
-        if config.option.numprocesses < 0:
-            raise pytest.UsageError("Number of cores must be greater than or equal to zero when running as a master")
-        mpconfig = MPManagerConfig(global_mgr_host=_get_ip_addr(),
-                                   global_mgr_port=mproc_server_port,
-                                   role=role,
-                                   num_processes=config.option.mproc_numcores)
-    elif mproc_client_connect:
+    if worker:
+        return
+
+    if mproc_client_connect:
         if config.option.numprocesses < 1:
             raise pytest.UsageError("Number of cores must be 1 or more when running as client")
         try:
@@ -158,18 +135,24 @@ def pytest_cmdline_main(config):
         except ValueError:
             raise pytest.UsageError("When specifying connection as client, port must be an integer value")
 
-        mpconfig = MPManagerConfig(role=role,
-                                   global_mgr_host=host,
-                                   global_mgr_port=port,
-                                   num_processes=config.option.mproc_numcores)
     else:
-        if config.option.numprocesses < 1:
-            raise pytest.UsageError("Number of cores must be 1 or more when running on a single node")
-        mpconfig = MPManagerConfig(role=role,
-                                   global_mgr_host='127.0.0.1',
-                                   global_mgr_port=find_free_port(),
-                                   num_processes=config.option.mproc_numcores)
-    config.option.mpconfig = mpconfig
+        if mproc_server_port is not None:
+            host, port = mproc_server_host, mproc_server_port  # running distributed
+        else:
+            if config.option.numprocesses < 1:
+                raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
+            host, port = "127.0.0.1", find_free_port()  # running localhost only
+
+        config.option.mproc_main = Orchestrator(host=host, port=port or find_free_port())
+        BasicReporter().write(f"Started on port {port}")
+        reporter.write(f"Running as main @ {host}:{port}\n", green=True)
+
+    if config.option.numprocesses > 0:
+        config.option.mproc_coordinator = Coordinator(config.option.numprocesses,
+                                                      host=host,
+                                                      port=port,
+                                                      config=config)
+
     # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
     config.option.dist = "no"
     val = config.getvalue
@@ -179,18 +162,6 @@ def pytest_cmdline_main(config):
             raise pytest.UsageError(
                 "--pdb is incompatible with distributing tests."
             )  # noqa: E501
-    config.coordinator = None
-    if role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
-        # in main thread,
-        # instantiate coordinator here and start to kick off processing on workers early, so they can
-        # process config info in parallel to this thread
-        config.coordinator = Coordinator(mpconfig)
-    config.mproc_global_manager = Global.Manager(mpconfig)
-    #config.mproc_node_manager = Node.Manager(mpconfig)
-    if role != RoleEnum.WORKER:
-        config.coordinator.start(mpconfig)
-    elif hasattr(config.option, "connect_sem"):
-        config.option.connect_sem.release()
 
 
 def pytest_sessionstart(session):
@@ -208,75 +179,20 @@ def pytest_configure(config):
     config.option.dist = "no"
 
 
-@pytest.mark.tryfirst
-def pytest_fixture_setup(fixturedef, request):
-    my_cache_key = fixturedef.cache_key(request)
-    if request.config.option.mpconfig.role == RoleEnum.WORKER:
-        if request.config.option.mpconfig.global_fixtures is None:
-            client = request.config.mproc_global_manager
-            request.config.option.mpconfig.global_fixtures = client.get_fixtures()
-        if request.config.option.mpconfig.node_fixtures is None:
-            request.config.option.mpconfig.node_fixtures = request.config.option.mproc_worker._node_fixture_q.get()
-        if fixturedef.scope == 'global':
-            fixturedef.cached_result = (request.config.option.mpconfig.global_fixtures.get(fixturedef.argname),
-                                        my_cache_key,
-                                        None)
-            return request.config.option.mpconfig.global_fixtures.get(fixturedef.argname)
-        elif fixturedef.scope == 'node':
-            fixturedef.cached_result = (request.config.option.mpconfig.node_fixtures.get(fixturedef.argname),
-                                        my_cache_key,
-                                        None)
-            return request.config.option.mpconfig.node_fixtures.get(fixturedef.argname)
-        else:
-            return
-
-    if not getattr(request.config.option, "mproc_numcores") or fixturedef.scope not in ['node', 'global']:
-        return
-    if not hasattr(request.config, "generated_fixtures"):
-        request.config.generated_fixtures = []
-    if request.config.option.mpconfig.global_fixtures is None:
-        request.config.option.mpconfig.global_fixtures = {}
-    if request.config.option.mpconfig.node_fixtures is None:
-        request.config.option.mpconfig.node_fixtures = {}
-    if fixturedef.scope == 'node':
-        assert request.config.option.mpconfig.node_fixtures.get(fixturedef.argname) is not None
-        fixturedef.cached_result = (request.config.option.mpconfig.node_fixtures.get(fixturedef.argname),
-                                    my_cache_key,
-                                    None)
-        return fixturedef.cached_result[0]
-    elif fixturedef.scope == 'global':
-        assert request.config.option.mpconfig.global_fixtures.get(fixturedef.argname) is not None
-        fixturedef.cached_result = (request.config.option.mpconfig.global_fixtures.get(fixturedef.argname),
-                                    my_cache_key,
-                                    None)
-        return fixturedef.cached_result[0]
-
-
-def process_fixturedef(fixturedef, request):
+def process_fixturedef(target, fixturedef, request):
     generated = request.config.generated_fixtures
-    global_fixtures = request.config.option.mpconfig.global_fixtures
-    node_fixtures = request.config.option.mpconfig.node_fixtures
-    config = request.config
-    mpconfig: MPManagerConfig = config.option.mpconfig
     if not fixturedef or fixturedef.scope not in ['global', 'node']:
         return
+    fixtures = target.fixtures()
     name = fixturedef.argname
-    assert mpconfig.role != RoleEnum.WORKER
-    if mpconfig.role == RoleEnum.MASTER and fixturedef.scope == 'global' and name not in global_fixtures:
-        global_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
-        val = global_fixtures[name](*fixturedef.argnames)
+    if name not in fixtures:
+        fixture = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
+        val = fixture(*fixturedef.argnames)
         if inspect.isgenerator(val):
             generated.append(val)
             val = next(val)
-        mpconfig.global_fixtures[name] = val
-    if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR] and fixturedef.scope == 'node'\
-            and name not in node_fixtures:
-        node_fixtures[name] = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
-        val = node_fixtures[name](*fixturedef.argnames)
-        if inspect.isgenerator(val):
-            generated.append(val)
-            val = next(val)
-        mpconfig.node_fixtures[name] = val
+        target.put_fixture(name, val)
+        target.fixtures()[name] = val
 
 
 def pytest_runtestloop(session):
@@ -291,9 +207,6 @@ def pytest_runtestloop(session):
         raise session.Interrupted("%d errors during collection" % session.testsfailed)
 
     if session.config.option.collectonly:
-        if session.config.option.mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
-            if hasattr(session.config, "coordinator"):
-                session.config.coordinator.kill()
         return  # should never really get here, but for consistency
     if len(session.items) == 0:
         return
@@ -301,72 +214,69 @@ def pytest_runtestloop(session):
         # return of None indicates other hook impls will be executed to do the task at hand
         # aka, let the basic hook handle it from here, no distributed processing to be done
         return
-    mpconfig = session.config.option.mpconfig
+    if session.shouldfail:
+        if hasattr(session.config.option, "mproc_coordinator"):
+            session.config.option.mproc_coordinator.kill()
+        if hasattr(session.config.option, "mproc_main"):
+            session.config.option.mproc_main.kill()
+        raise session.Failed(session.shouldfail)
+
     session.config.generated_fixtures = []
-    if mpconfig.role != RoleEnum.WORKER:
-        if mpconfig.global_fixtures is None:
-            mpconfig.global_fixtures = {}
-        if mpconfig.node_fixtures is None:
-            mpconfig.node_fixtures = {}
+
+    if hasattr(session.config.option, "mproc_coordinator"):
+        coordinator = session.config.option.mproc_coordinator
         for item in session.items:
             if session.shouldfail:
                 break
             if hasattr(item, "_request"):
                 for name in item._fixtureinfo.argnames:
                     try:
-                        if name not in mpconfig.global_fixtures and name not in mpconfig.node_fixtures:
-                            fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
-                            if not fixturedef:
-                                continue
+                        fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
+                        if not fixturedef or fixturedef.scope != 'node':
+                            continue
+                        if coordinator and name not in coordinator.fixtures():
                             for argname in fixturedef.argnames:
                                 fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
-                                process_fixturedef(fixdef, item._request)
+                                process_fixturedef(coordinator, fixdef, item._request)
 
-                            process_fixturedef(fixturedef, item._request)
+                            process_fixturedef(coordinator, fixturedef, item._request)
                     except Exception as e:
                         session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
                             f"{format_exc()}"
                         reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
                         break
 
-    if session.shouldfail:
-        if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
-            if hasattr(session.config, "coordinator"):
-                session.config.coordinator.kill()
-        raise session.Failed(session.shouldfail)
-    elif mpconfig.role != RoleEnum.WORKER:
-        try:
-            if mpconfig.role == RoleEnum.MASTER:
-                session.config.mproc_global_manager.register_fixtures(mpconfig.global_fixtures)
-            #session.config.mproc_node_manager.register_fixtures(mpconfig.node_fixtures)
-            for q in session.config.coordinator._node_fixture_q:
-                q.put(mpconfig.node_fixtures)
-        except Exception as e:
-            import pickle
-            for i, v in mpconfig.node_fixtures.items():
-                reporter.write(f">>> {i}\n", red=True)
-                reporter.write(f">>> {pickle.dumps(v)}\n", red=True)
-            session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
-                f"{format_exc()}\n {mpconfig.node_fixtures}"
-            reporter.write(f">>>> Error registering node/global level fixture(s): {str(e)}\n", red=True)
-            if hasattr(session.config, "coordinator"):
-                session.config.coordinator.kill()
-            raise session.Failed(session.shouldfail)
+    if hasattr(session.config.option, "mproc_main"):
+        orchestrator = session.config.option.mproc_main
+        for item in session.items:
+            if session.shouldfail:
+                break
+            if hasattr(item, "_request"):
+                for name in item._fixtureinfo.argnames:
+                    try:
+                        fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
+                        if not fixturedef or fixturedef.scope != 'global':
+                            continue
+                        if orchestrator and name not in orchestrator.fixtures():
+                            for argname in fixturedef.argnames:
+                                fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
+                                process_fixturedef(orchestrator, fixdef, item._request)
 
-    if mpconfig.role != RoleEnum.WORKER:
-        if not session.config.getvalue("collectonly"):
-            # main coordinator loop:
-            with session.config.coordinator as coordinator:
-                try:
-                    coordinator.set_items(session.items)
-                    coordinator.run(session)
-                except Exception as e:
-                    reporter.write(format_exc() + "\n", red=True)
-                    reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
-                    return False
-    elif mpconfig.role == RoleEnum.WORKER:
-        worker = getattr(session.config.option, "mproc_worker")
-        worker.test_loop(session)
+                            process_fixturedef(orchestrator, fixturedef, item._request)
+                    except Exception as e:
+                        session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
+                            f"{format_exc()}"
+                        reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
+                        break
+        try:
+            orchestrator.set_items(session.items)
+            orchestrator.run_loop(session)
+        except Exception as e:
+            reporter.write(format_exc() + "\n", red=True)
+            reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
+            return False
+    if hasattr(session.config.option, "mproc_worker"):
+        session.config.option.mproc_worker.test_loop(session)
 
     return True
 
@@ -374,46 +284,18 @@ def pytest_runtestloop(session):
 def pytest_terminal_summary(terminalreporter: _pytest.terminal.TerminalReporter, exitstatus, config):
     if config.option.collectonly:
         return
-    if config.option.mpconfig.role != RoleEnum.MASTER:
+    if not hasattr(config.option, "mproc_main") and getattr(config.option, "numprocesses", None):
         terminalreporter.line(">>>>>>>>>> This is a satellite processing node. "
                               "Please see master node output for actual test summary <<<<<<<<<<<<",
                               yellow=True)
 
 
 def pytest_sessionfinish(session):
-    reporter = BasicReporter()
     if session.config.option.collectonly:
         return
-    mpconfig = session.config.option.mpconfig
-    if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
-        if hasattr(session.config, "coordinator"):
-            session.config.coordinator.kill()
-    if mpconfig.role == RoleEnum.MASTER:
-        try:
-            session.config.mproc_global_manager.shutdown()
-        except Exception as e:
-            reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
-    #if mpconfig.role in [RoleEnum.MASTER, RoleEnum.COORDINATOR]:
-    #    try:
-    #        session.config.mproc_node_manager.shutdown()
-    #    except Exception as e:
-    #        reporter.write(">>> INTERNAL Error shutting down mproc manager\n", red=True)
-    generated = getattr(session.config, "generated_fixtures", [])
-    errors = []
-    for item in generated:
-        try:
-            try:
-                next(item)
-                raise Exception(f"Fixture generator did not stop {item}")
-            except StopIteration:
-                pass
-        except Exception as e:
-            reporter.write(f">>> Error in exit of fixture context {e}\n", red=True)
-            errors.append(e)
+    if hasattr(session.config.option, "mproc_coordinator"):
+        session.config.option.mproc_coordinator.kill()
 
-    if errors:
-        raise pytest.UsageError(">>> One or more global or node-level fixtures threw an Exception on exit from context") \
-            from errors[0]
 
 ################
 # Process-safe temp dir
@@ -469,3 +351,4 @@ def mp_tmp_dir(mp_tmpdir_factory: TmpDirFactory):
     # so use this instead
     with mp_tmpdir_factory.create_tmp_dir("PYTEST_MPROC_LAZY_CLEANUP" not in os.environ) as tmp_dir:
         yield tmp_dir
+

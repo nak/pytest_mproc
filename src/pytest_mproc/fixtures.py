@@ -1,14 +1,11 @@
 import os
-import signal
+import queue
 import sys
 import time
-from multiprocessing import Queue, Lock, JoinableQueue
 from multiprocessing.managers import BaseManager
-from typing import Any
+from typing import Any, Dict, Tuple
 
 import _pytest
-
-from pytest_mproc.config import MPManagerConfig, RoleEnum
 
 _getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem
 
@@ -28,114 +25,94 @@ _pytest.fixtures.FixtureRequest._getscopeitem = _getscopeitem_redirect
 
 
 class FixtureManager(BaseManager):
+
     class Value:
 
-        def __init__(self, value: Any):
-            self._value = value
+        def __init__(self, val):
+            self._val = val
 
         def value(self):
-            return self._value
+            return self._val
 
-    def __init__(self, host, port, is_master: bool):
-        self._fixtures = {}
-        self._is_master = is_master
-        if not is_master:
-            self.__class__.register("get_start_gate")
-            self.__class__.register("wait_lock")
+    def __init__(self, addr: Tuple[str, int], as_main: bool, passw: str):
+        if not as_main:
+            # client
+            self.__class__.register("get_fixture_")
+            self.__class__.register("put_fixture")
         else:
-            self._start_gate = Queue()
-            self._gate = Queue()
-            self._wait_lock = Lock()
-            self._wait_lock.acquire()
-            self.__class__.register("get_start_gate", lambda: self._start_gate)
-            self.__class__.register("wait_lock", lambda: self._wait_lock)
-        super().__init__((host, port), authkey=b'pass')
-        self._on_hold = True
+            # server:
+            self._fixtures: Dict[str, Any] = {}
+            self._fixture_q = queue.Queue()
+            self.__class__.register("get_fixture_", self._get_fixture)
+            self.__class__.register("put_fixture", self._put_fixture)
+        super().__init__(address=addr, authkey=passw.encode('utf-8'))
+
+        if as_main:
+            super().start()
+        else:
+            tries_remaining = 60
+            while tries_remaining:
+                try:
+                    super().connect()
+                    break
+                except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError) as e:
+                    os.write(sys.stderr.fileno(), b"@")
+                    tries_remaining -= 1
+                    if tries_remaining == 0:
+                        os.write(sys.stderr.fileno(), b"\n")
+                        raise Exception(f"Failed to connect to server {main.host} port " +
+                                        f"{main.port}: {str(e)}")
+                    time.sleep(0.5)
+                except TimeoutError:
+                    tries_remaining -= 1
+                    time.sleep(0.5)
+
+
+    def get_fixture(self, name: str):
+        return self.get_fixture_(name).value()
+
+    def _put_fixture(self, name: str, value: Any):
+        self._fixtures[name] = value
+        self._fixture_q.put((name, value))
+
+    def _get_fixture(self, name: str):
+        result = self._fixtures.get(name)
+        while result is None:
+            name, value = self._fixture_q.get()
+            self._fixtures[name] = value
+            result = self._fixtures.get(name)
+        return self.Value(result)
+
 
 
 class Node(_pytest.main.Session):
-    pass
+
+    class Manager(FixtureManager):
+
+        def __init__(self, as_main: bool, port: int, name: str="Node.Manager"):
+            if not as_main:
+                os.write(sys.stderr.fileno(), f"Waiting for server...[{name}]\n".encode('utf-8'))
+            super().__init__(("127.0.0.1", port), as_main, passw='pass2')
+            if not as_main:
+                os.write(sys.stderr.fileno(), f"Connected [{name}]\n".encode('utf-8'))
 
 
 class Global(_pytest.main.Session):
 
-    class Manager(FixtureManager):
-
-        fixturedefs = {}
-
-        def __init__(self, config: MPManagerConfig, force_as_client: bool = False):
-            self._satellite_worker_count = 0
-            self._mpconfig = config
-            self._global_fixturedefs = {}
-            if config.role != RoleEnum.MASTER or force_as_client:
-                # client
-                Global.Manager.register("register_satellite")
-                Global.Manager.register("get_fixtures")
-                Global.Manager.register("register_fixtures")
-            else:
-                # server:
-                Global.Manager.register("register_satellite", self._register_satellite)
-                Global.Manager.register("get_fixtures", self._get_fixtures)
-                Global.Manager.register("register_fixtures", self._register_fixtures)
-            super().__init__(config.global_mgr_host, config.global_mgr_port, config.role == RoleEnum.MASTER)
-            if config.role == RoleEnum.MASTER and not force_as_client:
-                super().start()
-            else:
-                def timeout(*args):
-                    raise TimeoutError()
-
-                signal.signal(signal.SIGALRM, timeout)
-                tries_remaining = 60
-                if config.role != RoleEnum.WORKER:
-                    os.write(sys.stderr.fileno(), b"Waiting for server...\n")
-                while tries_remaining:
-                    try:
-                        signal.alarm(1)
-                        super().connect()
-                        signal.alarm(0)
-                        break
-                    except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError) as e:
-                        if config.role != RoleEnum.WORKER:
-                            os.write(sys.stderr.fileno(), b".")
-                        tries_remaining -= 1
-                        if tries_remaining == 0:
-                            os.write(sys.stderr.fileno(), b"\n")
-                            raise Exception(f"Failed to connect to server {config.global_mgr_host} port " +
-                                            f"{config.global_mgr_port}: {str(e)}")
-                        time.sleep(0.5)
-                    except TimeoutError:
-                        tries_remaining -= 1
-                        time.sleep(0.5)
-
-                if config.role != RoleEnum.WORKER:
-                    os.write(sys.stderr.fileno(), b"\nConnected\n")
-
-        def _register_satellite(self, count: int):
-            self._satellite_worker_count += count
-
-        def _get_fixtures(self):
-            v =self._gate.get()
-            self._gate.put(v)
-            return self._global_fixturedefs
-
-        def _register_fixtures(self, fixturedefs):
-            self._gate.put(True)
-            self._global_fixturedefs = fixturedefs
-
     def __init__(self, config):
         super().__init__(config)
 
-    def setup(self):
-        raise Exception("UNIMPL")
+    # def setup(self):
+    #     raise Exception("UNIMPL")
 
-    def gethookproxy(self, fspath):
-        raise Exception("UNIMPL")
+    # def gethookproxy(self, fspath):
+    #     raise Exception("UNIMPL")
 
-    def isinitpath(self, path):
-        return path in self.session._initialpaths
+    # def isinitpath(self, path):
+    #     return path in self.session._initialpaths
 
-    def collect(self):
-        raise Exception("UNIMPL")
+    # def collect(self):
+    #     raise Exception("UNIMPL")
 
 
 _pytest.fixtures.scopename2class.update({"global": Global, "node": Node})
