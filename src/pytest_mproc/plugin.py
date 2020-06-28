@@ -92,6 +92,14 @@ def pytest_addoption(parser):
         type=str,
         help="host:port specification of master node to connect to as client"
     )
+    group._addoption(
+        "--max-simultaneous-connections",
+        dest="mproc_max_simultaneous_connections",
+        metavar="mproc_max_simultaneous_connections",
+        action="store",
+        type=int,
+        help="max # of connections allowed at one time to main process, to prevent deadlock from overload"
+    )
 
 
 @pytest.mark.tryfirst
@@ -112,9 +120,13 @@ def pytest_cmdline_main(config):
     mproc_client_connect = getattr(config.option, "mproc_client_connect", None)
     if mproc_client_connect and mproc_server_port:
         raise pytest.UsageError("Cannot specify both -as-master and --as-client at same time")
+    config.option.mproc_max_simultaneous_connections = 24 if config.option.mproc_max_simultaneous_connections is None \
+        else config.option.mproc_max_simultaneous_connections
     config.option.numprocesses = config.option.mproc_numcores  # this is what pycov uses to determine we are distributed
     if config.option.numprocesses and config.option.numprocesses < 0:
         raise pytest.UsageError("Number of cores must be greater than or equal to zero when running as a master")
+    if config.option.mproc_max_simultaneous_connections <= 0:
+        raise pytest.UsageError("max simultaneous connections must be greater than 0; preferably greater than 9")
     # validation
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
         reporter.write(">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
@@ -148,10 +160,11 @@ def pytest_cmdline_main(config):
         reporter.write(f"Running as main @ {host}:{port}\n", green=True)
 
     if config.option.numprocesses > 0:
-        config.option.mproc_coordinator = Coordinator(config.option.numprocesses,
-                                                      host=host,
-                                                      port=port,
-                                                      config=config)
+        config.option.mproc_coordinator = Coordinator(
+            config.option.numprocesses,
+            host=host,
+            port=port,
+            max_simultaneous_connections=config.option.mproc_max_simultaneous_connections)
 
     # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
     config.option.dist = "no"

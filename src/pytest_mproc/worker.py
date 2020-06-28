@@ -98,13 +98,6 @@ class WorkerSession:
             self._buffered_results = []
             self._timestamp = time.time()
 
-    def set_up(self, test_q: JoinableQueue, result_q: Queue, exit_q: JoinableQueue, global_fixtures: Dict[str, Any]):
-        self._test_q = test_q
-        self._result_q = result_q
-        self._exit_q = exit_q
-        self._global_fixtures = global_fixtures
-        self._reporter.write(f">>>>>> SETUP {self}\n")
-
     def test_loop(self, session):
         """
         This is where the action takes place.  We override the usual implementation since
@@ -181,15 +174,28 @@ class WorkerSession:
         return session.items
 
     @classmethod
-    def start(cls, index: int, host: str, port: int, start_sem: Semaphore,
-              test_q: JoinableQueue, result_q: Queue, node_port: int, fixture_sem: Semaphore) -> Process:
-        proc = Process(target=cls.run, args=(index, host, port, start_sem, test_q, result_q, node_port, fixture_sem))
+    def start(cls, index: int, host: str, port: int, start_sem: Semaphore, fixture_sem: Semaphore,
+              test_q: JoinableQueue, result_q: Queue, node_port: int) -> Process:
+        """
+
+        :param index: index of worker being created
+        :param host: host name of main multiprocessing manager
+        :param port: port of main mp manqager
+        :param start_sem: gating semaphore used to control # of simultaneous connections (prevents deadlock)
+        :param fixture_sem: gating semaphore when querying for test fixtures
+        :param test_q: Queue to pull from to get next test to run
+        :param result_q: Queue to place results
+        :param node_port: port node of localhost manager for node-level fixtures, etc
+        :return: Process created for new worker
+        """
+        proc = Process(target=cls.run, args=(index, host, port, start_sem, fixture_sem, test_q, result_q, node_port, ))
         proc.start()
         return proc
 
     @staticmethod
-    def run(index: int, host: str, port: int, start_sem: Semaphore,
-            test_q: JoinableQueue, result_q: Queue, node_port: int, fixture_sem: Semaphore) -> None:
+    def run(index: int, host: str, port: int, start_sem: Semaphore, fixture_sem: Semaphore,
+            test_q: JoinableQueue, result_q: Queue, node_port: int) -> None:
+        start_sem.acquire()
 
         worker = WorkerSession(index, host, port, test_q, result_q)
         worker._node_fixture_manager = Node.Manager(as_main=False, port=node_port, name=f"Worker-{index}")
@@ -213,7 +219,6 @@ class WorkerSession:
                        }
         config.slaveinput = workerinput
         config.slaveoutput = workerinput
-        start_sem.release()
         try:
             # and away we go....
             config.hook.pytest_cmdline_main(config=config)

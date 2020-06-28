@@ -71,6 +71,16 @@ Disabling Mproc from Command Line
 
 To disable mproc (overriding all other pytest-mproc-related flags), specify "--diable-mproc True" on the command line.
 
+Command Line Configuration Options
+==================================
+
+Aside from specifying the number of cores, the user can optionally specify the maximum number of active connections
+allowed during distributed processing.  The *multiprocessing* module can get bogged down and dwell on one thread or
+even deadlock when too many connection requests are made at one time to the main process.  To alleviate this,
+the number of allowed simultaneous connections is throttled, with a default of 24 maximum connections.  The user can
+over ride this using the *"--max-simultanous-connections" option.
+
+
 Grouping Tests
 ==============
 

@@ -28,10 +28,10 @@ class FixtureManager(BaseManager):
 
     class Value:
 
-        def __init__(self, val):
+        def __init__(self, val: Any):
             self._val = val
 
-        def value(self):
+        def value(self) -> Any:
             return self._val
 
     def __init__(self, addr: Tuple[str, int], as_main: bool, passw: str):
@@ -67,15 +67,14 @@ class FixtureManager(BaseManager):
                     tries_remaining -= 1
                     time.sleep(0.5)
 
-
-    def get_fixture(self, name: str):
+    def get_fixture(self, name: str) -> Value:
         return self.get_fixture_(name).value()
 
-    def _put_fixture(self, name: str, value: Any):
+    def _put_fixture(self, name: str, value: Any) -> None:
         self._fixtures[name] = value
         self._fixture_q.put((name, value))
 
-    def _get_fixture(self, name: str):
+    def _get_fixture(self, name: str) -> Any:
         result = self._fixtures.get(name)
         while result is None:
             name, value = self._fixture_q.get()
@@ -84,12 +83,11 @@ class FixtureManager(BaseManager):
         return self.Value(result)
 
 
-
 class Node(_pytest.main.Session):
 
     class Manager(FixtureManager):
 
-        def __init__(self, as_main: bool, port: int, name: str="Node.Manager"):
+        def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
             if not as_main:
                 os.write(sys.stderr.fileno(), f"Waiting for server...[{name}]\n".encode('utf-8'))
             super().__init__(("127.0.0.1", port), as_main, passw='pass2')
@@ -101,18 +99,6 @@ class Global(_pytest.main.Session):
 
     def __init__(self, config):
         super().__init__(config)
-
-    # def setup(self):
-    #     raise Exception("UNIMPL")
-
-    # def gethookproxy(self, fspath):
-    #     raise Exception("UNIMPL")
-
-    # def isinitpath(self, path):
-    #     return path in self.session._initialpaths
-
-    # def collect(self):
-    #     raise Exception("UNIMPL")
 
 
 _pytest.fixtures.scopename2class.update({"global": Global, "node": Node})

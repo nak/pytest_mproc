@@ -120,6 +120,8 @@ class Orchestrator:
                 sys.stdout.write(f"Process Worker-{index} executed {count} tests in {duration:.2f} " +\
                                  f"seconds; User CPU: {ucpu:.2f}%, Sys CPU: {scpu:.2f}%, " +\
                                  f"Mem consumed: {unshared_mem/1000.0}M\n")
+            else:
+                sys.stdout.write(f"Process Worker-{index} executed 0 tests\n")
         sys.stdout.write("\n")
         sys.stdout.write(
             f"Process Coordinator executed in {time_span:.2f} seconds. " +
