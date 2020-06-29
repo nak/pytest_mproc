@@ -9,6 +9,7 @@ import tempfile
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from traceback import format_exc
+from typing import Any, Dict
 
 import _pytest
 
@@ -19,7 +20,7 @@ import _pytest.terminal
 import socket
 
 from multiprocessing import cpu_count
-from pytest_mproc.coordinator import Coordinator
+from pytest_mproc.coordinator import CoordinatorFactory
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import is_degraded, BasicReporter
 
@@ -116,6 +117,7 @@ def pytest_cmdline_main(config):
     reporter = BasicReporter()
     worker = getattr(config.option, "mproc_worker", None)
     mproc_server_port = getattr(config.option, 'mproc_server_port', None)
+    config.option.mproc_is_serving_remotes = mproc_server_port is not None
     mproc_server_host = _get_ip_addr() if mproc_server_port is not None else "127.0.0.1"
     mproc_client_connect = getattr(config.option, "mproc_client_connect", None)
     if mproc_client_connect and mproc_server_port:
@@ -134,6 +136,7 @@ def pytest_cmdline_main(config):
         return
     if worker:
         return
+    config.option.mproc_is_remote_client = mproc_client_connect is not None
 
     if mproc_client_connect:
         if config.option.numprocesses < 1:
@@ -155,18 +158,20 @@ def pytest_cmdline_main(config):
                 raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
             host, port = "127.0.0.1", find_free_port()  # running localhost only
 
-        config.option.mproc_main = Orchestrator(host=host, port=port or find_free_port())
+        config.option.mproc_main = Orchestrator(host=host, port=port or find_free_port(),
+                                                is_serving_remotes=config.option.mproc_is_serving_remotes)
         BasicReporter().write(f"Started on port {port}")
         reporter.write(f"Running as main @ {host}:{port}\n", green=True)
 
     if config.option.numprocesses > 0:
-        config.option.mproc_coordinator = Coordinator(
+        factory = CoordinatorFactory(
             config.option.numprocesses,
             host=host,
             port=port,
-            max_simultaneous_connections=config.option.mproc_max_simultaneous_connections)
-
-    # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
+            max_simultaneous_connections=config.option.mproc_max_simultaneous_connections,
+            as_remote_client=config.option.mproc_is_remote_client)
+        config.option.mproc_coordinator = factory.launch()
+        # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
     config.option.dist = "no"
     val = config.getvalue
     if not val("collectonly"):
@@ -192,20 +197,27 @@ def pytest_configure(config):
     config.option.dist = "no"
 
 
-def process_fixturedef(target, fixturedef, request):
-    generated = request.config.generated_fixtures
-    if not fixturedef or fixturedef.scope not in ['global', 'node']:
+def process_fixturedef(item, target, fixturedef, request, scope):
+    if not fixturedef:
         return
-    fixtures = target.fixtures()
+    for argname in fixturedef.argnames:
+        fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
+        process_fixturedef(item, target, fixdef, item._request, scope)
+    generated = request.config.generated_fixtures
+    if not fixturedef or fixturedef.scope != scope:
+        return
+
+    if not hasattr(request.config.option, "fixtures"):
+        request.config.option.fixtures: Dict[str, Any] = {}
     name = fixturedef.argname
-    if name not in fixtures:
+    if name not in request.config.option.fixtures:
         fixture = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
         val = fixture(*fixturedef.argnames)
         if inspect.isgenerator(val):
             generated.append(val)
             val = next(val)
         target.put_fixture(name, val)
-        target.fixtures()[name] = val
+        request.config.option.fixtures[name] = val
 
 
 def pytest_runtestloop(session):
@@ -236,6 +248,8 @@ def pytest_runtestloop(session):
 
     session.config.generated_fixtures = []
 
+    if not hasattr(session.config.option, "fixtures"):
+        session.config.option.fixtures: Dict[str, Any] = {}
     if hasattr(session.config.option, "mproc_coordinator"):
         coordinator = session.config.option.mproc_coordinator
         for item in session.items:
@@ -245,21 +259,15 @@ def pytest_runtestloop(session):
                 for name in item._fixtureinfo.argnames:
                     try:
                         fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
-                        if not fixturedef or fixturedef.scope != 'node':
-                            continue
-                        if coordinator and name not in coordinator.fixtures():
-                            for argname in fixturedef.argnames:
-                                fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
-                                process_fixturedef(coordinator, fixdef, item._request)
-
-                            process_fixturedef(coordinator, fixturedef, item._request)
+                        if coordinator and name not in session.config.option.fixtures:
+                            process_fixturedef(item, coordinator, fixturedef, item._request, 'node')
                     except Exception as e:
                         session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
                             f"{format_exc()}"
                         reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
                         break
 
-    if hasattr(session.config.option, "mproc_main"):
+    if hasattr(session.config.option, "mproc_main") and not hasattr(session.config.option, "mproc_worker"):
         orchestrator = session.config.option.mproc_main
         for item in session.items:
             if session.shouldfail:
@@ -271,11 +279,7 @@ def pytest_runtestloop(session):
                         if not fixturedef or fixturedef.scope != 'global':
                             continue
                         if orchestrator and name not in orchestrator.fixtures():
-                            for argname in fixturedef.argnames:
-                                fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
-                                process_fixturedef(orchestrator, fixdef, item._request)
-
-                            process_fixturedef(orchestrator, fixturedef, item._request)
+                            process_fixturedef(item, orchestrator, fixturedef, item._request, 'global')
                     except Exception as e:
                         session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
                             f"{format_exc()}"
@@ -290,7 +294,8 @@ def pytest_runtestloop(session):
             return False
     if hasattr(session.config.option, "mproc_worker"):
         session.config.option.mproc_worker.test_loop(session)
-
+    elif hasattr(session.config.option, "mproc_coordinator") and not session.config.option.mproc_coordinator.is_local():
+        session.config.option.mproc_coordinator.join()
     return True
 
 

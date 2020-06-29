@@ -1,10 +1,13 @@
-import os
 import resource
 import socket
 import sys
 import time
+from contextlib import suppress
+from multiprocessing.managers import MakeProxyType
+
 import _pytest.fixtures
 from multiprocessing import JoinableQueue, Process, Queue
+from multiprocessing.managers import SyncManager, RemoteError
 from typing import List, Any, Optional, Tuple
 
 import pytest
@@ -22,6 +25,29 @@ def _localhost():
     except Exception:
         print(">>> Cannot get ip address of host.  Return 127.0.0.1 (localhost)")
         return "127.0.0.1"
+
+
+# Create proxies for Queue types to be accessible from remote clients
+# NOTE: multiprocessing module has a quirk/bug where passin proxies to another separate client (e.g., on
+# another machine) causes the proxy to be rebuilt with a random authkey on the other side.  Unless
+# we override the constructor to force an authkey value, we will hit AuthenticationError's
+
+JoinableQueueProxyBase = MakeProxyType("JoinableQueueProxy", exposed=["put", "get", "task_done", "join", "close"])
+QueueProxyBase = MakeProxyType("QueueProxy", exposed=["put", "get", "task_done", "join", "close"])
+
+
+class JoinableQueueProxy(JoinableQueueProxyBase):
+
+    def __init__(self, token, serializer, manager=None,
+                 authkey=None, exposed=None, incref=True, manager_owned=False):
+        super().__init__(token, serializer, manager, b'pass', exposed, incref, manager_owned)
+
+
+class QueueProxy(QueueProxyBase):
+
+    def __init__(self, token, serializer, manager=None,
+                 authkey=None, exposed=None, incref=True, manager_owned=False):
+        super().__init__(token, serializer, manager, b'pass', exposed, incref, manager_owned)
 
 
 class Orchestrator:
@@ -43,6 +69,7 @@ class Orchestrator:
                 Orchestrator.Manager.register("register_client")
                 Orchestrator.Manager.register("count")
                 Orchestrator.Manager.register("finalize")
+                Orchestrator.Manager.register("JoinableQueueProxy")
             else:
                 # server:
                 self._worker_count = 0
@@ -52,10 +79,11 @@ class Orchestrator:
                 Orchestrator.Manager.register("register_client", self._register_client)
                 Orchestrator.Manager.register("count", self._count)
                 Orchestrator.Manager.register("finalize", self._finalize)
+                Orchestrator.Manager.register("JoinableQueueProxy", JoinableQueue, JoinableQueueProxy)
             addr = (main.host, main.port) if main else addr
             super().__init__(addr=addr, as_main=main is not None, passw='pass')
 
-        def _register_client(self, client, count: int):
+        def _register_client(self, client, count: int) -> Value:
             if self._finalized:
                 raise Exception("Client registered after disconnect")
             self._clients.append(client)
@@ -69,8 +97,9 @@ class Orchestrator:
         def _finalize(self):
             for client in self._clients:
                 client.join()
+            self._clients = []
 
-    def __init__(self, host: str = _localhost(), port = find_free_port()):
+    def __init__(self, host: str = _localhost(), port = find_free_port(), is_serving_remotes: bool=False):
         """
         :param num_processes: number of parallel executions to be conducted
         """
@@ -78,13 +107,22 @@ class Orchestrator:
         self._count = 0
         self._rusage = []
         self._session_start_time = time.time()
-        self._test_q: JoinableQueue = JoinableQueue()
-        self._result_q: Queue = Queue()
+        if is_serving_remotes:
+            SyncManager.register("JoinableQueueProxy", JoinableQueue, JoinableQueueProxy)
+            SyncManager.register("QueueProxy", Queue, QueueProxy)
+            self._queue_manager = SyncManager(authkey=b'pass')
+            self._queue_manager.start()
+            self._test_q: JoinableQueue = self._queue_manager.JoinableQueueProxy()
+            self._result_q: Queue = self._queue_manager.QueueProxy()
+        else:
+            self._test_q: JoinableQueue = JoinableQueue()
+            self._result_q: Queue = Queue()
         self._reporter = BasicReporter()
         self._exit_q = JoinableQueue()
         self._host = host
         self._port = port
         self._mp_manager = self.Manager(self)
+        self._is_serving_remotes = is_serving_remotes
 
     @property
     def host(self):
@@ -181,13 +219,18 @@ class Orchestrator:
         return self._mp_manager._fixtures
 
     def read_results(self, hook):
-        items = self._result_q.get()
-        while items is not None:
-            if isinstance(items, Exception):
-                raise Exception
-            for kind, data in items:
-                self._process_worker_message(hook, kind, data)
+        try:
             items = self._result_q.get()
+            while items is not None:
+                if isinstance(items, Exception):
+                    raise Exception
+                for kind, data in items:
+                    self._process_worker_message(hook, kind, data)
+                items = self._result_q.get()
+        except OSError:
+            pass
+        finally:
+            self._result_q.close()
 
     def populate_test_queue(self, tests: List[Any], end_sem):
         try:
@@ -206,9 +249,9 @@ class Orchestrator:
                 self._test_q.put(None)
                 self._test_q.join()
             self._test_q.close()
-            client.finalize()
+            with suppress(RemoteError):
+                client.finalize()
             self._result_q.put(None)
-            self._result_q.close()
         finally:
             if end_sem:
                 end_sem.release()
@@ -253,10 +296,7 @@ class Orchestrator:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_fixture_setup(self, fixturedef, request, _pytset=None):
-        self._reporter.write(f"MAIN GETTING FIXTURE {fixturedef.argname}")
         result = _pytset.fixtures.pytest_fixture_setup(fixturedef, request)
         if fixturedef.scope == 'global':
             self._mp_manager.put(fixturedef.argname, result)
         return result
-
-

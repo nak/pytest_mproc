@@ -4,6 +4,7 @@ This package contains code to coordinate execution from a main thread to worker 
 import time
 
 from multiprocessing import Semaphore, JoinableQueue, Queue
+from multiprocessing.managers import MakeProxyType, SyncManager
 from typing import Dict, Any
 
 from pytest_mproc import find_free_port
@@ -13,37 +14,81 @@ from pytest_mproc.utils import BasicReporter
 from pytest_mproc.worker import WorkerSession
 
 
-class Coordinator:
-    """
-    Context manager for kicking of worker Processes to conduct test execution via pytest hooks
-    """
+# Create proxies for Queue types to be accessible from remote clients
+# NOTE: multiprocessing module has a quirk/bug where passin proxies to another separate client (e.g., on
+# another machine) causes the proxy to be rebuilt with a random authkey on the other side.  Unless
+# we override the constructor to force an authkey value, we will hit AuthenticationError's
 
-    def __init__(self, num_processes: int, host: str, port: int, max_simultaneous_connections):
+CoordinatorProxyBase = MakeProxyType("CoordinatorProxy", exposed=["start", "put_fixture", "join", "kill", "is_local"])
+
+
+class CoordinatorProxy(CoordinatorProxyBase):
+
+    def __init__(self, token, serializer, manager=None,
+                 authkey=None, exposed=None, incref=True, manager_owned=False):
+        super().__init__(token, serializer, manager, b'pass', exposed, incref, manager_owned)
+
+
+class CoordinatorFactory:
+
+    def __init__(self, num_processes: int, host: str, port: int, max_simultaneous_connections: int,
+                 as_remote_client: bool):
         """
         :param num_processes: number of parallel executions to be conducted
+        :param host: host name of main node that holds the test queue, result queue, etc
+        :param port: port of main node to connect to
+        :param max_simultaneous_connections: maximum allowed connections at one time to main node;  throttled to
+            prevent overloading *multiprocsesing* module and deadlock
         """
         self._host = host
         self._port = port
         self._num_processes = num_processes
         self._max_simultaneous_connections = max_simultaneous_connections
-        # test_q is for sending test nodeid's to worked
-        # result_q is for receiving results as messages, exceptions, test status or any exceptions thrown
+        self._is_local = not as_remote_client
+
+    def launch(self) -> "Coordinator":
+        if not self._is_local:
+            self._sm = SyncManager(authkey=b'pass')
+            self._sm.start()
+            coordinator = self._sm.CoordinatorProxy(self._num_processes, self._host, self._port,
+                                                    self._max_simultaneous_connections, self._is_local)
+        else:
+            coordinator = Coordinator(self._num_processes, self._host, self._port,
+                                      self._max_simultaneous_connections, self._is_local)
+        client = Orchestrator.Manager(addr=(self._host, self._port))
+        client.register_client(coordinator, self._num_processes)
+        return coordinator
+
+
+class Coordinator:
+    """
+    Context manager for kicking of worker Processes to conduct test execution via pytest hooks
+    """
+    _node_port = find_free_port()
+    _node_manager_client = None
+
+    def __init__(self, num_processes: int, host: str, port: int, max_simultaneous_connections: int, is_local: bool):
+        """
+        :param num_processes: number of parallel executions to be conducted
+        """
+        self._is_local = is_local
+        self._host = host
+        self._port = port
+        self._num_processes = num_processes
+        self._max_simultaneous_connections = max_simultaneous_connections
         self._count = 0
         self._session_start_time = time.time()
         self._reporter = BasicReporter()
         self._worker_procs = []
-        self._node_port = find_free_port()
-        assert self._node_port != port
-        node_manager = Node.Manager(as_main=True, port=self._node_port)
-        client = Orchestrator.Manager(addr=(host, port))
-        client.register_client(self, self._num_processes)
-        self._node_manager = node_manager
+
+    def is_local(self):
+        return self._is_local
 
     def put_fixture(self, name, val) -> None:
-        self._node_manager.put_fixture(name, val)
-
-    def fixtures(self) -> Dict[str, Any]:
-        return self._node_manager._fixtures
+        cls = self.__class__
+        if cls._node_manager_client is None:
+            cls._node_manager_client = Node.Manager(as_main=False, port=cls._node_port)
+        cls._node_manager_client.put_fixture(name, val)
 
     def start(self, test_q: JoinableQueue, result_q: Queue) -> None:
         """
@@ -51,6 +96,7 @@ class Coordinator:
 
         :return: this object
         """
+        self._node_manager = Node.Manager(as_main=True, port=self.__class__._node_port)
         start_sem = Semaphore(self._max_simultaneous_connections)
         # This will be used to throttle the number of connections made when makeing distributed call to get
         # node-level and global-level fixtures;  otherwise multiproceissing can hang on these calls if
@@ -72,4 +118,4 @@ class Coordinator:
         self._worker_procs = []
 
 
-
+SyncManager.register("CoordinatorProxy", Coordinator, CoordinatorProxy)

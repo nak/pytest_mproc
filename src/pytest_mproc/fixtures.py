@@ -45,7 +45,7 @@ class FixtureManager(BaseManager):
             self._fixture_q = queue.Queue()
             self.__class__.register("get_fixture_", self._get_fixture)
             self.__class__.register("put_fixture", self._put_fixture)
-        super().__init__(address=addr, authkey=passw.encode('utf-8'))
+        super().__init__(address=addr, authkey=b'pass')
 
         if as_main:
             super().start()
@@ -90,7 +90,7 @@ class Node(_pytest.main.Session):
         def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
             if not as_main:
                 os.write(sys.stderr.fileno(), f"Waiting for server...[{name}]\n".encode('utf-8'))
-            super().__init__(("127.0.0.1", port), as_main, passw='pass2')
+            super().__init__(("127.0.0.1", port), as_main, passw='pass')
             if not as_main:
                 os.write(sys.stderr.fileno(), f"Connected [{name}]\n".encode('utf-8'))
 

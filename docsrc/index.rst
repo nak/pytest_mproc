@@ -251,21 +251,26 @@ Advanced: Testing on a Distributed Set of Machines
 *pytest_mproc* has support for running test distributed across multiple mahcines.
 
 .. caution::
-   This feature may not be as robust aginast fault tolerance.  The basic functionality exists, but robustness
+   This feature may not be as robust against fault tolerance.  The basic functionality exists, but robustness
    against exception in fixtures, etc., has not been fully tested
 
-The concept is that one node will act as the master node, collecting and reporting test status, while all others
-will act as clients -- executing tests and reporting status back the the master node.  To start the master node,
+.. caution::
+   Throttling of connections only happens on a per-node basis, not globally.  It may be possible to overwhelm
+   the main node if you are using too many remote workers, causing deadlock
+
+The concept is that one node will act as the main node, collecting and reporting test status, while all others
+will act as clients -- executing tests and reporting status back the the main node.  To start the main node,
 use the "--as-server" command line argument, specifying the port the server will listen on:
 
 .. code-block:: shell
 
    % pytest --num_cores <N> --as-server <port> ...
 
-If N is zero, the process will wait indefinitely for workers on other nodes to be created to do the testing.  In
-this case, not tests will be executed on the master node.  If N > 0, then test execution will start immediately
-on the master node following test setup;  as workers on other nodes come on line, they will pull tests from those
-remaining the queue and execute in parallel to the master.
+When *--as-server* argument is presnt, N may be zero, indicating
+the process will wait indefinitely for workers on other nodes to be created to do the testing.  In
+this case, not tests will be executed on the main node.  If N > 0, then test execution will start immediately
+on the main node following test setup;  as workers on other nodes come on line, they will pull tests from those
+remaining the queue and execute in parallel to the main.
 
 To start the client nodes:
 
@@ -274,7 +279,7 @@ To start the client nodes:
    % pytest --num_cores <N> --as-client <host>:<port>
 
 Here, N must be greater than or equal to 1;  multiple workers can be invoked on a node, with possibly multiple client
-nodes. The client will attempt to connect to the master for a period of 30 seconds at which point it gives up and
+nodes. The client will attempt to connect to the main  node for a period of 30 seconds at which point it gives up and
 exits with na error.
 
 .. note::
@@ -282,8 +287,8 @@ exits with na error.
    client machines and execution of the pytest command on client nodes falls outside of *pytest_mproc*'s scope
 
 
-'*node*' Scoped Fixtures
-------------------------
+Node Scoped Fixtures
+--------------------
 
 With the system now allowing execution of mutliple workers on a single machine, and execution across multiple machines,
 this introduces a new level of scoping of fixtures:  *node*-scoped fixtures.  A fixture scoped to '*node*' is
