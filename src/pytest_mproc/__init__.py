@@ -4,22 +4,37 @@ import sys
 from contextlib import closing
 
 from pytest_mproc.data import ResourceUtilization
+from pytest_mproc.data import GroupTag, DEFAULT_PRIORITY
 
 
-def group(name, priority: int = 0, restrict_to=None):
+def priority(level: int):
+
+    def decorator_priority(object):
+        if inspect.isclass(object):
+            for method in [getattr(object, m) for m in dir(object) if
+                           inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
+                if not hasattr(method, "_pytest_priority"):
+                    method._pytest_priority = level
+        elif inspect.isfunction(object):
+            object._pytest_priority = level
+        else:
+            raise Exception("group decorator can only decorate class or function object")
+        return object
+
+    return decorator_priority
+
+
+def group(tag: GroupTag):
     """
     Decorator for grouping tests or a class of tests
     :param name: unique name for group of tests to be serialized under execution
     """
-    from pytest_mproc.data import TestExecutionRestriction
-    restrict_to = TestExecutionRestriction.SINGLE_PROCESS if restrict_to is None else restrict_to
-
     def decorator_group(object):
         if inspect.isclass(object):
             for method in [getattr(object, m) for m in dir(object) if inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
-                method._pytest_group = (name, priority, restrict_to)
+                method._pytest_group = tag
         elif inspect.isfunction(object):
-            object._pytest_group = (name, priority, restrict_to)
+            object._pytest_group = tag
         else:
             raise Exception("group decorator can only decorate class or function object")
         return object

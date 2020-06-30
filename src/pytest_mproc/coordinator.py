@@ -3,10 +3,11 @@ This package contains code to coordinate execution from a main thread to worker 
 """
 import time
 
-from multiprocessing import Semaphore, JoinableQueue, Queue
+from multiprocessing import Semaphore, JoinableQueue, Queue, Process
 from multiprocessing.managers import MakeProxyType, SyncManager
 
 from pytest_mproc import find_free_port, AUTHKEY
+from pytest_mproc.data import TestExecutionConstraint, TestBatch
 from pytest_mproc.fixtures import Node
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import BasicReporter
@@ -95,6 +96,8 @@ class Coordinator:
 
         :return: this object
         """
+        local_test_q = JoinableQueue()
+
         self._node_manager = Node.Manager(as_main=True, port=self.__class__._node_port)
         start_sem = Semaphore(self._max_simultaneous_connections)
         # This will be used to throttle the number of connections made when makeing distributed call to get
@@ -103,9 +106,30 @@ class Coordinator:
         fixture_sem = Semaphore(self._max_simultaneous_connections)
         for index in range(self._num_processes):
             proc = WorkerSession.start(index, self._host, self._port, start_sem, fixture_sem,
-                                       test_q, result_q, self._node_port,)
+                                       local_test_q, result_q, self._node_port,)
             self._worker_procs.append(proc)
             start_sem.release()
+        self._test_q_process = Process(target=self._process_test_q, args=(test_q, local_test_q))
+        self._test_q_process.start()
+
+    def _process_test_q(self, source: JoinableQueue, local_test_q: JoinableQueue):
+        count = 0
+        while count < self._num_processes:
+            test_batch = source.get()
+            source.task_done()
+            if test_batch is not None \
+                    and len(test_batch.test_ids) >1 \
+                    and test_batch.restriction == TestExecutionConstraint.SINGLE_NODE:
+                for test_id in test_batch.test_ids:
+                    local_test_q.put(TestBatch([test_id]))
+                    local_test_q.join()
+            else:
+                local_test_q.put(test_batch)
+                local_test_q.join()
+            if test_batch is None:
+                count += 1
+
+        local_test_q.close()
 
     def join(self):
         for proc in self._worker_procs:

@@ -38,12 +38,12 @@ Why Use *pytest_mproc* over *pytest-xdist*?
 
 #. Overhead of startup is more efficient, and start-up time does not grow with increasing number of cores
 #. It uses a pull model, so that each worker pulls the next test from a master queue.  There is no need to figure
-out how to divy up the tests beforehand.  The disadvantage is that the developer needs to know how long roughly each
-test takes and prioritize the longer running tests first (*@pytest.mark.tryfirst*) .
+   out how to divy up the tests beforehand.  The disadvantage is that the developer needs to know how long roughly each
+   test takes and prioritize the longer running tests first (*@pytest.mark.tryfirst*) .
 #. It provides a 'global' scope test fixture to provide a single instance of a fixture across all tests, regardless of
-how many nodes
+   how many nodes
 #. It allows you to programatically group together a bunch of tests to run serially on a single worker process (and
-run these first)
+   run these first)
 
 
 Usage
@@ -78,7 +78,7 @@ Aside from specifying the number of cores, the user can optionally specify the m
 allowed during distributed processing.  The *multiprocessing* module can get bogged down and dwell on one thread or
 even deadlock when too many connection requests are made at one time to the main process.  To alleviate this,
 the number of allowed simultaneous connections is throttled, with a default of 24 maximum connections.  The user can
-over ride this using the *"--max-simultanous-connections" option.
+over ride this using the *--max-simultanous-connections* option.
 
 
 Grouping Tests
@@ -107,7 +107,7 @@ Likewise, you can use the same annotation on test class to group all test method
 
    import pytest_mproc
 
-   TEST_GROUP_CLASSS = "class_group"
+   TEST_GROUP_CLASS = GroupTag("class_group")
 
    @pytest.mproc.group(TEST_GROUP_CLASS)
    class TestClass:
@@ -120,38 +120,63 @@ Likewise, you can use the same annotation on test class to group all test method
 This is useful if the tests are using a common resource for testing and parallelized execution of tests might
 result in interference.
 
-.. note:: Grouped tests are always placed at the front of the test queue  -- i.e, always scheduled to run before
-ungrouped tests
+Configuring Test Execution of Groups
+------------------------------------
+
+As discussed below, *pytest_mproc* allows execution across multiple machines/indepenent processes.  There are two
+ways to specify how a group of tests will be executed by using the *restric_to* parameter of the
+*pytest_mproc.group* decorator.  This can take one of two values.
+
+#. *pytest_mproc.TestExecutionConstraint.SINGLE_PROCESS* - this is the default value.  This specifies that the tests
+   are to run serially based on priority of tests within the group on a single core
+#. *pytest_mproc.TestExecutionConstraint.SINGLE_NODE*  - This specifies that the group of tests are to run on a single
+   node of the system, but within that node the set of tests can be distributed among the workers of that node
+
+If specifying *SINGLE_NODE* execution in the context of running a single *pytest* process (and therefore a single node),
+the only value provided is the ability to specify a hierarchy of priorities.
+
 
 A Matter of Priority
---------------------
-You can also specify a priority of scheduling for groups.  The group annotation takes an optional priority as
-the second argument:
+====================
+You can also specify a priority for test execution using the *pytest_mproc.priority* decorator:
 
 .. code-block:: python
 
    import pytest_mproc
 
-   @pytest.mpro.group("Prioritzed_Group", priority=1)
+   @pytest.mpro.priority(pytest_mproc.DEFAULT_PRIORITY - 2)
    def test_function():
       pass
 
 Groups with lower interger priority value are scheduled before those with a higher priority value.  Thus, a
-group with priority *0* will be scheduled before a group with priority *1*.  The default priority is *0* if
-not specified.
+group with priority *pytest_mproc.DEFAULT_PRIORITY-1* will be scheduled before a group with priority
+*pytest_mproc.DEFAULT_PRIORITY-2*.  Of course, the default priority of *pytest_mproc.DEFAULT_PRIORITY*  is used if
+unspecified.
+
+Priorities should be specified to the default priority assigned to all tests without decorators, which can be
+obtained through the variable *pytest_mproc.DEFAULT_PRIORITY*.  When working with grouped tests as explained above,
+the priorities are scoped.  That is, at a global level, the priority of a group of tests will determine that group's
+execution order relative to all other top-level tests or test groups. For tests within a group, the priority of each test
+will determine the order of execution only within that group.  *pytest_mproc* does not guarantee order of
+execution for tests or test groups with the same priority.
+
+If you specify a priorty at on a class of tests, all test methods within that class will have that priority, unless
+a specific priority is assigned to that method through its own decorator.  In that class, the decorator for the class
+method is used.
+
 
 A 'global'-ly Scoped Fixture
 ============================
 
-As is the case with *pytest_xdist* plugin, *pytest_mproc* uses multiprocessing module to achieve parallel concurrency.  This
-raises interesting behaviors about 'session' scoped fixtures.  Each subprocess that is launched will create its own
+As is the case with *pytest_xdist* plugin, *pytest_mproc* uses multiprocessing module to achieve parallel concurrency.
+This raises interesting behaviors about 'session' scoped fixtures.  Each subprocess that is launched will create its own
 session-level fixture;  in other words, you can think of a session as a per-process concept, with one session-level
 fixture per process.  This is often not obvious to test developers. Many times, a global fixture is needed, with a
 single instantiation across all processes and tests.  An example might be setting up a single test database.
 
 To achieve this, *pytest_mproc* adds a new scope: 'global'. Behind the scenes, the system uses pythons *multiprocessing*
 module's BaseManager to provide this feature.  This is mostly transparent to the developer, with one notable exception.
-In order to communicate a fixture globally across multiple *Process*es, the object returned (or yielded) from a
+In order to communicate a fixture globally across multiple *Process* es, the object returned (or yielded) from a
 globally scoped fixture must be Picklable.
 
 The 'global' scope is a level above 'session' in the hierarchy.  That means that globally scoped fixtures can only

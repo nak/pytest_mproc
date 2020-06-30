@@ -8,12 +8,13 @@ from multiprocessing.managers import MakeProxyType
 import _pytest.fixtures
 from multiprocessing import JoinableQueue, Process, Queue
 from multiprocessing.managers import SyncManager, RemoteError
-from typing import List, Any, Optional, Tuple, Union
+from typing import List, Any, Optional, Tuple, Union, Dict
 
 import pytest
 
 from pytest_mproc import resource_utilization, find_free_port, AUTHKEY
-from pytest_mproc.data import TestBatch, ResultTestStatus, ResultException, ResultExit
+from pytest_mproc.data import TestBatch, ResultTestStatus, ResultException, ResultExit, DEFAULT_PRIORITY, \
+    TestExecutionConstraint
 from pytest_mproc.fixtures import Global, FixtureManager
 from pytest_mproc.utils import BasicReporter
 
@@ -157,10 +158,10 @@ class Orchestrator:
         for exit_result in self._exit_results:
             if exit_result.test_count > 0:
                 sys.stdout.write(
-                    f"Process Worker-{exit_result.worker_index} executed" +\
-                    f"{exit_result.test_count} tests in {exit_result.resource_utilization.time_span:.2f} " +\
-                    f"seconds; User CPU: {exit_result.resource_utilization.user_cpu:.2f}%," +
-                    f"Sys CPU: {exit_result.resource_utilization.system_cpu:.2f}%, " + \
+                    f"Process Worker-{exit_result.worker_index} executed " +
+                    f"{exit_result.test_count} tests in {exit_result.resource_utilization.time_span:.2f} " +
+                    f"seconds; User CPU: {exit_result.resource_utilization.user_cpu:.2f}%, " +
+                    f"Sys CPU: {exit_result.resource_utilization.system_cpu:.2f}%, " +
                     f"Mem consumed: {exit_result.resource_utilization.memory_consumed/1000.0}M\n")
             else:
                 sys.stdout.write(f"Process Worker-{exit_result.worker_index} executed 0 tests\n")
@@ -193,7 +194,7 @@ class Orchestrator:
                 self._exit_results.append(result)
                 self._exit_q.put(result.worker_index)
             elif isinstance(result, ResultException):
-                hook.pytest_internalerror(result.excrepr)
+                hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
             else:
                 raise Exception(f"Internal Error: Unknown result type: {type(result)}!!")
 
@@ -214,7 +215,7 @@ class Orchestrator:
             while result_batch is not None:
                 for result in result_batch:
                     if isinstance(result, ResultException):
-                        hook.pytest_internalerror(result.excrepr)
+                        hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
                     else:
                         self._process_worker_message(hook,result)
                 result_batch = self._result_q.get()
@@ -250,16 +251,20 @@ class Orchestrator:
         """
         :param tests: the items containing the pytest hooks to the tests to be run
         """
+        def priority(test) -> int:
+            return getattr(test._pyfuncitem.obj, "_pytest_priority", DEFAULT_PRIORITY)
+
         grouped = [t for t in tests if getattr(t._pyfuncitem.obj, "_pytest_group", None)]
-        self._tests = [TestBatch([t.nodeid]) for t in tests if t not in grouped]
-        groups = {}
-        for g in grouped:
-            name, priority, restriction = g._pyfuncitem.obj._pytest_group
-            groups.setdefault((name, priority, restriction), []).append(g.nodeid)
-        for key in sorted(groups.keys(), key=lambda x: x[1]):
-            _, _, restriction = key
-            batch = TestBatch(groups[key], restriction)
-            self._tests.insert(0, batch)
+        self._tests = [TestBatch([t.nodeid], priority(t)) for t in tests if t not in grouped]
+        groups: Dict["GroupTag", TestBatch] = {}
+        for test in grouped:
+            tag = test._pyfuncitem.obj._pytest_group
+            groups.setdefault(tag, TestBatch([], tag.priority)).test_ids.append(test)
+        for tag, group in groups.items():
+            groups[tag].test_ids = [test.nodeid for test in sorted(group.test_ids, key=lambda x: priority(x))]
+            groups[tag].restriction = tag.restrict_to
+        self._tests.extend(groups.values())
+        self._tests = sorted(self._tests, key=lambda x: x.priority)
 
     def run_loop(self, session):
         """
