@@ -54,22 +54,24 @@ class FixtureManager(BaseManager):
         if as_main:
             super().start()
         else:
-            tries_remaining = self.CONNECTION_TIMEOUT*2
+            chars = ['|', '\\', '-', '/', '|', '-']
+            tries_remaining = self.CONNECTION_TIMEOUT*4
             while tries_remaining:
                 try:
                     super().connect()
                     break
                 except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError) as e:
-                    os.write(sys.stderr.fileno(), b"@")
+                    ch = chars[tries_remaining % len(chars)]
+                    seconds_left = int(tries_remaining/4)
+                    os.write(sys.stderr.fileno(), f"\r{ch} Connecting ... {seconds_left}        ".encode('utf-8'))
                     tries_remaining -= 1
                     if tries_remaining == 0:
                         os.write(sys.stderr.fileno(), b"\n")
-                        raise Exception(f"Failed to connect to server {main.host} port " +
-                                        f"{main.port}: {str(e)}")
-                    time.sleep(0.5)
+                        raise Exception(f"Failed to connect to server {addr[0]} port {addr[1]}: {str(e)}")
+                    time.sleep(0.25)
                 except TimeoutError:
                     tries_remaining -= 1
-                    time.sleep(0.5)
+                    time.sleep(0.25)
 
     def get_fixture(self, name: str) -> Value:
         return self.get_fixture_(name).value()
