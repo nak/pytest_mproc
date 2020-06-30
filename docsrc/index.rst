@@ -276,15 +276,19 @@ To start the client nodes:
 
 .. code-block:: shell
 
-   % pytest --num_cores <N> --as-client <host>:<port>
+   % pytest --num_cores <N> --as-client <host>:<port> [--connection-timeout <integer seconds>]
 
 Here, N must be greater than or equal to 1;  multiple workers can be invoked on a node, with possibly multiple client
 nodes. The client will attempt to connect to the main  node for a period of 30 seconds at which point it gives up and
-exits with na error.
+exits with na error.  If *--connection-timeout* is specified, the client will timeout and exit if it takes longer than
+the provided seconds to connect.  The default is 30 seconds.
+
+
 
 .. note::
    *pytest_mproc* does not have the facilities to launch testing on other external nodes.  The checkout of code on
-   client machines and execution of the pytest command on client nodes falls outside of *pytest_mproc*'s scope
+   client machines and execution of the pytest command on client nodes falls outside of *pytest_mproc*'s scope and is
+   the responsibility of the client
 
 
 Node Scoped Fixtures

@@ -13,7 +13,7 @@ from typing import Any, Dict
 
 import _pytest
 
-from pytest_mproc import find_free_port
+from pytest_mproc import find_free_port, fixtures
 
 import pytest
 import _pytest.terminal
@@ -101,6 +101,14 @@ def pytest_addoption(parser):
         type=int,
         help="max # of connections allowed at one time to main process, to prevent deadlock from overload"
     )
+    group._addoption(
+        "--connection-timeout",
+        dest="mproc_connection_timeout",
+        metavar="mproc_connection_timeout",
+        action="store",
+        type=int,
+        help="wait this many seconds on connection of client before timing out"
+    )
 
 
 @pytest.mark.tryfirst
@@ -129,6 +137,8 @@ def pytest_cmdline_main(config):
         raise pytest.UsageError("Number of cores must be greater than or equal to zero when running as a master")
     if config.option.mproc_max_simultaneous_connections <= 0:
         raise pytest.UsageError("max simultaneous connections must be greater than 0; preferably greater than 9")
+    if config.option.mproc_connection_timeout is not None:
+        fixtures.CONNECTION_TIMEOU = config.option.mproc_connection_timeout
     # validation
     if getattr(config.option, "mproc_numcores", None) is None or is_degraded() or getattr(config.option, "mproc_disabled"):
         reporter.write(">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "

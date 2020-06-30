@@ -5,9 +5,8 @@ import time
 
 from multiprocessing import Semaphore, JoinableQueue, Queue
 from multiprocessing.managers import MakeProxyType, SyncManager
-from typing import Dict, Any
 
-from pytest_mproc import find_free_port
+from pytest_mproc import find_free_port, AUTHKEY
 from pytest_mproc.fixtures import Node
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import BasicReporter
@@ -26,7 +25,7 @@ class CoordinatorProxy(CoordinatorProxyBase):
 
     def __init__(self, token, serializer, manager=None,
                  authkey=None, exposed=None, incref=True, manager_owned=False):
-        super().__init__(token, serializer, manager, b'pass', exposed, incref, manager_owned)
+        super().__init__(token, serializer, manager, AUTHKEY, exposed, incref, manager_owned)
 
 
 class CoordinatorFactory:
@@ -48,7 +47,7 @@ class CoordinatorFactory:
 
     def launch(self) -> "Coordinator":
         if not self._is_local:
-            self._sm = SyncManager(authkey=b'pass')
+            self._sm = SyncManager(authkey=AUTHKEY)
             self._sm.start()
             coordinator = self._sm.CoordinatorProxy(self._num_processes, self._host, self._port,
                                                     self._max_simultaneous_connections, self._is_local)

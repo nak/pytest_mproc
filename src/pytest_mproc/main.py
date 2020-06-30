@@ -12,7 +12,7 @@ from typing import List, Any, Optional, Tuple
 
 import pytest
 
-from pytest_mproc import resource_utilization, find_free_port
+from pytest_mproc import resource_utilization, find_free_port, AUTHKEY
 from pytest_mproc.fixtures import Global, FixtureManager
 from pytest_mproc.utils import BasicReporter
 
@@ -40,14 +40,14 @@ class JoinableQueueProxy(JoinableQueueProxyBase):
 
     def __init__(self, token, serializer, manager=None,
                  authkey=None, exposed=None, incref=True, manager_owned=False):
-        super().__init__(token, serializer, manager, b'pass', exposed, incref, manager_owned)
+        super().__init__(token, serializer, manager, AUTHKEY, exposed, incref, manager_owned)
 
 
 class QueueProxy(QueueProxyBase):
 
     def __init__(self, token, serializer, manager=None,
                  authkey=None, exposed=None, incref=True, manager_owned=False):
-        super().__init__(token, serializer, manager, b'pass', exposed, incref, manager_owned)
+        super().__init__(token, serializer, manager, AUTHKEY, exposed, incref, manager_owned)
 
 
 class Orchestrator:
@@ -81,7 +81,7 @@ class Orchestrator:
                 Orchestrator.Manager.register("finalize", self._finalize)
                 Orchestrator.Manager.register("JoinableQueueProxy", JoinableQueue, JoinableQueueProxy)
             addr = (main.host, main.port) if main else addr
-            super().__init__(addr=addr, as_main=main is not None, passw='pass')
+            super().__init__(addr=addr, as_main=main is not None)
 
         def _register_client(self, client, count: int) -> Value:
             if self._finalized:
@@ -110,7 +110,7 @@ class Orchestrator:
         if is_serving_remotes:
             SyncManager.register("JoinableQueueProxy", JoinableQueue, JoinableQueueProxy)
             SyncManager.register("QueueProxy", Queue, QueueProxy)
-            self._queue_manager = SyncManager(authkey=b'pass')
+            self._queue_manager = SyncManager(authkey=AUTHKEY)
             self._queue_manager.start()
             self._test_q: JoinableQueue = self._queue_manager.JoinableQueueProxy()
             self._result_q: Queue = self._queue_manager.QueueProxy()

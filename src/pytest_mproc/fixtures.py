@@ -7,6 +7,8 @@ from typing import Any, Dict, Tuple
 
 import _pytest
 
+from pytest_mproc import AUTHKEY
+
 _getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem
 
 
@@ -26,6 +28,8 @@ _pytest.fixtures.FixtureRequest._getscopeitem = _getscopeitem_redirect
 
 class FixtureManager(BaseManager):
 
+    CONNECTION_TIMEOUT = 30  # changeable via pytest cmd line (pytest_cmdline_main impl in plugin.py)
+
     class Value:
 
         def __init__(self, val: Any):
@@ -34,7 +38,7 @@ class FixtureManager(BaseManager):
         def value(self) -> Any:
             return self._val
 
-    def __init__(self, addr: Tuple[str, int], as_main: bool, passw: str):
+    def __init__(self, addr: Tuple[str, int], as_main: bool):
         if not as_main:
             # client
             self.__class__.register("get_fixture_")
@@ -45,12 +49,12 @@ class FixtureManager(BaseManager):
             self._fixture_q = queue.Queue()
             self.__class__.register("get_fixture_", self._get_fixture)
             self.__class__.register("put_fixture", self._put_fixture)
-        super().__init__(address=addr, authkey=b'pass')
+        super().__init__(address=addr, authkey=AUTHKEY)
 
         if as_main:
             super().start()
         else:
-            tries_remaining = 60
+            tries_remaining = self.CONNECTION_TIMEOUT*2
             while tries_remaining:
                 try:
                     super().connect()
@@ -90,7 +94,7 @@ class Node(_pytest.main.Session):
         def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
             if not as_main:
                 os.write(sys.stderr.fileno(), f"Waiting for server...[{name}]\n".encode('utf-8'))
-            super().__init__(("127.0.0.1", port), as_main, passw='pass')
+            super().__init__(("127.0.0.1", port), as_main)
             if not as_main:
                 os.write(sys.stderr.fileno(), f"Connected [{name}]\n".encode('utf-8'))
 

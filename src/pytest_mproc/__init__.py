@@ -1,4 +1,5 @@
 import inspect
+import secrets
 import socket
 import sys
 from contextlib import closing
@@ -42,3 +43,5 @@ def find_free_port():
         s.bind(('', 0))
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return s.getsockname()[1]
+
+AUTHKEY = secrets.token_bytes()
