@@ -44,4 +44,4 @@ def find_free_port():
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return s.getsockname()[1]
 
-AUTHKEY = secrets.token_bytes()
+AUTHKEY = __file__[:32].encode('utf-8')
