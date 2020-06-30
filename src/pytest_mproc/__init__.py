@@ -1,28 +1,32 @@
 import inspect
-import secrets
 import socket
 import sys
 from contextlib import closing
 
+from pytest_mproc.data import ResourceUtilization
 
-def group(name, priority: int = 0):
+
+def group(name, priority: int = 0, restrict_to=None):
     """
     Decorator for grouping tests or a class of tests
     :param name: unique name for group of tests to be serialized under execution
     """
+    from pytest_mproc.data import TestExecutionRestriction
+    restrict_to = TestExecutionRestriction.SINGLE_PROCESS if restrict_to is None else restrict_to
+
     def decorator_group(object):
         if inspect.isclass(object):
             for method in [getattr(object, m) for m in dir(object) if inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
-                method._pytest_group = (name, priority)
+                method._pytest_group = (name, priority, restrict_to)
         elif inspect.isfunction(object):
-            object._pytest_group = (name, priority)
+            object._pytest_group = (name, priority, restrict_to)
         else:
             raise Exception("group decorator can only decorate class or function object")
         return object
     return decorator_group
 
 
-def resource_utilization(time_span: float, start_rusage, end_rusage):
+def resource_utilization(time_span: float, start_rusage, end_rusage) -> ResourceUtilization:
     if time_span <= 0.001:
         return -1, -1, -1, end_rusage.ru_maxrss
     if sys.platform.lower() == 'darwin':
@@ -32,10 +36,11 @@ def resource_utilization(time_span: float, start_rusage, end_rusage):
         delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss)
     ucpu_secs = end_rusage.ru_utime - start_rusage.ru_utime
     scpu_secs = end_rusage.ru_stime - start_rusage.ru_stime
-    return time_span, \
-           (ucpu_secs / time_span) * 100.0, \
-           (scpu_secs / time_span) * 100.0, \
-           delta_mem
+    return ResourceUtilization(
+        time_span,
+        (ucpu_secs / time_span) * 100.0,
+        (scpu_secs / time_span) * 100.0,
+        delta_mem)
 
 
 def find_free_port():
@@ -43,5 +48,6 @@ def find_free_port():
         s.bind(('', 0))
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return s.getsockname()[1]
+
 
 AUTHKEY = __file__[:32].encode('utf-8')

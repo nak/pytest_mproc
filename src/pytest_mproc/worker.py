@@ -3,7 +3,7 @@ import socket
 import sys
 import time
 from multiprocessing import Semaphore, JoinableQueue, Queue, Process
-from typing import Optional, Any, Dict
+from typing import Any, Dict, Iterator, Union
 
 import pytest
 from _pytest.config import _prepareconfig
@@ -11,6 +11,7 @@ import pytest_cov.embed
 import resource
 
 from pytest_mproc import resource_utilization
+from pytest_mproc.data import TestBatch, ResourceUtilization, ResultException, ResultTestStatus, ResultExit
 from pytest_mproc.fixtures import Node
 from pytest_mproc.utils import BasicReporter
 
@@ -65,7 +66,7 @@ class WorkerSession:
         self._buffer_size = 20
         self._timestamp = time.time()
         self._last_execution_time = time.time()
-        self._resource_utilization = -1, -1, -1, -1
+        self._resource_utilization = ResourceUtilization(-1.0, -1.0, -1.0, -1)
         self._reporter = BasicReporter()
         self._global_fixtures: Dict[str, Any] = {}
         self._node_fixtures: Dict[str, Any] = {}
@@ -73,16 +74,16 @@ class WorkerSession:
         self._result_q = result_q
         self._node_fixture_manager = None
 
-    def _put(self, kind, data, timeout=None):
+    def _put(self, result: Union[ResultException, ResultExit, ResourceUtilization], timeout=None):
         """
         Append test result data to queue, flushing buffered results to queue at watermark level for efficiency
 
         :param kind: kind of data
         :param data: test result data to publih to queue
         """
-        if self._is_remote and kind == 'test_status':
+        if self._is_remote and isinstance(result, ResultTestStatus):
             os.write(sys.stderr.fileno(), b'.')
-        self._buffered_results.append((kind, data))
+        self._buffered_results.append(result)
         if len(self._buffered_results) >= self._buffer_size or (time.time() - self._timestamp) > MAX_REPORTING_INTERVAL:
             self._flush(timeout)
 
@@ -121,13 +122,13 @@ class WorkerSession:
 
             if session.config.option.collectonly:
                 return  # should never really get here, but for consistency
-            for items in session.items_generator:
+            for test_batch in session.items_generator:
                 # test item comes through as a unique string nodeid of the test
                 # We use the pytest-collected mapping we squirrelled away to look up the
                 # actual _pytest.python.Function test callable
                 # NOTE: session.items is an iterator, as wet upon construction of WorkerSession
-                for item_name in items:
-                    item = session._named_items[item_name]
+                for test_id in test_batch.test_ids:
+                    item = session._named_items[test_id]
                     item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
                     # very much like that in _pytest.main:
                     try:
@@ -161,7 +162,7 @@ class WorkerSession:
         """
         assert self._test_q is not None
 
-        def generator(test_q: JoinableQueue):
+        def generator(test_q: JoinableQueue) -> Iterator[TestBatch]:
             test = test_q.get()
             while test:
                 test_q.task_done()
@@ -227,7 +228,7 @@ class WorkerSession:
             worker._reporter.write(f"\nWorker-{index} finished\n")
 
     def pytest_internalerror(self, excrepr):
-        self._put('error_message', excrepr)
+        self._put(ResultException(excrepr))
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_logreport(self, report):
@@ -237,7 +238,7 @@ class WorkerSession:
 
         :param report: report to draw info from
         """
-        self._put('test_status', report)
+        self._put(ResultTestStatus(report))
         return True
 
     @pytest.hookimpl(tryfirst=True)
@@ -248,8 +249,11 @@ class WorkerSession:
         :param exitstatus: exit status of the test suite run
         """
         # timeouts on queues sometimes can still have process hang if there is a bottleneck, so use alarm
-        self._put('exit', (self._index, self._count, exitstatus, self._last_execution_time - self._session_start_time,
-                           self._resource_utilization))
+        self._put(ResultExit(self._index,
+                             self._count,
+                             exitstatus,
+                             self._last_execution_time - self._session_start_time,
+                             self._resource_utilization))
         self._flush()
         return True
 
