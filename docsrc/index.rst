@@ -18,7 +18,7 @@ Indices and tables
 Introduction
 ============
 
-Welcome to pytest-mproc, a plugin for pytest to run distributed testing via multiprocessing.  This manner
+Welcome to *pytest_mproc*, a plugin for pytest to run distributed testing via multiprocessing.  This manner
 of distributed testing has several advantages, including more efficient execution over pytest-xdist in many cases.
 
 xdist works for cases perhaps where there are large number of tests, but the cost of overhead in using rsync and
@@ -28,8 +28,8 @@ To begin using pytest_mproc, just install:
 
 % pip install pytest-mproc
 
-Currently, *pytest_mproc* is only usable in the context of a single host with multiple cores, although future
-support may be added for distribute testing across multiple nodes.
+*pytest_mproc* is usable in the context of a single host with multiple cores, as well as execution across a distributed
+set of machines.
 
 Why Use *pytest_mproc* over *pytest-xdist*?
 ===========================================
@@ -39,7 +39,7 @@ Why Use *pytest_mproc* over *pytest-xdist*?
 #. Overhead of startup is more efficient, and start-up time does not grow with increasing number of cores
 #. It uses a pull model, so that each worker pulls the next test from a master queue.  There is no need to figure
    out how to divy up the tests beforehand.  The disadvantage is that the developer needs to know how long roughly each
-   test takes and prioritize the longer running tests first (*@pytest.mark.tryfirst*) .
+   test takes and prioritize the longer running tests first.
 #. It provides a 'global' scope test fixture to provide a single instance of a fixture across all tests, regardless of
    how many nodes
 #. It allows you to programatically group together a bunch of tests to run serially on a single worker process
@@ -67,13 +67,13 @@ You can also specify things like "auto*2" or "auto/2" for number of cores.
    additional (partial) batch will add more overhead, as the CPU must be split across multiple threads for some or all
    cores.
 
-Disabling Mproc from Command Line
-=================================
+Disabling *pytest_mproc* from Command Line
+==========================================
 
 To disable mproc (overriding all other pytest-mproc-related flags), specify "--diable-mproc True" on the command line.
 
-Command Line Configuration Options
-==================================
+Top-Level Command Line Configuration Options
+============================================
 
 Aside from specifying the number of cores, the user can optionally specify the maximum number of active connections
 allowed during distributed processing.  The *multiprocessing* module can get bogged down and dwell on one thread or
@@ -121,6 +121,7 @@ Likewise, you can use the same annotation on test class to group all test method
 This is useful if the tests are using a common resource for testing and parallelized execution of tests might
 result in interference.
 
+
 Configuring Test Execution of Groups
 ------------------------------------
 
@@ -161,7 +162,7 @@ execution order relative to all other top-level tests or test groups. For tests 
 will determine the order of execution only within that group.  *pytest_mproc* does not guarantee order of
 execution for tests or test groups with the same priority.
 
-If you specify a priorty at on a class of tests, all test methods within that class will have that priority, unless
+If you specify a priorty on a class of tests, all test methods within that class will have that priority, unless
 a specific priority is assigned to that method through its own decorator.  In that class, the decorator for the class
 method is used.
 
@@ -174,11 +175,12 @@ This raises interesting behaviors about 'session' scoped fixtures.  Each subproc
 session-level fixture;  in other words, you can think of a session as a per-process concept, with one session-level
 fixture per process.  This is often not obvious to test developers. Many times, a global fixture is needed, with a
 single instantiation across all processes and tests.  An example might be setting up a single test database.
+(NOTE: when running on more than one machine, also see 'node-level' fixtures discussed below)
 
 To achieve this, *pytest_mproc* adds a new scope: 'global'. Behind the scenes, the system uses pythons *multiprocessing*
 module's BaseManager to provide this feature.  This is mostly transparent to the developer, with one notable exception.
 In order to communicate a fixture globally across multiple *Process* es, the object returned (or yielded) from a
-globally scoped fixture must be Picklable.
+globally scoped fixture must be 'picklable'.
 
 The 'global' scope is a level above 'session' in the hierarchy.  That means that globally scoped fixtures can only
 depend on other globally scoped fixtures.
@@ -200,7 +202,7 @@ depend on other globally scoped fixtures.
 Tips for Using Global Scope Fixture
 -----------------------------------
 Admittedly, one has to think about how multiprocessing works to know what can and cannot be returned from a global
-test fixture.  Since they are singltons, one useful tip if you are using (singleton) classes (such as manager classses) to
+test fixture.  Since they are "singletons", one useful tip if you are using (singleton) classes (such as manager classses) to
 encaspulate logic, it is best not to put anything other than what is necessary as instance variables, and delegate
 them to class variable.  Also, you should design your fixture so that any other test not depending on it is not blocked
 while on that fixture.  Example code is shown blow
@@ -324,7 +326,7 @@ With the system now allowing execution of mutliple workers on a single machine, 
 this introduces a new level of scoping of fixtures:  *node*-scoped fixtures.  A fixture scoped to '*node*' is
 instantiated once per node and such instance is only available to workers on that node.  The '*global*'-scoped fixtures
 still hold the meaning of being scoped to the entirety of testing, one instance available to all workers across all
-machines (so thinkg carefully about what you are providing in your *global* fixture!).
+machines (so thinkingg carefully about what you are providing in your *global* fixture!).
 
 To declare a fixture to be scoped to a node:
 
@@ -334,4 +336,6 @@ To declare a fixture to be scoped to a node:
    def node_scoped_fixture_function():
        ...
 
-
+.. caution::
+   As with global fixtures, node-level fixtures must return objects that are serializable ('picklable'), as they
+   must be shared across independent processes.
