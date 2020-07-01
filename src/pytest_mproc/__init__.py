@@ -3,6 +3,8 @@ import socket
 import sys
 from contextlib import closing
 
+import pytest
+
 from pytest_mproc.data import ResourceUtilization
 from pytest_mproc.data import GroupTag, DEFAULT_PRIORITY
 

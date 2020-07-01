@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Any
+from typing import List, Any, Set, Dict
 
 from _pytest._code.code import ReprExceptionInfo
 from _pytest.reports import TestReport
@@ -56,4 +56,3 @@ class GroupTag:
 
     def __hash__(self):
         return self.name.__hash__()
-

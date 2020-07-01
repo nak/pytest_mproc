@@ -30,13 +30,19 @@ class V:
     value = 41
 
 
+class GlobalV:
+    value = 41
+
+
 @pytest.fixture(scope='global')
 def global_fix(dummy):
-    V.value += 1
-    return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
+    GlobalV.value += 1
+    return GlobalV.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
 
 
+import pytest_mproc
 @pytest.fixture(scope='node')
+@pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture'))
 def node_level_fixture(mp_tmpdir_factory: TmpDirFactory):
     _node_tmpdir = mp_tmpdir_factory._root_tmp_dir
     assert os.path.exists(_node_tmpdir)

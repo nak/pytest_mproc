@@ -37,7 +37,7 @@ class TestGrouped:
 
     proc_id = None
 
-    def test2(self):
+    def test2(self, node_level_fixture):
         assert TestGrouped.proc_id == os.getpid()
 
     @pytest_mproc.priority(DEFAULT_PRIORITY - 11)

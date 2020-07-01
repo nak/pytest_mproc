@@ -207,27 +207,30 @@ def pytest_configure(config):
     config.option.dist = "no"
 
 
-def process_fixturedef(item, target, fixturedef, request, scope):
+def process_fixturedef(item, target, fixturedef, request, config, scope):
     if not fixturedef:
         return
     for argname in fixturedef.argnames:
+        if argname in config.option.fixtures:
+            continue
         fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
-        process_fixturedef(item, target, fixdef, item._request, scope)
-    generated = request.config.generated_fixtures
+        if fixdef is None:
+            continue
+        if fixturedef.scope in ['node', 'global']:
+            process_fixturedef(item, target, fixdef, request, config, fixdef.scope)
+    generated = config.generated_fixtures
     if not fixturedef or fixturedef.scope != scope:
         return
-
-    if not hasattr(request.config.option, "fixtures"):
-        request.config.option.fixtures: Dict[str, Any] = {}
     name = fixturedef.argname
-    if name not in request.config.option.fixtures:
+    if name not in config.option.fixtures:
         fixture = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
-        val = fixture(*fixturedef.argnames)
+        args = [config.option.fixtures[argname] for argname in fixturedef.argnames]
+        val = fixture(*args)
         if inspect.isgenerator(val):
             generated.append(val)
             val = next(val)
         target.put_fixture(name, val)
-        request.config.option.fixtures[name] = val
+        config.option.fixtures[name] = val
 
 
 def pytest_runtestloop(session):
@@ -269,8 +272,12 @@ def pytest_runtestloop(session):
                 for name in item._fixtureinfo.argnames:
                     try:
                         fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
+                        if not fixturedef or fixturedef.scope != 'node':
+                            continue
+                        if hasattr(fixturedef.func, "_pytest_group"):
+                            item._pyfuncitem._pytest_group = fixturedef.func._pytest_group
                         if coordinator and name not in session.config.option.fixtures:
-                            process_fixturedef(item, coordinator, fixturedef, item._request, 'node')
+                            process_fixturedef(item, coordinator, fixturedef, item._request, session.config, 'node')
                     except Exception as e:
                         session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
                             f"{format_exc()}"
@@ -288,8 +295,8 @@ def pytest_runtestloop(session):
                         fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
                         if not fixturedef or fixturedef.scope != 'global':
                             continue
-                        if orchestrator and name not in orchestrator.fixtures():
-                            process_fixturedef(item, orchestrator, fixturedef, item._request, 'global')
+                        if orchestrator and name not in session.config.option.fixtures: #orchestrator.fixtures():
+                            process_fixturedef(item, orchestrator, fixturedef, item._request, session.config, 'global')
                     except Exception as e:
                         session.shouldfail = f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}'" + \
                             f"{format_exc()}"

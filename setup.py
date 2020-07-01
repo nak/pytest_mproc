@@ -1,6 +1,6 @@
 import setuptools
 
-VERSION = "4.0.0"
+VERSION = "4.0.1"
 
 setuptools.setup(
     name='pytest_mproc',

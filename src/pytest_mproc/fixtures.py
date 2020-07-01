@@ -86,6 +86,7 @@ class FixtureManager(BaseManager):
             name, value = self._fixture_q.get()
             self._fixtures[name] = value
             result = self._fixtures.get(name)
+
         return self.Value(result)
 
 
