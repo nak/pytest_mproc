@@ -43,7 +43,7 @@ Why Use *pytest_mproc* over *pytest-xdist*?
 #. It provides a 'global' scope test fixture to provide a single instance of a fixture across all tests, regardless of
    how many nodes
 #. It allows you to programatically group together a bunch of tests to run serially on a single worker process
-#  Support for execution across multiple machines
+#.  Support for execution across multiple machines
 #. It provides a better mechanism for prioritizing and configuring test execution
 
 
