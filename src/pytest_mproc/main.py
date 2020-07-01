@@ -254,11 +254,13 @@ class Orchestrator:
         def priority(test) -> int:
             return getattr(test._pyfuncitem.obj, "_pytest_priority", DEFAULT_PRIORITY)
 
-        grouped = [t for t in tests if getattr(t._pyfuncitem.obj, "_pytest_group", None)]
+        grouped = [t for t in tests if getattr(t._pyfuncitem.obj, "_pytest_group", None)
+                   or getattr(t._pyfuncitem, "_pytest_group", None)]
         self._tests = [TestBatch([t.nodeid], priority(t)) for t in tests if t not in grouped]
         groups: Dict["GroupTag", TestBatch] = {}
         for test in grouped:
-            tag = test._pyfuncitem.obj._pytest_group
+            tag = test._pyfuncitem.obj._pytest_group if hasattr(test._pyfuncitem.obj, "_pytest_group") \
+                else test._pyfuncitem._pytest_group
             groups.setdefault(tag, TestBatch([], tag.priority)).test_ids.append(test)
         for tag, group in groups.items():
             groups[tag].test_ids = [test.nodeid for test in sorted(group.test_ids, key=lambda x: priority(x))]

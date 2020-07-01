@@ -37,7 +37,7 @@ class TestGrouped:
 
     proc_id = None
 
-    def test2(self, node_level_fixture):
+    def test2(self):
         assert TestGrouped.proc_id == os.getpid()
 
     @pytest_mproc.priority(DEFAULT_PRIORITY - 11)
@@ -51,7 +51,7 @@ def test_some_alg1(global_fix, mp_tmpdir_factory, queue_fixture):
 
 
 @pytest.mark.parametrize('data', ['a%s' % i for i in range(1000)])
-def test_some_alg2(data, some_fixture, global_fix, mp_tmp_dir: Path):
+def test_some_alg2(data, some_fixture, node_level_fixture, global_fix, mp_tmp_dir: Path):
     unique_path = str(mp_tmp_dir.joinpath("unique_file.txt"))
     assert not os.path.exists(unique_path),  "mp_tmp_dir did not produce a unique path as expected"
     with open(unique_path, 'w'):

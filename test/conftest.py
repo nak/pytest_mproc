@@ -42,7 +42,7 @@ def global_fix(dummy):
 
 import pytest_mproc
 @pytest.fixture(scope='node')
-@pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture'))
+@pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture', restrict_to=pytest_mproc.data.TestExecutionConstraint.SINGLE_NODE))
 def node_level_fixture(mp_tmpdir_factory: TmpDirFactory):
     _node_tmpdir = mp_tmpdir_factory._root_tmp_dir
     assert os.path.exists(_node_tmpdir)

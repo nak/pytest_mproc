@@ -275,6 +275,16 @@ def pytest_runtestloop(session):
                         if not fixturedef or fixturedef.scope != 'node':
                             continue
                         if hasattr(fixturedef.func, "_pytest_group"):
+                            if hasattr(item._pyfuncitem.obj, "_pytest_group"):
+                                group2 = item._pyfuncitem.obj._pytest_group
+                                if group2 == fixturedef.func._pytest_group:
+                                    BasicReporter().write(f"WARNING: '{item.nodeid}' specifies a group but also belongs " +
+                                                          f"to fixture '{fixturedef.argname}'' which specifies the same group")
+                                else:
+                                    raise pytest.UsageError(f"test {item.nodeid} belongs to group '{group2.name}' but also belongs " +
+                                                            f"to fixture '{fixturedef.argname}' which specifies " +
+                                                            f"group '{fixturedef.func._pytest_group.name}'.  A test cannot" +
+                                                            "belong to two distinct groups")
                             item._pyfuncitem._pytest_group = fixturedef.func._pytest_group
                         if coordinator and name not in session.config.option.fixtures:
                             process_fixturedef(item, coordinator, fixturedef, item._request, session.config, 'node')
