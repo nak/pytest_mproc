@@ -1,11 +1,11 @@
 import setuptools
 
-VERSION = "4.0.2"
+VERSION = "4.0.3"
 
 setuptools.setup(
     name='pytest_mproc',
     author='John Rusnak',
-    author_email='jrusnak@linkedin.com',
+    author_email='jrusnak69@gmail.com',
     version=VERSION,
     description="low-startup-overhead, scalable, distributed-testing pytest plugin",
     package_dir={'': 'src'},
@@ -18,8 +18,8 @@ setuptools.setup(
                  "License :: OSI Approved :: BSD License"],
     license='BSD 2-CLAUSE',
     keywrds='pytest distributed multiprocessing',
-    url='https://github.com/jrusnakli/pytest_mpdist',
-    download_url="https://github.com/jrusnakli/pytest_mpdist/dist/%s" % VERSION,
+    url='https://github.com/nak/pytest_mproc',
+    download_url="https://github.com/nak/pytest_mproc/dist/%s" % VERSION,
     install_requires=[
         'pytest',
         'pytest-cov'

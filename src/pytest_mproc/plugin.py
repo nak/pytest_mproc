@@ -281,10 +281,12 @@ def pytest_runtestloop(session):
                                     BasicReporter().write(f"WARNING: '{item.nodeid}' specifies a group but also belongs " +
                                                           f"to fixture '{fixturedef.argname}'' which specifies the same group")
                                 else:
-                                    raise pytest.UsageError(f"test {item.nodeid} belongs to group '{group2.name}' but also belongs " +
-                                                            f"to fixture '{fixturedef.argname}' which specifies " +
-                                                            f"group '{fixturedef.func._pytest_group.name}'.  A test cannot" +
-                                                            "belong to two distinct groups")
+                                    raise raise_usage_error(
+                                        session,
+                                        f"test {item.nodeid} belongs to group '{group2.name}' but also belongs " +
+                                        f"to fixture '{fixturedef.argname}' which specifies " +
+                                        f"group '{fixturedef.func._pytest_group.name}'.  A test cannot" +
+                                        "belong to two distinct groups")
                             item._pyfuncitem._pytest_group = fixturedef.func._pytest_group
                         if coordinator and name not in session.config.option.fixtures:
                             process_fixturedef(item, coordinator, fixturedef, item._request, session.config, 'node')
@@ -342,6 +344,11 @@ def pytest_sessionfinish(session):
         session.config.option.mproc_coordinator.kill()
 
 
+def raise_usage_error(session, msg: str):
+    if hasattr(session.config.option, "mproc_coordinator"):
+        session.config.option.mproc_coordinator.kill()
+    raise pytest.UsageError(msg)
+
 ################
 # Process-safe temp dir
 ###############
@@ -382,7 +389,7 @@ class TmpDirFactory:
 
 
 @pytest.fixture(scope='node')
-def mp_tmpdir_factory():
+def mp_tmp_dir_factory():
     """
     :return: a factory for creating unique tmp directories, unique across all Process's
     """
