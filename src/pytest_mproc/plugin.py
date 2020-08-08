@@ -398,9 +398,9 @@ def mp_tmp_dir_factory():
 
 
 @pytest.fixture()
-def mp_tmp_dir(mp_tmpdir_factory: TmpDirFactory):
+def mp_tmp_dir(mp_tmp_dir_factory: TmpDirFactory):
     # tmpdir is not thread safe and can fail on test setup when running on a highly loaded very parallelized system
     # so use this instead
-    with mp_tmpdir_factory.create_tmp_dir("PYTEST_MPROC_LAZY_CLEANUP" not in os.environ) as tmp_dir:
+    with mp_tmp_dir_factory.create_tmp_dir("PYTEST_MPROC_LAZY_CLEANUP" not in os.environ) as tmp_dir:
         yield tmp_dir
 
