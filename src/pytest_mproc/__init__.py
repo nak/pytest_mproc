@@ -68,3 +68,8 @@ def find_free_port():
 
 
 AUTHKEY = __file__[:32].encode('utf-8')
+
+
+def fixture(fixturefunction, *, scope, **kargs):
+    from _pytest.fixtures import fixture
+    return fixture(fixturefunction, scope=scope, **kargs)

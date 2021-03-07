@@ -13,33 +13,20 @@ _getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem
 
 
 def _getscopeitem_redirect(self, scope):
-    if scope == "global" or scope == "node":
+    if scope == "global":
+        return self._pyfuncitem.getparent(_pytest.main.Session)
+    elif scope == 'node':
         return self._pyfuncitem.getparent(_pytest.main.Session)
     else:
         return _getscopeitem_orig(self, scope)
 
-_pytest.fixtures.scopes.insert(0, "node")
-_pytest.fixtures.scopes.insert(0, "global")
+if hasattr(_pytest.fixtures, 'scopes'):
+    _pytest.fixtures.scopes.insert(0, "node")
+    _pytest.fixtures.scopes.insert(0, "global")
 _pytest.fixtures.scopenum_function = _pytest.fixtures.scopes.index("function")
 if hasattr(_pytest.fixtures, 'scope2props'):
     _pytest.fixtures.scope2props['global'] = ()
     _pytest.fixtures.scope2props['node'] = ()
-else:
-    from typing import TYPE_CHECKING
-    if TYPE_CHECKING:
-        _pytest.fixtures._Scope.insert(0, "node")
-        _pytest.fixtures._Scope.insert(0, "global")
-    orig_get_scope_node = _pytest.fixtures.get_scope_node
-
-    def get_scope_node(node, scope):
-        if scope == "global":
-            return Global
-        elif scope == 'node':
-            return Node
-        else:
-            return orig_get_scope_node(node, scope)
-
-    _pytest.fixtures.get_scope_node = get_scope_node
 _pytest.fixtures.FixtureRequest._getscopeitem = _getscopeitem_redirect
 
 
@@ -127,7 +114,3 @@ class Global(_pytest.main.Session):
 
 if hasattr(_pytest.fixtures, 'scopename2class'):
     _pytest.fixtures.scopename2class.update({"global": Global, "node": Node})
-else:
-    sys.stderr.write("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
-    sys.stderr.write("WARNING: This version of pytest will not currently allow 'node' or 'global' fixtures\n")
-    sys.stderr.write("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")

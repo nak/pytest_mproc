@@ -20,6 +20,7 @@ os.environ["PYTEST_MPROC_LAZY_CLEANUP"] = "1"  # only cleanup tempdirs at end of
 group = GroupTag(name="group", priority=DEFAULT_PRIORITY-1, restrict_to=TestExecutionConstraint.SINGLE_NODE)
 class_group = GroupTag(name="class_group", restrict_to=TestExecutionConstraint.SINGLE_PROCESS)
 
+
 @pytest.fixture()
 def some_fixture():
     return 1
@@ -45,7 +46,7 @@ class TestGrouped:
         TestGrouped.proc_id = os.getpid()
 
 
-def test_some_alg1(global_fix, mp_tmpdir_factory, queue_fixture):
+def test_some_alg1(global_fix, mp_tmp_dir_factory, queue_fixture):
     assert global_fix == 42
     Something().some_alg1()
 
@@ -59,7 +60,7 @@ def test_some_alg2(data, some_fixture, node_level_fixture, global_fix, mp_tmp_di
     assert global_fix == 42
     Something().some_alg2(data)
 
+
 @pytest_mproc.group(group)
 def test_some_alg3():
     Something().some_alg3()
-

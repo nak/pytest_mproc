@@ -7,7 +7,6 @@ from typing import Any, Dict, Iterator, Union
 
 import pytest
 from _pytest.config import _prepareconfig
-import pytest_cov.embed
 import resource
 
 from pytest_mproc import resource_utilization
@@ -21,29 +20,6 @@ if sys.version_info[0] < 3:
 else:
     # noinspection PyUnresolvedReferences
     from queue import Empty
-
-try:
-    my_cov = None  # overriden later, after fork
-    try:
-        original_cleanup = pytest_cov.embed.cleanupgit
-    except:
-        original_cleanup = None
-
-    def _cleanup(cov=None):
-        # pytest_cov will do special things when tests use multiprocessing, however,
-        # here we don't want that processing to take place.  (It will otherwise
-        # spit out many lines of messaging all of which has no bearing on success of code coverage
-        # collecion)
-        if cov != my_cov and original_cleanup:
-            original_cleanup(cov)
-
-
-    pytest_cov.embed.cleanup = _cleanup
-    pycov_present = True
-
-except Exception:
-    pycov_present = False
-
 
 """maximum time between reporting status back to coordinator"""
 MAX_REPORTING_INTERVAL = 1.0  # seconds
@@ -107,16 +83,10 @@ class WorkerSession:
 
         :param session:  Where the tests generator is kept
         """
+        global my_cov
         start_time = time.time()
         rusage = resource.getrusage(resource.RUSAGE_SELF)
         try:
-            if pycov_present:
-                global my_cov
-                try:
-                    my_cov = pytest_cov.embed.active_cov
-                except:
-                    my_cov = None
-
             if session.testsfailed and not session.config.option.continue_on_collection_errors:
                 raise session.Failed("%d errors during collection" % session.testsfailed)
 
@@ -202,11 +172,14 @@ class WorkerSession:
         worker._node_fixture_manager = Node.Manager(as_main=False, port=node_port, name=f"Worker-{index}")
         worker._fixture_sem = fixture_sem
         args = sys.argv[1:]
+        # remove coverage args, as pytest_cov handles multiprocessing already and will applyt coverage to worker
+        # as a proc that was launched from main thread which itsalef has coverage (otherwise it will attempt
+        # duplicate coverage processing and file conflicts galore)
+        args = [arg for arg in args if not arg.startswith("--cov=")]
         config = _prepareconfig(args, plugins=[])
         # unregister terminal (don't want to output to stdout from worker)
         # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
         config.pluginmanager.unregister(name="terminal")
-        # register our listener, and configure to let pycov-test knoew that we are a slave (aka worker) thread
         config.pluginmanager.register(worker, "mproc_worker")
         config.option.mproc_worker = worker
         from pytest_mproc.main import Orchestrator

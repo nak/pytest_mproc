@@ -43,8 +43,8 @@ def global_fix(dummy):
 import pytest_mproc
 @pytest.fixture(scope='node')
 @pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture', restrict_to=pytest_mproc.data.TestExecutionConstraint.SINGLE_NODE))
-def node_level_fixture(mp_tmpdir_factory: TmpDirFactory):
-    _node_tmpdir = mp_tmpdir_factory._root_tmp_dir
+def node_level_fixture(mp_tmp_dir_factory: TmpDirFactory):
+    _node_tmpdir = mp_tmp_dir_factory._root_tmp_dir
     assert os.path.exists(_node_tmpdir)
     V.value += 1
     return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
