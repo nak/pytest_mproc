@@ -295,12 +295,9 @@ def pytest_runtestloop(session):
                             f"{format_exc()}"
                         reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
                         break
-
     if hasattr(session.config.option, "mproc_main") and not hasattr(session.config.option, "mproc_worker"):
         orchestrator = session.config.option.mproc_main
         for item in session.items:
-            if session.shouldfail:
-                break
             if hasattr(item, "_request"):
                 for name in item._fixtureinfo.argnames:
                     try:
