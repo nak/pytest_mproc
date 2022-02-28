@@ -101,7 +101,7 @@ class Orchestrator:
                 client.join()
             self._clients = []
 
-    def __init__(self, host: str = _localhost(), port = find_free_port(), is_serving_remotes: bool=False):
+    def __init__(self, host: str = _localhost(), port: int = find_free_port(), is_serving_remotes: bool = False):
         """
         :param num_processes: number of parallel executions to be conducted
         """

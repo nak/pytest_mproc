@@ -15,7 +15,7 @@ from pytest_mproc.worker import WorkerSession
 
 
 # Create proxies for Queue types to be accessible from remote clients
-# NOTE: multiprocessing module has a quirk/bug where passin proxies to another separate client (e.g., on
+# NOTE: multiprocessing module has a quirk/bug where passing proxies to another separate client (e.g., on
 # another machine) causes the proxy to be rebuilt with a random authkey on the other side.  Unless
 # we override the constructor to force an authkey value, we will hit AuthenticationError's
 
@@ -62,7 +62,7 @@ class CoordinatorFactory:
 
 class Coordinator:
     """
-    Context manager for kicking of worker Processes to conduct test execution via pytest hooks
+    Context manager for kicking off worker Processes to conduct test execution via pytest hooks
     """
     _node_port = find_free_port()
     _node_manager_client = None
@@ -141,4 +141,5 @@ class Coordinator:
         self._worker_procs = []
 
 
+# register the proxy class as the Coordinator class for SyncManager
 SyncManager.register("CoordinatorProxy", Coordinator, CoordinatorProxy)

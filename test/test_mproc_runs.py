@@ -7,10 +7,12 @@ import sys
 from pytest_mproc import GroupTag
 from pytest_mproc import DEFAULT_PRIORITY
 from pytest_mproc.data import TestExecutionConstraint
+from pathlib import Path
 
-sys.path.append(os.path.basename(__file__))
-sys.path.append(os.path.join(os.path.basename(__file__), "..", "testcode"))
-
+base_path = Path(__file__).parent
+sys.path.append(str(base_path))
+sys.path.append(str(base_path.parent))
+print(f">>>>>>>>>>>>>>>>>>>>>>>>>>> {sys.path}")
 import pytest
 from testcode.testsomething import Something
 

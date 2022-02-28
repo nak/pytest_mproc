@@ -50,7 +50,7 @@ class WorkerSession:
         self._result_q = result_q
         self._node_fixture_manager = None
 
-    def _put(self, result: Union[ResultException, ResultExit, ResourceUtilization], timeout=None):
+    def _put(self, result: Union[ResultException, ResultExit, ResourceUtilization, ResultTestStatus], timeout=None):
         """
         Append test result data to queue, flushing buffered results to queue at watermark level for efficiency
 
@@ -79,7 +79,7 @@ class WorkerSession:
         """
         This is where the action takes place.  We override the usual implementation since
         that doesn't support a dynamic generation of tests (whose source is the test Queue
-        that it draws from to pick out the next test
+        that it draws from to pick out the next test)
 
         :param session:  Where the tests generator is kept
         """
