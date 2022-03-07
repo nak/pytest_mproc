@@ -1,18 +1,16 @@
 import os
-from pathlib import Path
-
-import pytest_mproc
 import sys
+from pathlib import Path
+base_path = Path(__file__).parent
+sys.path.insert(0, str(base_path))
+sys.path.insert(0, str(base_path.parent / "testsrc"))
+
+import pytest_mproc.plugin
 # to pick up dummy_src (ensure in path):
 from pytest_mproc import GroupTag
 from pytest_mproc import DEFAULT_PRIORITY
 from pytest_mproc.data import TestExecutionConstraint
-from pathlib import Path
 
-base_path = Path(__file__).parent
-sys.path.append(str(base_path))
-sys.path.append(str(base_path.parent))
-print(f">>>>>>>>>>>>>>>>>>>>>>>>>>> {sys.path}")
 import pytest
 from testcode.testsomething import Something
 
