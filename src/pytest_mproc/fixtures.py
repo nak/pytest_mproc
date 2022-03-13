@@ -1,8 +1,8 @@
 import os
 import queue
 import sys
-import time
 from enum import Enum
+from multiprocessing import current_process
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional, Union
 
@@ -10,7 +10,7 @@ import _pytest
 from _pytest import nodes
 from _pytest.compat import assert_never
 
-from pytest_mproc import AUTHKEY
+from pytest_mproc import find_free_port
 
 if hasattr(_pytest.fixtures, 'scopes'):
     _getscopeitem_orig = _pytest.fixtures.FixtureRequest._getscopeitem
@@ -98,8 +98,6 @@ if hasattr(_pytest.fixtures, 'scope2props'):
 
 class FixtureManager(BaseManager):
 
-    CONNECTION_TIMEOUT = 30  # changeable via pytest cmd line (pytest_cmdline_main impl in plugin.py)
-
     class Value:
 
         def __init__(self, val: Any):
@@ -108,49 +106,33 @@ class FixtureManager(BaseManager):
         def value(self) -> Any:
             return self._val
 
-    def __init__(self, addr: Tuple[str, int], as_main: bool):
-        if not as_main:
-            # client
-            self.__class__.register("get_fixture_")
-            self.__class__.register("put_fixture")
-        else:
-            # server:
-            self._fixtures: Dict[str, Any] = {}
-            self._fixture_q = queue.Queue()
-            self.__class__.register("get_fixture_", self._get_fixture)
-            self.__class__.register("put_fixture", self._put_fixture)
-        super().__init__(address=addr, authkey=AUTHKEY)
+    def __init__(self, addr: Tuple[str, int], auth_key: Optional[bytes] = None):
+        print(f"[{os.getpid()}]>>>>>>>>>>>>> SERVER USING AUTH KEY {auth_key or current_process().authkey}")
+        super().__init__(address=addr, authkey=auth_key or current_process().authkey)
 
-        if as_main:
-            super().start()
-        else:
-            chars = ['|', '\\', '-', '/', '|', '-']
-            tries_remaining = self.CONNECTION_TIMEOUT*4
-            while tries_remaining:
-                try:
-                    super().connect()
-                    break
-                except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError) as e:
-                    ch = chars[tries_remaining % len(chars)]
-                    seconds_left = int(tries_remaining/4)
-                    os.write(sys.stderr.fileno(), f"\r{ch} Connecting ... {seconds_left}        ".encode('utf-8'))
-                    tries_remaining -= 1
-                    if tries_remaining == 0:
-                        os.write(sys.stderr.fileno(), b"\n")
-                        raise Exception(f"Failed to connect to server {addr[0]} port {addr[1]}: {str(e)}")
-                    time.sleep(0.25)
-                except TimeoutError:
-                    tries_remaining -= 1
-                    time.sleep(0.25)
+    # noinspection PyAttributeOutsideInit
+    def start(self, *args, **kwargs):
+        # server:
+        self._fixtures: Dict[str, Any] = {}
+        self._fixture_q = queue.Queue()
+        self.__class__.register("get_fixture", self.get_fixture)
+        self.__class__.register("put_fixture", self.put_fixture)
+        try:
+            super().start(*args, **kwargs)
+        except OSError:
+            print(f"!!!!!!!!!!!!!!!!! ERROR STARTING {self}")
+            raise
 
-    def get_fixture(self, name: str) -> Value:
-        return self.get_fixture_(name).value()
+    def connect(self):
+        self.__class__.register("get_fixture_")
+        self.__class__.register("put_fixture")
+        super().connect()
 
-    def _put_fixture(self, name: str, value: Any) -> None:
+    def put_fixture(self, name: str, value: Any) -> None:
         self._fixtures[name] = value
         self._fixture_q.put((name, value))
 
-    def _get_fixture(self, name: str) -> Any:
+    def get_fixture(self, name: str) -> Any:
         result = self._fixtures.get(name)
         while result is None:
             name, value = self._fixture_q.get()
@@ -164,12 +146,34 @@ class Node(_pytest.main.Session):
 
     class Manager(FixtureManager):
 
-        def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
+        def __init__(self, as_main: bool, port: int, name: str = "Node.Manager", connection_timeout:int = 30):
             if not as_main:
                 os.write(sys.stderr.fileno(), f"Waiting for server...[{name}]\n".encode('utf-8'))
-            super().__init__(("127.0.0.1", port), as_main)
+            super().__init__(("127.0.0.1", port))
             if not as_main:
                 os.write(sys.stderr.fileno(), f"Connected [{name}]\n".encode('utf-8'))
+
+        PORT = 7038
+        _singleton = None
+
+        @classmethod
+        def singleton(cls) -> "Node.Manager":
+            if cls._singleton is None:
+                try:
+                    cls._singleton = cls(as_main=True, port=cls.PORT)
+                    cls._singleton.start()
+                    cls._singleton._is_serving = True
+                except (OSError, EOFError):
+                    cls._singleton = cls(as_main=False, port=cls.PORT, connection_timeout=10)
+                    cls._singleton.connect()
+                    cls._singleton._is_serving = False
+            return cls._singleton
+
+        @classmethod
+        def shutdown(cls) -> None:
+            if cls._singleton is not None and cls._singleton._is_serving:
+                cls._singleton.shutdown()
+                cls._singleton = None
 
 
 class Global(_pytest.main.Session):

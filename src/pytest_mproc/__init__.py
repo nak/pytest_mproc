@@ -2,11 +2,19 @@ import inspect
 import socket
 import sys
 from contextlib import closing
+from typing import Union
 
 import pytest
 
 from pytest_mproc.data import ResourceUtilization
 from pytest_mproc.data import GroupTag, DEFAULT_PRIORITY
+
+
+class TestError(Exception):
+    """
+    To be thrown when a test setup/test environment issue occurs preventing test execution from even happening
+    """
+    pass
 
 
 def priority(level: int):
@@ -26,15 +34,15 @@ def priority(level: int):
     return decorator_priority
 
 
-def group(tag: GroupTag):
+def group(tag: Union[GroupTag, str]):
     """
     Decorator for grouping tests or a class of tests
-    :param name: unique name for group of tests to be serialized under execution
+    :param tag: unique name for group of tests to be serialized under execution
     """
     def decorator_group(object):
         if inspect.isclass(object):
             for method in [getattr(object, m) for m in dir(object) if inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
-                method._pytest_group = tag
+                method._pytest_group = tag if isinstance(tag, GroupTag) else GroupTag(tag)
         elif inspect.isfunction(object):
             object._pytest_group = tag
         else:
@@ -65,9 +73,6 @@ def find_free_port():
         s.bind(('', 0))
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return s.getsockname()[1]
-
-
-AUTHKEY = __file__[:32].encode('utf-8')
 
 
 def fixture(fixturefunction, *, scope, **kargs):

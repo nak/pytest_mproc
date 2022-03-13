@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 base_path = Path(__file__).parent
 sys.path.insert(0, str(base_path))
@@ -33,7 +34,6 @@ def test_group_m2():
 
 
 @pytest_mproc.group(class_group)
-@pytest_mproc.priority(DEFAULT_PRIORITY-10)
 class TestGrouped:
 
     proc_id = None
@@ -46,17 +46,14 @@ class TestGrouped:
         TestGrouped.proc_id = os.getpid()
 
 
-def test_some_alg1(global_fix, mp_tmp_dir_factory, queue_fixture):
-    assert global_fix == 42
+def test_some_alg1():  # global_fix, queue_fixture):
+    # assert global_fix == 42
     Something().some_alg1()
 
 
-@pytest.mark.parametrize('data', ['a%s' % i for i in range(1000)])
-def test_some_alg2(data, some_fixture, node_level_fixture, global_fix, mp_tmp_dir: Path):
-    unique_path = str(mp_tmp_dir.joinpath("unique_file.txt"))
-    assert not os.path.exists(unique_path),  "mp_tmp_dir did not produce a unique path as expected"
-    with open(unique_path, 'w'):
-        pass
+@pytest.mark.parametrize('data', ['a%s' % i for i in range(10)])
+def test_some_alg2(data, some_fixture, global_fix):
+    time.sleep(0.1)
     assert global_fix == 42
     Something().some_alg2(data)
 

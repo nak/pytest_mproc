@@ -1,11 +1,11 @@
 #import explicitly, as entrypoint not present during test  (only after setup.py and dist file created)
-#from pytest_mproc.plugin import *  # noqa
-import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
+if os.path.exists("../src/pytest_mproc"):
+    import sys
+    #from pytest_mproc.plugin import *  # noqa
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 import multiprocessing
 import pytest
-print(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> {os.environ.get('PYTHONPATH')}")
 from pytest_mproc.plugin import TmpDirFactory
 
 

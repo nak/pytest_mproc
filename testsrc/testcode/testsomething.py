@@ -26,4 +26,4 @@ class Something:
 
     def some_alg3(self):
         to_be_run_under_test(1)
-        assert False
+        assert False, "Expected to fail to test pytest_mproc's handling of failed test"

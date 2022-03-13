@@ -22,6 +22,11 @@ setuptools.setup(
     download_url="https://github.com/nak/pytest_mproc/dist/%s" % VERSION,
     install_requires=[
         'pytest',
-        'pytest-cov'
+        'pytest-cov',
+        'shiv',
+        'dataclasses',
+        "asyncio-contextmanager",
+        'requests',
+        'aiohttp',
     ]
 )

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Any, Set, Dict
+from typing import List, Any, Set, Dict, Union
 
 from _pytest._code.code import ReprExceptionInfo
 from _pytest.reports import TestReport
@@ -30,14 +30,30 @@ class ResourceUtilization:
 
 
 @dataclass
-class ResultException:
+class ResultException(Exception):
     excrepr: ReprExceptionInfo
 
+@dataclass
+class ClientDied(Exception):
+    index: int
 
 @dataclass
 class ResultTestStatus:
     report: TestReport
 
+
+class TestStateEnum(Enum):
+    STARTED = 1
+    FINISHED = 2
+    RETRY = 3
+
+
+@dataclass
+class TestState:
+    state: TestStateEnum
+    host: str
+    pid: int
+    test_id: str
 
 @dataclass
 class ResultExit:
@@ -56,3 +72,5 @@ class GroupTag:
 
     def __hash__(self):
         return self.name.__hash__()
+
+ResultType = Union[TestState, ResultException, ResultExit, ResourceUtilization, ResultTestStatus]
