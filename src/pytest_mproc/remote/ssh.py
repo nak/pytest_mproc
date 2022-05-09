@@ -324,26 +324,29 @@ class SSHClient:
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
         full_command = command + ' ' + ' '.join(map(shlex.quote, args))
-        if cwd is not None:
-            full_command = f"cd {str(cwd)} && {full_command}"
         if env:
             for key, value in env.items():
                 full_command = f"{key}={value} {full_command}"
+        if cwd is not None:
+            full_command = f"cd {str(cwd)} && {full_command}"
         proc = await asyncio.subprocess.create_subprocess_exec(
             "ssh", *self._global_options, self.destination,
             f"{full_command}",
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
-            encoding="utf-8"
+            encoding="utf-8",
+            env=env
         )
         return proc
 
     async def execute_remote_cmd(self,  command, *args,
-                                 uses_auth_key: bool,
                                  stdout: TextIO = sys.stdout,
                                  stderr: TextIO = sys.stderr,
-                                 timeout: Optional[float] = None, cwd: Optional[Path] = None,
+                                 stdin: Optional[TextIO] = None,
+                                 auth_key: Optional[bytes] = None,
+                                 timeout: Optional[float] = None,
+                                 cwd: Optional[Path] = None,
                                  env: Optional[Dict[str, str]] = None) -> asyncio.subprocess.Process:
         """
         execute command on remote host
@@ -357,10 +360,18 @@ class SSHClient:
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
-        proc = await self.launch_remote_command(command, *args, stdin=asyncio.subprocess.PIPE if uses_auth_key else None,
-                                                stdout=stdout, stderr=stderr, cwd=cwd, env=env)
-        if uses_auth_key:
-            print(f">>>>>>>>>>>>>>>>>>> USING AUTH KEY {current_process().authkey} to {proc.stdin}")
-            proc.stdin.write(current_process().authkey + b'\n')
+        if auth_key is not None:
+            env["AUTH_TOKEN_STDIN"] = '1'
+        proc = await self.launch_remote_command(command, *args,
+                                                stdin=asyncio.subprocess.PIPE if auth_key is not None else stdin,
+                                                stdout=stdout,
+                                                stderr=stderr,
+                                                cwd=cwd,
+                                                env=env)
+        if auth_key is not None:
+            import binascii
+            auth_key = binascii.b2a_hex(auth_key)
+            proc.stdin.write(auth_key + b'\n')
+            proc.stdin.close()
         await asyncio.wait_for(proc.wait(), timeout=timeout)
         return proc

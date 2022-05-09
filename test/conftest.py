@@ -1,5 +1,7 @@
 #import explicitly, as entrypoint not present during test  (only after setup.py and dist file created)
 import os
+import pytest_mproc.fixtures
+
 if os.path.exists("../src/pytest_mproc"):
     import sys
     #from pytest_mproc.plugin import *  # noqa
@@ -12,12 +14,21 @@ from pytest_mproc.plugin import TmpDirFactory
 _node_tmpdir = None
 
 
-@pytest.fixture(scope='global')
+def get_ip_addr():
+    import socket
+    hostname = socket.gethostname()
+    try:
+        return socket.gethostbyname(hostname)
+    except Exception:
+        return None
+
+
+@pytest_mproc.fixtures.global_fixture(host=get_ip_addr())
 def dummy():
     return [None]
 
 
-@pytest.fixture(scope='node')
+@pytest_mproc.fixtures.node_fixture()
 def queue_fixture():
     # cannot be shared at global level, so must be node-scoped
     # (will raise  mnultiprocessing.context.AuthenticationError: digest sent was rejected
@@ -35,14 +46,14 @@ class GlobalV:
     value = 41
 
 
-@pytest.fixture(scope='global')
+@pytest_mproc.fixtures.global_fixture(host=get_ip_addr())
 def global_fix(dummy):
     GlobalV.value += 1
     return GlobalV.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
 
 
 import pytest_mproc
-@pytest.fixture(scope='node')
+@pytest_mproc.fixtures.node_fixture()
 @pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture', restrict_to=pytest_mproc.data.TestExecutionConstraint.SINGLE_NODE))
 def node_level_fixture(mp_tmp_dir_factory: TmpDirFactory):
     _node_tmpdir = mp_tmp_dir_factory._root_tmp_dir

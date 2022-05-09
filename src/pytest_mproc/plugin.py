@@ -7,19 +7,19 @@ import secrets
 import time
 from multiprocessing import current_process
 
-from pytest_mproc.fixtures import Node
 from pytest_mproc import worker
 
-if '--as-client' in sys.argv:
-    current_process().authkey = b'abcdef' # sys.stdin.buffer.readline().strip()
-elif '--as-server' in sys.argv:
-    if 'AUTH_TOKEN' in os.environ:
-        import binascii
-        current_process().authkey = binascii.a2b_hex(os.environ.get('AUTH_TOKEN'))
-    else:
-        current_process().authkey = secrets.token_bytes(64)
+if "PYTEST_WORKER" in os.environ:
+    import binascii
+    auth_key = sys.stdin.buffer.readline().strip()
+    current_process().authkey = binascii.a2b_hex(auth_key)
+elif "AUTH_TOKEN_STDIN" in os.environ:
+    import binascii
+    auth_key = sys.stdin.readline().strip()
+    current_process().authkey = binascii.a2b_hex(auth_key)
 else:
-    current_process().authkey = secrets.token_bytes(64)
+    if current_process().authkey is None:
+        current_process().authkey = secrets.token_bytes(64)
 
 import getpass
 import inspect
@@ -31,9 +31,7 @@ from traceback import format_exc
 from typing import Callable, Optional, Iterable, Union, Type
 
 import _pytest
-import _pytest.fixtures
 import _pytest.terminal
-from typing import TYPE_CHECKING
 
 from pytest_mproc.ptmproc_data import (
     PytestMprocConfig,
@@ -42,9 +40,6 @@ from pytest_mproc.ptmproc_data import (
     PytestMprocRuntime,
 )
 
-if TYPE_CHECKING:
-    from typing import Literal
-    _pytest.fixtures._ScopeName = Literal["session", "package", "module", "class", "function", "node", "global"]
 
 import pytest
 from pytest_mproc import find_free_port, fixtures
@@ -221,8 +216,6 @@ def pytest_cmdline_main(config):
     if config.option.ptmproc_config.max_simultaneous_connections and \
             config.option.ptmproc_config.max_simultaneous_connections <= 0:
         raise pytest.UsageError("max simultaneous connections must be greater than 0; preferably greater than 9")
-    if config.option.ptmproc_config.connection_timeout is not None:
-        fixtures.CONNECTION_TIMEOUT = config.option.ptmproc_config.connection_timeout
     # validation
     if config.option.ptmproc_config.num_cores is None or is_degraded() or mproc_disabled:
         reporter.write(
@@ -524,6 +517,8 @@ def pysessionfinish(exitstatus):
     from pytest_mproc.worker import WorkerSession
     if WorkerSession.singleton():
         WorkerSession.singleton().pysessionfinish(exitstatus)
+    fixtures.Global.Manager.shutdown()
+    fixtures.Node.Manager.shutdown()
 
 
 @pytest.mark.tryfirst
@@ -534,6 +529,9 @@ def pytest_sessionfinish(session):
             and session.config.ptmproc_runtime.coordinator is not None:
         with suppress(Exception):
             session.config.ptmproc_runtime.coordinator.kill()
+    if not session.config.option.worker and session.config.ptmproc_runtime\
+            and session.config.ptmproc_runtime.mproc_main is not None:
+        session.config.ptmproc_runtime.mproc_main.shutdown()
     from pytest_mproc.worker import WorkerSession
     if WorkerSession.singleton():
         WorkerSession.singleton().pysessionfinish(session)

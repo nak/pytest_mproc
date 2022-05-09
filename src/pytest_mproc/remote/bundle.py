@@ -8,7 +8,6 @@ import sys
 import tempfile
 import zipfile
 from asyncio import Semaphore
-from multiprocessing.process import current_process
 
 from typing.io import TextIO
 
@@ -188,9 +187,9 @@ class Bundle:
             pip.install(["--target", bundle._site_pkgs.name, "--force-reinstall", "-r", str(requirements_path)], )
         pip.install(["--target", bundle._site_pkgs.name, "--force-reinstall", "pytest"], )
         if not any([(Path(dir) / "pytest_mproc").exists for dir in src_dirs]):
-            # mostly for running raw pytest_mproc code during unit/integration testing:
             pip.install(["--target", bundle._site_pkgs.name, "--force-reinstall", "pytest_mproc"], )
         else:
+            # mostly for running raw pytest_mproc code during unit/integration testing:
             root = Path(__file__).parent.parent.parent.parent
             setup = root / "setup.py"
             import subprocess
@@ -228,7 +227,7 @@ class Bundle:
         with zipfile.ZipFile(self.tests_zip_path, mode='w') as zfile:
             for f in self.tests_dir.absolute().glob("**/*"):
                 if f.is_file() and '__pycache__' not in str(f) and not f.name.startswith('.'):
-                    zfile.write(f, f"tests/{f.relative_to(self.tests_dir.absolute())}")
+                    zfile.write(f, f"tests/{f.relative_to(self.tests_dir.parent)}")
             for local, remote in self._resources:
                 zfile.write(local, str(remote))
         with zipfile.ZipFile(self._requirements_zip_path, mode='w') as reqzfile:
@@ -252,7 +251,7 @@ class Bundle:
             "ssh", ssh_client.destination,
             f"cd {str(remote_root)} && unzip {str(self._test_zip_path.name)}",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
+            stderr=sys.stderr
         )
         await asyncio.wait_for(proc.wait(), timeout=timeout)
         if proc.returncode != 0:
@@ -296,7 +295,7 @@ class Bundle:
             password: Optional[str] = None,
             deploy_timeout: Optional[float] = FIVE_MINUTES,
             timeout: Optional[float] = None,
-            uses_auth_key: bool = False,
+            auth_key: Optional[bytes] = None,
             stdout: Optional[Union[TextIO, int]] = None,
             stderr: Optional[Union[TextIO, int]] = None,
     ) -> Dict[str, asyncio.subprocess.Process]:
@@ -326,7 +325,7 @@ class Bundle:
                                         deploy_timeout=deploy_timeout,
                                         timeout=timeout,
                                         remote_root=worker_config.remote_root,
-                                        uses_auth_key=uses_auth_key,
+                                        auth_key=auth_key,
                                         stdout=stdout,
                                         stderr=stderr),
                 )
@@ -339,7 +338,7 @@ class Bundle:
                     task = asyncio.get_event_loop().create_task(
                         self.execute_remote(worker_config.remote_host,
                                             *(list(args) + list(cli_args)),
-                                            uses_auth_key=uses_auth_key,
+                                            auth_key=auth_key,
                                             env=cli_env,
                                             username=username,
                                             password=password,
@@ -378,9 +377,10 @@ class Bundle:
                              password: Optional[str] = None,
                              deploy_timeout: Optional[float] = FIVE_MINUTES,
                              timeout: Optional[float] = None,
-                             uses_auth_key: bool = False,
+                             auth_key: Optional[bytes] = None,
                              stdout: Optional[Union[TextIO, int]] = None,
                              stderr: Optional[Union[TextIO, int]] = None,
+                             auth_token: Optional[bytes] = None
                              ) -> Tuple[str, asyncio.subprocess.Process]:
         """
         Execute tests on remote host
@@ -400,12 +400,17 @@ class Bundle:
             await self.deploy(ssh_client, remote_root=remote_root, timeout=deploy_timeout)
             command = f"{str(remote_root / self._shiv_path.name)} -m pytest"
             env.update(self._env)
-            print(f">>>>>>>>>>>>>>>> LAUNCHING CLIENT: {command} {' '.join(args)}")
+            if auth_token:
+                env['AUTH_TOKEN_STDIN'] = "1"
+            env['PTMPROC_EXECUTABLE'] = command.split()[0]
             proc = await ssh_client.execute_remote_cmd(command, *args,
-                                                       timeout=timeout, env=env,
-                                                       cwd=self.remote_tests_dir(remote_root),
-                                                       uses_auth_key=uses_auth_key,
-                                                       stdout=stdout, stderr=stderr)
+                                                       timeout=timeout,
+                                                       env=env,
+                                                       cwd=self.remote_tests_dir(remote_root) / self._tests_dir.name,
+                                                       auth_key=auth_key,
+                                                       stdout=stdout,
+                                                       stderr=stderr,
+                                                       stdin=None if auth_token is None else asyncio.subprocess.PIPE)
             await asyncio.wait_for(proc.wait(), timeout=timeout)
         return host, proc
 
@@ -422,7 +427,7 @@ class Bundle:
             await self.deploy(ssh_client, remote_root=remote_root, timeout=deploy_timeout)
             command = f"{str(remote_root / self._shiv_path.name)}"
             async for line in ssh_client.monitor_remote_execution(command, *args, timeout=timeout,
-                                                                  cwd=self.remote_tests_dir(remote_root),
+                                                                  cwd=self.remote_tests_dir(remote_root) / "tests",
                                                                   ):
                 yield line
 

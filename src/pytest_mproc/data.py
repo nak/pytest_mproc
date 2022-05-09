@@ -36,6 +36,8 @@ class ResultException(Exception):
 @dataclass
 class ClientDied(Exception):
     index: int
+    host : str
+    errored: bool = False
 
 @dataclass
 class ResultTestStatus:

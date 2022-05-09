@@ -33,7 +33,7 @@ class TestSSHClient:
 
     @pytest.mark.asyncio
     async def test_mkdtmp(self):
-        ssh_client = SSHClient('localhost')
+        ssh_client = SSHClient( socket.gethostbyname(socket.gethostname()))
         async with ssh_client.mkdtemp() as tmpdir:
             assert Path(tmpdir).exists()  # this is localhost after all
         assert not Path(tmpdir).exists()
@@ -95,41 +95,49 @@ def test_remote_execution_thread(tmp_path):
                                    tests_path=root / "test",
                                    )
     args = list(sys.argv)
-    for arg in args:
+    for index, arg in enumerate(args):
         if arg.endswith(".py"):
             sys.argv.remove(arg)
-        elif arg == "-k" or "execution_thread" in arg:
+        elif arg == "-k" in arg:
             sys.argv.remove(arg)
-    sys.argv.extend(["test_mproc_runs.py"])
+            sys.argv.remove(args[index + 1])
+    sys.argv.extend(["test_mproc_runs.py", "-k", "alg2"])
+    ipname = socket.gethostbyname(socket.gethostname())
     command = [
-        shutil.which("python3"), "-m", "pytest", "--as-server", f"{socket.gethostbyname(socket.gethostname())}:43210",
+        shutil.which("python3"), "-m", "pytest", "--as-server", f"{ipname}:43210",
         "--cores", "0", "-k", "alg2",
-        ' '.join(args)
     ]
     env = os.environ.copy()
     import binascii
-    env['AUTH_TOKEN'] = binascii.b2a_hex(b'abcdef')
-    current_process().authkey = b'abcdef'
-    main_proc = subprocess.Popen(command, stdout=sys.stderr, stderr=sys.stderr, cwd=str(Path(__file__).parent),
-                                 env=env)
-    print(f">>>>>>>>>>>>> LAUNCHED {command} {main_proc.returncode}")
+    env['AUTH_TOKEN_STDIN'] = '1'
+    main_proc = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr, cwd=str(Path(__file__).parent),
+                                 env=env, stdin=subprocess.PIPE)
+    main_proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
+    main_proc.stdin.close()
+    print(f">>>>>>>>>>>>> LAUNCHED {' '.join(command)} {main_proc.returncode}")
     client_hosts = [
-        RemoteHostConfig("localhost"),
-        RemoteHostConfig("localhost"),
-        RemoteHostConfig("localhost"),
+        RemoteHostConfig(ipname),
+        RemoteHostConfig(ipname),
+        RemoteHostConfig(ipname),
     ]
     thread = RemoteExecutionThread(project_config=project_config,
                                    remote_sys_executable=shutil.which("python3"),
                                    remote_hosts_config=client_hosts,
                                    )
-    sem = Semaphore(0)
-    thread.start(server=socket.gethostbyname(socket.gethostname()),
-                 server_port=43210,
-                 finish_sem=sem,
-                 stdout=sys.stdout,
-                 stderr=sys.stderr)
-    sem.release()
-    thread.join(timeout=240)
-    if main_proc.returncode is None:
-        main_proc.kill()
-        assert False, "Main pytest process did not exit as expected"
+    try:
+        sem = Semaphore(0)
+        thread.start(server=socket.gethostbyname(socket.gethostname()),
+                     server_port=43210,
+                     auth_key=current_process().authkey,
+                     finish_sem=sem,
+                     stdout=sys.stdout,
+                     stderr=sys.stderr)
+        sem.release()
+        sem.release()
+        sem.release()
+        thread.join(timeout=3*240)
+    finally:
+        try:
+            main_proc.wait(timeout=10)
+        except (subprocess.TimeoutExpired, TimeoutError):
+            main_proc.terminate()

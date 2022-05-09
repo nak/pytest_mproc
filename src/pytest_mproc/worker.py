@@ -55,7 +55,6 @@ class WorkerSession:
         self._last_execution_time = time.time()
         self._resource_utilization = ResourceUtilization(-1.0, -1.0, -1.0, -1)
         self._reporter = BasicReporter()
-        self._global_fixtures: Dict[str, Any] = {}
         self._test_q = test_q
         self._result_q = result_q
         self._ip_addr = get_ip_addr()
@@ -161,20 +160,20 @@ class WorkerSession:
 
         def generator(test_q: JoinableQueue) -> Iterator[TestBatch]:
             test = test_q.get()
+            print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
             while test:
                 test_q.task_done()
                 yield test
                 test = test_q.get()
+                print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
             test_q.task_done()
-
+        print(f">>>>>>>>>>>>>>> TESTS EXHAUSTED")
         session.items_generator = generator(self._test_q)
-        session._named_items = {item.nodeid: item for item in session.items}
+        session._named_items = {item.nodeid.split(os.sep)[-1]: item for item in session.items}
         return session.items
 
     @classmethod
-    def start(cls, index: int, host: str, port: int) -> subprocess.Popen:
-        #is_remote: bool,  start_sem: Semaphore, fixture_sem: Semaphore,
-        #      test_q: JoinableQueue, result_q: Queue) -> Process:
+    def start(cls, index: int, host: str, port: int, executable: str) -> subprocess.Popen:
         """
 
         :param index: index of worker being created
@@ -185,13 +184,10 @@ class WorkerSession:
         :return: Process created for new worker
         """
         import binascii
-        print(f"[{os.getpid()}] STARTING WORKER RUN....")
-        #current_process().authkey = binascii.a2b_hex(os.environ.get('AUTH_TOKEN'))
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
-        sync_sem = Semaphore(0)
-        #proc = Process(target=cls.run, args=(index, is_remote, start_sem, fixture_sem, test_q, result_q, sync_sem),)
-        proc = subprocess.Popen([shutil.which('python3'), __file__, str(index), host, str(port)] + sys.argv[1:], env=env,
+        print(f">>>>>>>>>>>> LAUNCHING WORKER {index}")
+        proc = subprocess.Popen([executable,  '-m', __name__, str(index), host, str(port)] + sys.argv[1:], env=env,
                                 stdout=sys.stdout.fileno(), stderr=sys.stderr.fileno(), stdin=subprocess.PIPE)
         proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
         proc.stdin.flush()
@@ -281,20 +277,16 @@ def pytest_cmdline_main(config):
 
 
 def main():
+    from pytest_mproc import plugin  # ensures auth_key is set
     from pytest_mproc.worker import WorkerSession
-    import binascii
     from pytest_mproc.main import Orchestrator
     from pytest_mproc.fixtures import Node
-    auth_key = sys.stdin.readline().strip()
-    auth_key = binascii.a2b_hex(auth_key)
-    current_process().authkey = auth_key
-    Node.Manager.singleton()
-    current_process().authkey=auth_key
     index, host, port = sys.argv[1:4]
     index = int(index)
     port = int(port)
-    mgr = Orchestrator.Manager(addr=(host, port), auth_key=auth_key)
+    mgr = Orchestrator.Manager(addr=(host, port))
     mgr.connect()
+    mgr.register_worker((get_ip_addr(), os.getpid()), index)
     test_q = mgr.get_test_queue()
     result_q = mgr.get_results_queue()
 
@@ -307,16 +299,14 @@ def main():
     assert WorkerSession.singleton() is not None
     try:
         pytest.main(sys.argv[4:])
-        Node.Manager.singleton().shutdown()
     except Exception as e:
         import traceback
-        result_q.put(ClientDied(index))
+        result_q.put(ClientDied(index, get_ip_addr(), errored=True))
     finally:
-        result_q.put(None)
-    if Node.Manager.singleton()._is_serving:
+        result_q.put(ClientDied(index, get_ip_addr()))
         Node.Manager.singleton().shutdown()
-    #time.sleep(2)
-    #os.kill(os.getpid(), 9)
+    time.sleep(2)
+    os.kill(os.getpid(), 9)
 
 
 if __name__ == "__main__":
