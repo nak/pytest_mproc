@@ -160,14 +160,14 @@ class WorkerSession:
 
         def generator(test_q: JoinableQueue) -> Iterator[TestBatch]:
             test = test_q.get()
-            print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
+            # print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
             while test:
                 test_q.task_done()
                 yield test
                 test = test_q.get()
-                print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
+                # print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
             test_q.task_done()
-        print(f">>>>>>>>>>>>>>> TESTS EXHAUSTED")
+        # print(f">>>>>>>>>>>>>>> TESTS EXHAUSTED")
         session.items_generator = generator(self._test_q)
         session._named_items = {item.nodeid.split(os.sep)[-1]: item for item in session.items}
         return session.items
@@ -187,8 +187,9 @@ class WorkerSession:
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
         print(f">>>>>>>>>>>> LAUNCHING WORKER {index}")
-        proc = subprocess.Popen([executable,  '-m', __name__, str(index), host, str(port)] + sys.argv[1:], env=env,
-                                stdout=sys.stdout.fileno(), stderr=sys.stderr.fileno(), stdin=subprocess.PIPE)
+        proc = subprocess.Popen([executable,  '-m', __name__, host, str(port)]\
+                                + sys.argv[1:], env=env,
+                                stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.PIPE)
         proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
         proc.stdin.flush()
         return proc
@@ -281,16 +282,15 @@ def main():
     from pytest_mproc.worker import WorkerSession
     from pytest_mproc.main import Orchestrator
     from pytest_mproc.fixtures import Node
-    index, host, port = sys.argv[1:4]
-    index = int(index)
+    host, port = sys.argv[1:3]
     port = int(port)
     mgr = Orchestrator.Manager(addr=(host, port))
     mgr.connect()
-    mgr.register_worker((get_ip_addr(), os.getpid()), index)
+    mgr.register_worker((get_ip_addr(), os.getpid()))
     test_q = mgr.get_test_queue()
     result_q = mgr.get_results_queue()
 
-    worker = WorkerSession(index=index,
+    worker = WorkerSession(index=os.getpid(),
                            is_remote='--as-client' in sys.argv,
                            test_q=test_q,
                            result_q=result_q,
@@ -298,15 +298,15 @@ def main():
     WorkerSession.set_singleton(worker)
     assert WorkerSession.singleton() is not None
     try:
-        pytest.main(sys.argv[4:])
+        pytest.main(sys.argv[3:])
     except Exception as e:
         import traceback
-        result_q.put(ClientDied(index, get_ip_addr(), errored=True))
+        result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=True))
     finally:
-        result_q.put(ClientDied(index, get_ip_addr()))
+        result_q.put(ClientDied(os.getpid(), get_ip_addr()))
         Node.Manager.singleton().shutdown()
-    time.sleep(2)
-    os.kill(os.getpid(), 9)
+    # time.sleep(2)
+    # os.kill(os.getpid(), 9)
 
 
 if __name__ == "__main__":

@@ -224,6 +224,7 @@ class Bundle:
         :param remote_root: remote path to where bundle is deployed
         """
         # noinspection SpellCheckingInspection
+        print(">>> Zipping contents for remote worker...")
         with zipfile.ZipFile(self.tests_zip_path, mode='w') as zfile:
             for f in self.tests_dir.absolute().glob("**/*"):
                 if f.is_file() and '__pycache__' not in str(f) and not f.name.startswith('.'):
@@ -244,11 +245,12 @@ class Bundle:
                 out.flush()
                 reqzfile.write(out.name, 'requirements.txt')
         await ssh_client.mkdir(self.remote_tests_dir(remote_root))
+        print(">>> Pushing contents to remote worker...")
         await ssh_client.push(self._shiv_path, remote_root / self._shiv_path.name)
         await ssh_client.push(self._test_zip_path, remote_root / self._test_zip_path.name)
         await ssh_client.push(self._requirements_zip_path, remote_root / self._requirements_zip_path.name)
-        proc = await asyncio.subprocess.create_subprocess_exec(
-            "ssh", ssh_client.destination,
+        print(">>> Installing tests on remote worker...")
+        proc = await ssh_client._remote_execute(
             f"cd {str(remote_root)} && unzip {str(self._test_zip_path.name)}",
             stdout=asyncio.subprocess.PIPE,
             stderr=sys.stderr
@@ -257,6 +259,7 @@ class Bundle:
         if proc.returncode != 0:
             text = await proc.stdout.read()
             raise CommandExecutionFailure(f"Failed to unzip tests on remote client {text}", proc.returncode)
+        print(">>> Unzipping contents on remote worker...")
         proc = await asyncio.subprocess.create_subprocess_exec(
             "ssh", ssh_client.destination,
             f"cd {str(remote_root)} && unzip {str(self._requirements_zip_path.name)}",
@@ -278,6 +281,7 @@ class Bundle:
             else:
                 self._env["PYTHONPATH"] = str(remote_root / 'site-packages')
             await ssh_client.mkdir(remote_root / 'site_packages')
+            print(f">>> Installing requirements on remote worker...")
             await ssh_client.install(
                 remote_py_executable=self._remote_executable,
                 remote_root=remote_root,
@@ -403,6 +407,7 @@ class Bundle:
             if auth_token:
                 env['AUTH_TOKEN_STDIN'] = "1"
             env['PTMPROC_EXECUTABLE'] = command.split()[0]
+            print(f"[{os.getpid()}] >>> Executing tests on remote...")
             proc = await ssh_client.execute_remote_cmd(command, *args,
                                                        timeout=timeout,
                                                        env=env,

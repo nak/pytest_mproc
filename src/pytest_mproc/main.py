@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import suppress
 # noinspection PyUnresolvedReferences
@@ -77,10 +78,22 @@ class RemoteExecutionThread:
               deploy_timeout: Optional[float] = None, stdout=None, stderr=None,
               auth_key: Optional[bytes] = None
               ):
-        self._thread = multiprocessing.Process(target=self._start,
-                                               args=(server, server_port, finish_sem, timeout, deploy_timeout,
-                                                     stdout, stderr, auth_key))
+        this = self
+
+        class WorkerThread(threading.Thread):
+
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+                self._args = args
+                self._kwargs = kwargs
+
+            def run(self):
+                this._start(*self._args, **self._kwargs)
+
+        self._thread = WorkerThread(server, server_port, finish_sem, timeout, deploy_timeout,
+                                    stdout, stderr, auth_key)
         self._thread.start()
+        print(f"[{os.getpid()}]>>>>>>>>>>>>>>>>>  STARTED THREAD: EXECUTE MULTI")
         self._finish_sem = finish_sem
 
     def _start(self, server: str, server_port: int,
@@ -109,6 +122,7 @@ class RemoteExecutionThread:
                 args += ["--as-client", f"{server}:{server_port}"]
                 if "--cores" not in args:
                     args += ["--cores", "1"]
+                print(f"[{os.getpid()}]>>>>>>>>>>>>>>>>>  THREAD: EXECUTE MULTI")
                 task = bundle.execute_remote_multi(
                     self._remote_hosts_config,
                     finish_sem,
@@ -120,7 +134,7 @@ class RemoteExecutionThread:
                     stderr=stderr,
                     stdout=stdout,
                 )
-                procs = asyncio.get_event_loop().run_until_complete(task)
+                procs = asyncio.new_event_loop().run_until_complete(task)
                 if all([p.returncode != 0 for p in procs.values()]):
                     raise Exception("Failed on all client hosts to executed pytest")
         except Exception as e:
@@ -157,17 +171,17 @@ class Orchestrator:
         def __init__(self, addr: Optional[Tuple[str, int]], auth_key: Optional[bytes] = None):
             auth_key = auth_key or current_process().authkey
             super().__init__(addr=addr, auth_key=auth_key)
+            # server:
+            self._finalized = False
+            self._clients = []
+            self._workers = {}
 
         # noinspection PyAttributeOutsideInit
         def start(self, main: "Orchestrator"):
             if self._started is True:
                 raise Exception("Start called twice")
-            Orchestrator.Manager._started = True
-            # server:
-            self._finalized = False
-            self._clients = []
-            self._workers = {}
             self._main = main
+            Orchestrator.Manager._started = True
             Orchestrator.Manager.register("register_client", self._register_client)
             Orchestrator.Manager.register("register_worker", self._register_worker)
             Orchestrator.Manager.register("count", self._count)
@@ -191,22 +205,28 @@ class Orchestrator:
             Orchestrator.Manager.register("get_results_queue")
             super().connect()
 
-        def _register_client(self, client, executable: str):
+        def _register_client(self, client: "pytest_mproc.coordinator.Coordinator", executable: str):
             if self._finalized:
                 raise Exception("Client registered after disconnect")
             self._clients.append(client)
             client.start(self._main._host, self._main._port, executable)
 
-        def _register_worker(self, worker, index: int):
+        def _register_worker(self, worker):
+            ip_addr, pid = worker
+            key = f"{ip_addr}-{pid}"
+            if key in self._workers:
+                raise Exception(f"Duplicate worker index: {worker} @  {key}")
             if self._finalized:
                 raise Exception("Client registered after disconnect")
-            self._workers[index] = worker
+            self._workers[key] = worker
+            print(f"[{os.getpid()}]>>>>>>>>>>>>>>>>>>>>>>>>>> SERVER WORKER COUNT IS {self._workers}")
 
         def _count(self):
             return self.Value(len(self._workers))
 
-        def _completed(self, index: int):
-            del self._workers[index]
+        def _completed(self, host: str, index: int):
+            del self._workers[f"{host}-{index}"]
+            print(f">>>>>>>>>>>>>>>>>>>>>>>>>> COMPLETED:L SERVER COUNT IS {len(self._workers)}")
 
         def _finalize(self):
             self._finalized = True
@@ -407,15 +427,16 @@ class Orchestrator:
             result_batch: Union[List[ResultType], None] = self._result_q.get()
             while result_batch is not None:
                 if isinstance(result_batch, ClientDied):
+                    key = f"{result_batch.host}-{result_batch.index}"
                     if result_batch.errored:
                         os.write(sys.stderr.fileno(),
-                                 f"\nA worker client has died Worker-{result_batch.index}\n".encode('utf-8'))
+                                 f"\nA worker client has died Worker-{key}\n".encode('utf-8'))
                         error_count += 1
                     else:
                         os.write(sys.stderr.fileno(),
-                                 f"\nWorker-{result_batch.index} finished\n".encode('utf-8'))
+                                 f"\nWorker-{key} finished\n".encode('utf-8'))
                     # noinspection PyUnresolvedReferences
-                    self._mp_manager.completed(result_batch.index)
+                    self._mp_manager.completed(result_batch.host, result_batch.index)
                     # noinspection PyUnresolvedReferences
                     if self._mp_manager.count().value() <= 0:
                         os.write(sys.stderr.fileno(), b"No more workers;  exiting results processing")

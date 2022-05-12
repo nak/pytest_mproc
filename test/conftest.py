@@ -7,6 +7,7 @@ if os.path.exists("../src/pytest_mproc"):
     #from pytest_mproc.plugin import *  # noqa
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 import multiprocessing
+import pytest_mproc.plugin
 import pytest
 from pytest_mproc.plugin import TmpDirFactory
 

@@ -9,17 +9,16 @@ from multiprocessing import current_process
 
 from pytest_mproc import worker
 
-if "PYTEST_WORKER" in os.environ:
-    import binascii
-    auth_key = sys.stdin.buffer.readline().strip()
-    current_process().authkey = binascii.a2b_hex(auth_key)
-elif "AUTH_TOKEN_STDIN" in os.environ:
+if "AUTH_TOKEN_STDIN" in os.environ:
     import binascii
     auth_key = sys.stdin.readline().strip()
+    print(f">>>>>>>>>>>>>> READING STDIN KEY {auth_key}")
     current_process().authkey = binascii.a2b_hex(auth_key)
 else:
     if current_process().authkey is None:
         current_process().authkey = secrets.token_bytes(64)
+    import binascii
+    print(f">>>>>>>>>>>>>> USING KEY {binascii.b2a_hex(current_process().authkey)}")
 
 import getpass
 import inspect
