@@ -4,19 +4,21 @@ This package contains code to coordinate execution from a main thread to worker 
 import os
 import sys
 import time
+from contextlib import suppress
 
 from multiprocessing import current_process
 from multiprocessing.managers import SyncManager
+from subprocess import TimeoutExpired
 from typing import Optional
 from pytest_mproc import find_free_port
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import BasicReporter
-from pytest_mproc.worker import WorkerSession
 
 
 def get_ip_addr():
     import socket
     hostname = socket.gethostname()
+    # noinspection PyBroadException
     try:
         return socket.gethostbyname(hostname)
     except Exception:
@@ -45,8 +47,9 @@ class CoordinatorFactory:
             self.sm.start()
         self._mgr = mgr
 
-    def launch(self, host: str, port: int, executable: str) -> "Coordinator":
+    def launch(self, host: str, port: int) -> "Coordinator":
         if not self._is_local:
+            # noinspection PyUnresolvedReferences
             coordinator = self.sm.Coordinator(self._num_processes,
                                               self._max_simultaneous_connections,
                                               self._is_local)
@@ -54,8 +57,9 @@ class CoordinatorFactory:
             coordinator = Coordinator(self._num_processes,
                                       self._max_simultaneous_connections,
                                       self._is_local)
-        executable = os.environ.get('PTMPROC_EXECUTABLE', sys.argv[0])
-        self._mgr.register_client(coordinator, executable)
+        # noinspection PyUnresolvedReferences
+        self._mgr.register_client(coordinator)
+        executable = os.environ.get('PTMPROC_EXECUTABLE', sys.executable)
         coordinator.start(host, port, executable)
         return coordinator
 
@@ -86,14 +90,19 @@ class Coordinator:
 
         :return: this object
         """
+        from pytest_mproc.worker import WorkerSession
         for index in range(self._num_processes):
-            proc = WorkerSession.start(index, host, port, executable)
+            proc = WorkerSession.start(host, port, executable)
             self._worker_procs.append(proc)
         return
 
-    def join(self):
+    def join(self, timeout: Optional[float] = None):
         for proc in self._worker_procs:
-            proc.wait()
+            try:
+                proc.wait(timeout)
+            except TimeoutExpired:
+                with suppress(OSError):
+                    proc.kill()
 
     def kill(self):
         if CoordinatorFactory.sm:

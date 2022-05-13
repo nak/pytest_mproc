@@ -4,9 +4,8 @@ pytest-html
 pytest-asyncio
 shiv
 dataclasses
-asyncio-contextmanager; python_version < '3.7'
 requests
 aiohttp
 aiofile
-shiv
 aiocontext
+shiv

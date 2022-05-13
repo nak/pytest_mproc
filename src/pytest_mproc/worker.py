@@ -1,21 +1,37 @@
 import os
-import shutil
 import socket
 import subprocess
 import sys
 import time
-from multiprocessing import Semaphore, JoinableQueue, Queue, Process
+import traceback
+from multiprocessing import (
+    JoinableQueue,
+    Queue,
+    Semaphore,
+)
 from multiprocessing.process import current_process
-from typing import Any, Dict, Iterator, Union
-
+from typing import Iterator, Union
 import pytest
-from _pytest.config import _prepareconfig, ExitCode
+# noinspection PyProtectedMember
+from _pytest.config import _prepareconfig
 import resource
 
-from pytest_mproc import resource_utilization, TestError
-from pytest_mproc.data import TestBatch, ResourceUtilization, ResultException, ResultTestStatus, ResultExit, TestState, \
-    ResultType, TestStateEnum, ClientDied
-from pytest_mproc.ptmproc_data import PytestMprocConfig, PytestMprocWorkerRuntime
+from pytest_mproc import resource_utilization, TestError, user_output
+from pytest_mproc.data import (
+    ClientDied,
+    ResultException,
+    ResultExit,
+    ResultTestStatus,
+    ResultType,
+    ResourceUtilization,
+    TestBatch,
+    TestState,
+    TestStateEnum,
+)
+from pytest_mproc.ptmproc_data import (
+    PytestMprocConfig,
+    PytestMprocWorkerRuntime,
+)
 from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:
@@ -31,6 +47,7 @@ MAX_REPORTING_INTERVAL = 1.0  # seconds
 
 def get_ip_addr():
     hostname = socket.gethostname()
+    # noinspection PyBroadException
     try:
         return socket.gethostbyname(hostname)
     except Exception:
@@ -70,7 +87,6 @@ class WorkerSession:
         """
         if self._is_remote and isinstance(result, ResultTestStatus):
             os.write(sys.stderr.fileno(), b'.')
-            #os.write(sys.stderr.fileno(), f"\nSTATUS: {result}\n".encode('utf-8'))
         self._buffered_results.append(result)
         if isinstance(result, TestStateEnum) \
                 or len(self._buffered_results) >= self._buffer_size \
@@ -97,7 +113,7 @@ class WorkerSession:
 
         :param session:  Where the tests generator is kept
         """
-        global my_cov
+        # global my_cov
         start_time = time.time()
         rusage = resource.getrusage(resource.RUSAGE_SELF)
         try:
@@ -115,16 +131,18 @@ class WorkerSession:
                 # NOTE: session.items is an iterator, as wet upon construction of WorkerSession
                 for test_id in test_batch.test_ids:
                     has_error = False
-                    item = session._named_items[test_id]
-                    self._put(TestState(TestStateEnum.STARTED, self._this_host, self._pid, test_id))
+                    bare_test_id = test_id.split(os.sep)[-1]
+                    item = session._named_items[bare_test_id]
+                    self._put(TestState(TestStateEnum.STARTED, self._this_host, self._pid, test_id, test_batch))
                     try:
                         item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
                     except TestError:
                         has_error = True
-                        self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id))
+                        self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id, test_batch))
                     finally:
                         if not has_error:
-                            self._put(TestState(TestStateEnum.FINISHED, self._this_host, self._pid, test_id))
+                            self._put(TestState(TestStateEnum.FINISHED, self._this_host, self._pid,
+                                                test_id, test_batch))
                     # very much like that in _pytest.main:
                     try:
                         if session.shouldfail:
@@ -170,22 +188,28 @@ class WorkerSession:
         return session.items
 
     @classmethod
-    def start(cls, index: int, host: str, port: int, executable: str) -> subprocess.Popen:
+    def start(cls,  host: str, port: int, executable: str) -> subprocess.Popen:
         """
-
-        :param index: index of worker being created
-        :param start_sem: gating semaphore used to control # of simultaneous connections (prevents deadlock)
-        :param fixture_sem: gating semaphore when querying for test fixtures
-        :param test_q: Queue to pull from to get next test to run
-        :param result_q: Queue to place results
+        :param host: host of main server
+        :param port: port of main server
+        :param executable: which executable to run under
         :return: Process created for new worker
         """
         import binascii
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
-        proc = subprocess.Popen([executable,  '-m', __name__, host, str(port)]\
-                                + sys.argv[1:], env=env,
-                                stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.PIPE)
+        env["AUTH_TOKEN_STDIN"] = "1"
+        if not user_output.verbose or '--as-client' not in sys.argv:
+            # if on same host as main, don't spit out output from worker so as to not clutter stdout/stderr
+            stdout = subprocess.DEVNULL
+        else:
+            stdout = sys.stdout
+        stderr = sys.stderr
+        executable = executable or sys.executable
+        verbose = ['-s'] if user_output.verbose else []
+        proc = subprocess.Popen([executable, '-m', __name__, host, str(port)] + sys.argv[1:] + verbose,
+                                env=env,
+                                stdout=stdout, stderr=stderr, stdin=subprocess.PIPE)
         proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
         proc.stdin.flush()
         return proc
@@ -216,8 +240,7 @@ class WorkerSession:
         workerinput = {'slaveid': "worker-%d" % worker._index,
                        'workerid': "worker-%d" % worker._index,
                        'cov_master_host': socket.gethostname(),
-                       'cov_slave_output': os.path.join(os.getcwd(),
-                                                         "worker-%d" % worker._index),
+                       'cov_slave_output': os.path.join(os.getcwd(), "worker-%d" % worker._index),
                        'cov_master_topdir': os.getcwd()
                        }
         config.slaveinput = workerinput
@@ -226,6 +249,7 @@ class WorkerSession:
             # and away we go....
             config.hook.pytest_cmdline_main(config=config)
         finally:
+            # noinspection PyProtectedMember
             config._ensure_unconfigure()
             worker._reporter.write(f"\nWorker-{index} finished\n")
 
@@ -242,6 +266,7 @@ class WorkerSession:
         """
         self._put(ResultTestStatus(report))
 
+    # noinspection PyUnusedLocal
     @pytest.hookimpl(tryfirst=True)
     def pysessionfinish(self, exitstatus):
         """
@@ -268,6 +293,7 @@ class WorkerSession:
 
     _singleton = None
 
+
 def pytest_cmdline_main(config):
     assert WorkerSession.singleton() is not None
     config.option.worker = WorkerSession.singleton()
@@ -275,15 +301,20 @@ def pytest_cmdline_main(config):
 
 def main():
     from pytest_mproc import plugin  # ensures auth_key is set
-    from pytest_mproc.worker import WorkerSession
+    from pytest_mproc.worker import WorkerSession  # to make Python happy
+    assert plugin  # to prevent flake8 unused import
+    # from pytest_mproc.worker import WorkerSession
     from pytest_mproc.main import Orchestrator
     from pytest_mproc.fixtures import Node
     host, port = sys.argv[1:3]
     port = int(port)
     mgr = Orchestrator.Manager(addr=(host, port))
     mgr.connect()
+    # noinspection PyUnresolvedReferences
     mgr.register_worker((get_ip_addr(), os.getpid()))
+    # noinspection PyUnresolvedReferences
     test_q = mgr.get_test_queue()
+    # noinspection PyUnresolvedReferences
     result_q = mgr.get_results_queue()
 
     worker = WorkerSession(index=os.getpid(),
@@ -292,14 +323,17 @@ def main():
                            result_q=result_q,
                            )
     WorkerSession.set_singleton(worker)
+    errored = False
+    msg = None
     assert WorkerSession.singleton() is not None
+    # noinspection PyBroadException
     try:
         pytest.main(sys.argv[3:])
     except Exception as e:
-        import traceback
-        result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=True))
+        errored = True
+        msg = f"Worker {get_ip_addr()}-{os.getpid()} died with exception {e}\n {traceback.format_exc()}"
     finally:
-        result_q.put(ClientDied(os.getpid(), get_ip_addr()))
+        result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
         Node.Manager.singleton().shutdown()
 
 

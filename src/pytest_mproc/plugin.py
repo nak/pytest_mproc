@@ -2,12 +2,13 @@
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
 import os
+import pytest_mproc
 import sys
 import secrets
 import time
 from multiprocessing import current_process
 
-from pytest_mproc import worker
+from pytest_mproc import worker, user_output
 
 if "AUTH_TOKEN_STDIN" in os.environ:
     import binascii
@@ -16,7 +17,6 @@ if "AUTH_TOKEN_STDIN" in os.environ:
 else:
     if current_process().authkey is None:
         current_process().authkey = secrets.token_bytes(64)
-    import binascii
 
 import getpass
 import inspect
@@ -47,6 +47,7 @@ from multiprocessing import cpu_count
 from pytest_mproc.coordinator import CoordinatorFactory
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import is_degraded, BasicReporter
+
 
 # noinspection PyBroadException
 def _get_ip_addr():
@@ -85,15 +86,23 @@ def _add_option(group, name: str, dest: str, action: str,
     internal add option function to allow us to keep track of pytest-specific options from command line
     """
     # noinspection PyProtectedMember
-    group._addoption(
-        name,
-        dest=dest,
-        metavar=dest,
-        action=action,
-        type=typ,
-        help=help_text,
-    )
-    Orchestrator.ptmproc_args.append((name, typ))
+    if typ == bool:
+        group._addoption(
+            name,
+            dest=dest,
+            action=action,
+            help=help_text,
+        )
+    else:
+        group._addoption(
+            name,
+            dest=dest,
+            #metavar=dest,
+            action=action,
+            type=typ,
+            help=help_text,
+        )
+    Orchestrator.ptmproc_args[name] = typ
 
 
 @pytest.mark.tryfirst
@@ -137,7 +146,7 @@ def pytest_addoption(parser):
         )
         _add_option(
             group,
-            "--project_structure",
+            "--project-structure",
             dest="project_structure_path",
             action="store",
             typ=str,
@@ -178,6 +187,14 @@ def pytest_addoption(parser):
         typ=int,
         help_text="wait this many seconds on connection of client before timing out"
     )
+    _add_option(
+        group,
+        '--ptmproc-verbose',
+        dest="mproc_verbose",
+        action="store_true",
+        typ=bool,
+        help_text="output messages when connecting and executing tasks"
+    )
 
 
 def pytest_cmdline_main(config):
@@ -187,7 +204,14 @@ def pytest_cmdline_main(config):
 
     Mostly taken from other implementations (such as xdist)
     """
+    mproc_max_connections = getattr(config.option, "mproc_max_simultaneous_connections", 24)
+    mproc_connection_timeout = getattr(config.option, "mproc_connection_timeout", None)
+    mproc_disabled = getattr(config.option, "mproc_disabled")
+    mproc_num_cores = getattr(config.option, "mproc_numcores", None)
+    user_output.verbose = config.option.mproc_verbose
     if "PYTEST_WORKER" in os.environ:
+        config.option.ptmproc_config = PytestMprocConfig(num_cores=1)
+        config.ptmproc_runtime = None
         worker.pytest_cmdline_main(config)
         assert config.option.worker
         return
@@ -195,10 +219,6 @@ def pytest_cmdline_main(config):
         config.option.worker = None
     if not hasattr(config, "ptmproc_runtime"):
         config.ptmproc_runtime = None
-    mproc_max_connections = getattr(config.option, "mproc_max_simultaneous_connections", 24)
-    mproc_connection_timeout = getattr(config.option, "mproc_connection_timeout", None)
-    mproc_disabled = getattr(config.option, "mproc_disabled")
-    mproc_num_cores = getattr(config.option, "mproc_numcores", None)
 
     config.option.ptmproc_config = PytestMprocConfig()
     if mproc_connection_timeout:
@@ -215,6 +235,8 @@ def pytest_cmdline_main(config):
         raise pytest.UsageError("max simultaneous connections must be greater than 0; preferably greater than 9")
     # validation
     if config.option.ptmproc_config.num_cores is None or is_degraded() or mproc_disabled:
+        if '--as-server' in sys.argv or '--as-client' in sys.argv:
+            raise pytest.UsageError("Refusing to execute on distributed system without also specifying the number of cores to use")
         reporter.write(
             ">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
             "not running multiprocessing <<<<<\n", yellow=True)
@@ -248,6 +270,7 @@ def try_connect(mgr: Orchestrator.Manager):
 
 def mproc_pytest_cmdline_coordinator(config):
     config.option.ptmproc_config = PytestMprocConfig(
+        num_cores=config.option.ptmproc_config.num_cores,
         server_port=None,
         server_host=None,
         client_connect=getattr(config.option, "mproc_client_connect", None)
@@ -270,19 +293,19 @@ def mproc_pytest_cmdline_coordinator(config):
                                              config.option.ptmproc_config.server_port))
             try_connect(mgr)
             factory = CoordinatorFactory(
-                num_processes=config.option.numprocesses,
+                num_processes=config.option.ptmproc_config.num_cores,
                 mgr=mgr,
                 max_simultaneous_connections=config.option.ptmproc_config.max_simultaneous_connections,
                 as_remote_client=True)
-            executable = os.environ.get('PTMPROC_EXECUTABLE', sys.argv[0])
             config.ptmproc_runtime = PytestMprocRuntime(mproc_main=None,
-                                                        coordinator=factory.launch(host, port, executable))
+                                                        coordinator=factory.launch(host, port))
             # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
 
 
 def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     assert "--as-client" not in sys.argv
-    cli_value = getattr(config.option, 'mproc_server_port', ('127.0.0.1:None'))
+    is_server = hasattr(config.option, 'mproc_server_port')
+    cli_value = getattr(config.option, 'mproc_server_port', '127.0.0.1:None')
     try:
         server_host, server_port = cli_value.split(':')
         server_port = int(server_port if server_port != 'None' else find_free_port())
@@ -293,18 +316,18 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     local_proj_file = Path("./ptmproc_project.cfg")
     project_config = getattr(config.option, "project_structure_path",
                              local_proj_file if local_proj_file.exists() else None)
-    remote_clients = getattr(config.option, "remote_clients", []) or []
-    mproc_remote_sys_executale = getattr(config.option, "mproc_remote_sys_executable", None) or \
-        '{}.{}'.format(*sys.version_info)
-    if config.option.ptmproc_config.server_port:
+    if is_server:
+        remote_clients = config.option.mproc_remote_clients
+        mproc_remote_sys_executable = getattr(config.option, "mproc_remote_sys_executable", None) or \
+                                      sys.executable
         if bool(project_config) != bool(remote_clients):
             # basically if only one is None
-            raise pytest.UsageError("Must specify both project config and remote clients together or not at all")
+            raise pytest.UsageError(f"Must specify both project config and remote clients together or not at all {project_config} {remote_clients}")
         config.option.ptmproc_config.remote_hosts = None if not remote_clients \
             else RemoteHostConfig.from_list(remote_clients)\
             if isinstance(remote_clients, Iterable)\
             else RemoteHostConfig.from_uri_string(remote_clients)
-        config.option.ptmproc_config.remote_sys_executable = mproc_remote_sys_executale
+        config.option.ptmproc_config.remote_sys_executable = mproc_remote_sys_executable
     if config.option.ptmproc_config.server_port is not None:
         host, port = config.option.ptmproc_config.server_host, \
             config.option.ptmproc_config.server_port  # running distributed
@@ -316,6 +339,9 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     port = port or find_free_port()
     BasicReporter().write(f"Started on port {port}\n")
     reporter.write(f"Running as main @ {host}:{port}\n", green=True)
+    default_proj_config = Path(os.getcwd()) / "project.cfg"
+    project_config = project_config if (project_config is not None or not default_proj_config.exists())\
+        else default_proj_config
     config.ptmproc_runtime = PytestMprocRuntime(mproc_main=Orchestrator(
         connection_timeout=config.option.ptmproc_config.connection_timeout,
         remote_sys_executable=config.option.ptmproc_config.remote_sys_executable,
@@ -323,14 +349,13 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
         host=host, port=port, remote_clients_config=config.option.ptmproc_config.remote_hosts),
         coordinator=None
     )
-    if config.option.ptmproc_config.num_cores > 0:
+    if not is_server:
         factory = CoordinatorFactory(
-            num_processes=config.option.numprocesses,
+            num_processes=config.option.ptmproc_config.num_cores,
             mgr=config.ptmproc_runtime.mproc_main._mp_manager,
             max_simultaneous_connections=config.option.ptmproc_config.max_simultaneous_connections,
             as_remote_client=False)
-        executable = os.environ.get('PTMPROC_EXECUTABLE', sys.argv[0])
-        coordinator = factory.launch(host, port, executable)
+        coordinator = factory.launch(host, port)
         config.ptmproc_runtime.coordinator = coordinator
     config.option.dist = "no"
     val = config.getvalue
@@ -468,8 +493,9 @@ def pytest_runtestloop(session):
                         reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
                         break
         try:
-            orchestrator.set_items(session.items)
-            orchestrator.run_loop(session)
+            with orchestrator:
+                orchestrator.set_items(session.items)
+                orchestrator.run_loop(session)
         except Exception as e:
             reporter.write(format_exc() + "\n", red=True)
             reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
@@ -505,9 +531,10 @@ def pytest_terminal_summary(terminalreporter: _pytest.terminal.TerminalReporter,
         config.option.tbstyle = 'no'
         terminalreporter.reportchars = ""
     elif config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main:
-        terminalreporter.line(">>>>>>>>>> This is a satellite processing node. "
-                              "Please see master node output for actual test summary <<<<<<<<<<<<",
-                              yellow=True)
+        if user_output.verbose:
+            terminalreporter.line(">>> This is a satellite processing node. "
+                                  "Please see master node output for actual test summary <<<<<<<<<<<<",
+                                  yellow=True)
     yield
 
 
@@ -522,6 +549,9 @@ def pysessionfinish(exitstatus):
 
 @pytest.mark.tryfirst
 def pytest_sessionfinish(session):
+    if session.config.ptmproc_runtime and session.config.ptmproc_runtime.mproc_main:
+        with session.config.ptmproc_runtime.mproc_main:
+            pass
     if session.config.option.collectonly:
         return
     if not session.config.option.worker and session.config.ptmproc_runtime\

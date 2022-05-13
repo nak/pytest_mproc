@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Any, Set, Dict, Union
+from typing import List, Any, Set, Dict, Union, Optional
 
 from _pytest._code.code import ReprExceptionInfo
 from _pytest.reports import TestReport
@@ -35,9 +35,10 @@ class ResultException(Exception):
 
 @dataclass
 class ClientDied(Exception):
-    index: int
-    host : str
+    pid: int
+    host: str
     errored: bool = False
+    message: Optional[str] = None
 
 @dataclass
 class ResultTestStatus:
@@ -56,6 +57,7 @@ class TestState:
     host: str
     pid: int
     test_id: str
+    test_batch: TestBatch
 
 @dataclass
 class ResultExit:

@@ -17,9 +17,11 @@ from pathlib import Path
 
 from multiprocessing import JoinableQueue, Process, Queue
 from multiprocessing.managers import SyncManager
+from threading import RLock
 from typing import List, Any, Optional, Tuple, Union, Dict, AsyncIterator, AsyncGenerator
 
 import pytest
+from _pytest.reports import TestReport
 
 from pytest_mproc import resource_utilization, find_free_port, GroupTag
 from pytest_mproc.data import (
@@ -33,12 +35,14 @@ from pytest_mproc.data import (
     TestState,
     TestStateEnum,
 )
-from pytest_mproc.fixtures import FixtureManager, Node
+from pytest_mproc.fixtures import FixtureManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteHostConfig
 from pytest_mproc.remote.bundle import Bundle
 from pytest_mproc.utils import BasicReporter
 
 __all__ = ["Orchestrator"]
+
+lock = RLock()
 
 
 class FatalError(Exception):
@@ -48,6 +52,7 @@ class FatalError(Exception):
 
 
 def _localhost():
+    # noinspection PyBroadException
     try:
         return socket.gethostbyname(socket.gethostname())
     except Exception:
@@ -66,12 +71,14 @@ class RemoteExecutionThread:
     def __init__(self,
                  project_config: ProjectConfig,
                  remote_hosts_config: Union[List[RemoteHostConfig], AsyncIterator[RemoteHostConfig]],
-                 remote_sys_executable: str,):
+                 remote_sys_executable: str,
+                 tracker: Dict[str, List[asyncio.subprocess.Process]]):
         self._project_config = project_config
         self._remote_hosts_config = remote_hosts_config
         self._remote_sys_executable = remote_sys_executable
         self._thread: Optional[multiprocessing.Process] = None
         self._q = Queue()
+        self._tracker = tracker
 
     def start(self,
               server: str, server_port: int, finish_sem: Semaphore, timeout: Optional[float] = None,
@@ -88,28 +95,45 @@ class RemoteExecutionThread:
                 self._kwargs = kwargs
 
             def run(self):
-                this._start(*self._args, **self._kwargs)
+                try:
+                    this._start(*self._args, **self._kwargs)
+                except Exception as e:
+                    import traceback
+                    os.write(sys.stderr.fileno(), f"Exception starting coordinator: {e}\n{traceback.format_exc()}".encode('utf-8'))
 
-        self._thread = WorkerThread(server, server_port, finish_sem, timeout, deploy_timeout,
-                                    stdout, stderr, auth_key)
+        self._thread = WorkerThread(server, server_port, self._tracker, finish_sem, timeout, deploy_timeout,
+                                stdout, stderr, auth_key)
         self._thread.start()
+        # noinspection PyAttributeOutsideInit
         self._finish_sem = finish_sem
 
-    def _start(self, server: str, server_port: int,
+    def _start(self, server: str, server_port: int, tracker: Dict[str, List[asyncio.subprocess.Process]],
                finish_sem: Semaphore, timeout: Optional[float], deploy_timeout: Optional[float],
                stdout, stderr, auth_key: bytes):
         try:
             with tempfile.TemporaryDirectory() as tmpdir,\
                     Bundle.create(root_dir=Path(tmpdir),
-                                  src_dirs=self._project_config.src_paths,
-                                  tests_dir=self._project_config.tests_path,
-                                  resources=self._project_config.resource_paths,
-                                  requirements_paths=self._project_config.requirements_paths,
+                                  project_config=self._project_config,
                                   system_executable=self._remote_sys_executable) as bundle:
                 args = list(sys.argv[1:])  # copy of
                 # remove pytest mproc cli args to pass to client (aka addtional non-pytest-mproc args)
-                for arg, typ in Orchestrator.ptmproc_args:
+                for arg in sys.argv[1:]:
+                    typ = Orchestrator.ptmproc_args.get(arg)
+                    if not typ:
+                        continue
                     if arg == "--cores":
+                        have_core_count = False
+                        for cfg in self._remote_hosts_config:
+                            if "cores" in cfg.arguments:
+                                have_core_count = True
+                                break
+                        if have_core_count:
+                            index = args.index("--cores")
+                            args.remove("--cores")
+                            if index >= 0 and index + 1 < len(args):
+                                args.remove(args[index+1])
+                            elif index >= len(args):
+                                raise pytest.UsageError(f"--cores specified without a value")
                         continue
                     if typ in (bool,) and arg in args:
                         args.remove(arg)
@@ -125,6 +149,7 @@ class RemoteExecutionThread:
                     self._remote_hosts_config,
                     finish_sem,
                     *args,
+                    tracker=(tracker, lock),
                     auth_key=auth_key,
                     timeout=timeout,
                     deploy_timeout=deploy_timeout,
@@ -154,7 +179,7 @@ class Orchestrator:
     class that acts as Main point of orchestration
     """
 
-    ptmproc_args: List[Tuple[str, Any]] = []
+    ptmproc_args: Dict[str, Any] = {}
 
     class Manager(FixtureManager):
         _started = False
@@ -203,7 +228,12 @@ class Orchestrator:
             Orchestrator.Manager.register("get_results_queue")
             super().connect()
 
-        def _register_client(self, client: "pytest_mproc.coordinator.Coordinator", executable: str):
+        def join(self, timeout: Optional[float] = None):
+            for client in self._clients:
+                client.join(timeout=timeout)
+
+        # noinspection PyUnresolvedReferences
+        def _register_client(self, client: "pytest_mproc.coordinator.Coordinator"):
             if self._finalized:
                 raise Exception("Client registered after disconnect")
             self._clients.append(client)
@@ -248,41 +278,26 @@ class Orchestrator:
         self._count = 0
         self._exit_results: List[ResultExit] = []
         self._session_start_time = time.time()
-        self._remote_processes: Dict[str, asyncio.subprocess.Process] = {}
+        self._remote_processes: Dict[str, List[asyncio.subprocess.Process]] = {}
         self._remote_exec_thread: Optional[RemoteExecutionThread] = None
         self._finish_sem = Semaphore(0)
+        if remote_clients_config and project_config is None:
+            raise pytest.UsageError(
+                "You must supply both a project configuration and a remotes client configuration together when "
+                f"requesting automated distributed test execution"
+            )
         if remote_clients_config:
             self._remote_exec_thread = RemoteExecutionThread(remote_hosts_config=remote_clients_config,
                                                              remote_sys_executable=remote_sys_executable,
-                                                             project_config=project_config)
+                                                             project_config=project_config,
+                                                             tracker=self._remote_processes)
             self._remote_exec_thread.start(server=host, server_port=port, finish_sem=self._finish_sem,
-                                           deploy_timeout=connection_timeout, )
+                                           deploy_timeout=connection_timeout, auth_key=current_process().authkey)
             SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "task_done", "join", "close"])
             self._queue_manager = SyncManager(authkey=current_process().authkey)
             self._queue_manager.start()
             self._test_q = JoinableQueue()
             self._result_q = JoinableQueue()
-            with tempfile.TemporaryDirectory() as tmpdir:
-                bundle = Bundle.create(root_dir=Path(tmpdir),
-                                       src_dirs=project_config.src_paths,
-                                       tests_dir=project_config.tests_path,
-                                       resources=project_config.resource_paths,
-                                       requirements_paths=project_config.requirements_paths,
-                                       system_executable=remote_sys_executable)
-                args = sys.argv
-                # remove pytest mproc cli args to pass to client (aka addtional non-pytest-mproc args)
-                for arg, typ in self.ptmproc_args:
-                    if typ in (bool, ) and arg in args:
-                        args.remove(arg)
-                    elif arg in args:
-                        index = args.index(arg)
-                        if index + 1 < len(args):
-                            args.remove(args[index + 1])
-                        args.remove(arg)
-
-                self._remote_processes = bundle.execute_remote_multi(remote_clients_config,
-                                                                     *args,
-                                                                     username=os.environ.get('SSH_USERNAME'))
         else:
             SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "task_done", "join", "close"])
             self._queue_manager = SyncManager(authkey=current_process().authkey)
@@ -296,8 +311,14 @@ class Orchestrator:
         self._mp_manager = self.Manager(addr=(host, port))
         self._mp_manager.start(main=self)
         self._is_serving_remotes = remote_clients_config is not None
-        self._pending: List[TestState] = []
+        self._pending: Dict[str, TestState] = {}
         self._test_count = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._mp_manager.join(5)
 
     def get_test_queue(self):
         return self._test_q
@@ -368,13 +389,13 @@ class Orchestrator:
                 pass
             elif isinstance(result, TestState):
                 if result.state == TestStateEnum.STARTED:
-                    self._pending.append(result)
+                    self._pending[result.test_id] = result
                 elif result.state == TestStateEnum.FINISHED:
                     with suppress(Exception):
-                        self._pending.remove(result)
+                        del self._pending[result.test_id]
                 elif result.state == TestStateEnum.RETRY:
                     with suppress(Exception):
-                        self._pending.remove(result)
+                        del self._pending[result.test_id]
                     self._test_q.put(TestBatch(test_ids=[result.test_id]))
             else:
                 raise Exception(f"Internal Error: Unknown result type: {type(result)}!!")
@@ -385,35 +406,26 @@ class Orchestrator:
             sys.stdout.write("INTERNAL_ERROR> %s\n" % str(e))
 
     def validate_clients(self):
-        if not self._pending:
-            return
-        test_batch: List[str] = []
-        dead_clients = set()
-        for test_state in self._pending.copy():
-            try:
-                completed = subprocess.run(f"ping -W 1 -c 1 {test_state.host}", timeout=5)
-                active = completed.returncode == 0
-                if completed.returncode == 0 and test_state.host in self._remote_processes:
-                    username = os.environ.get('SSH_USERNAME')
-                    # password = os.environ.get("SSH_PASSWORD")
-                    destination = f"{username}@{test_state.host}" if username else test_state.host
-
-                    cmd = f"ssh {destination} \"ps -q {test_state.pid}\""
-                    completed = subprocess.run(cmd, timeout=5)
+        while self._remote_processes:
+            for host in self._remote_processes:
+                try:
+                    completed = subprocess.run(f"ping -W 1 -c 1 {host}", timeout=5)
                     active = completed.returncode == 0
-            except TimeoutError:
-                active = False
-            if not active:
-                dead_clients.add(test_state.host)
-                self._pending.remove(test_state)
-                test_batch.append(test_state.test_id)
-        self._test_q.put(TestBatch(test_batch))
-        self._remote_exec_thread.join()
-        for client in dead_clients:
-            self._remote_processes[client].terminate()
-            del self._remote_processes[client]
-        if not self._remote_processes:
-            raise FatalError("test execution incomplete and all clients had fatal errors")
+                except TimeoutError:
+                    active = False
+                if not active:
+                    os.write(sys.stderr.fileno(), f"Host {host} unreachable!".encode('utf-8'))
+                    for proc in self._remote_processes.get(host, []):
+                        if proc.pid is None:
+                            os.write(sys.stderr.fileno(), f"Process {proc.pid} died!".encode('utf-8'))
+                            proc.kill()
+                    # this will attempt to reschedule test
+                    if host in self._pending:
+                        for proc in self._remote_processes[host]:
+                            self._result_q.put(ClientDied(pid=proc.pid, host=host, errored=True))
+                        with lock, suppress(Exception):
+                            del self._remote_processes[host]
+            time.sleep(1)
 
     def read_results(self, hook):
         try:
@@ -422,16 +434,37 @@ class Orchestrator:
             result_batch: Union[List[ResultType], None] = self._result_q.get()
             while result_batch is not None:
                 if isinstance(result_batch, ClientDied):
-                    key = f"{result_batch.host}-{result_batch.index}"
+                    key = f"{result_batch.host}-{result_batch.pid}"
                     if result_batch.errored:
+                        for test_id, test_state in self._pending.copy().items():
+                            if test_state.host != result_batch.host:
+                                continue
+                            del self._pending[test_id]
+                            if len(test_state.test_batch.test_ids) > 1:
+                                # reschedule by putting back in test queue
+                                self._test_q.put(TestBatch([test_state.test_id]))
+                            else:
+                                os.write(sys.stderr.fileno(),
+                                         f"Skipping test '{test_state.test_id}' due to client fault".encode('utf-8'))
+                                self._result_q.put([ResultTestStatus(
+                                    TestReport(nodeid=test_state.test_id,
+                                               location=("<<unknown>>", None, "<<unknown>>"),
+                                               keywords={},
+                                               outcome='skipped',
+                                               when='call',
+                                               longrepr=f"Host {test_state.host} or process on host became  "
+                                                        "unresponsive or died.  Test cannot be retried as it "
+                                                        " is part of a batch"
+                                               ))])
                         os.write(sys.stderr.fileno(),
-                                 f"\nA worker client has died Worker-{key}\n".encode('utf-8'))
+                                 f"\nA worker {key} has died: {result_batch.message}\n".encode('utf-8'))
                         error_count += 1
                     else:
+                        # noinspection PyUnresolvedReferences
                         os.write(sys.stderr.fileno(),
-                                 f"\nWorker-{key} finished\n".encode('utf-8'))
+                                 f"\nWorker-{key} finished [{self._mp_manager.count().value()}]\n".encode('utf-8'))
                     # noinspection PyUnresolvedReferences
-                    self._mp_manager.completed(result_batch.host, result_batch.index)
+                    self._mp_manager.completed(result_batch.host, result_batch.pid)
                     # noinspection PyUnresolvedReferences
                     if self._mp_manager.count().value() <= 0:
                         os.write(sys.stderr.fileno(), b"No more workers;  exiting results processing")
@@ -447,12 +480,7 @@ class Orchestrator:
                         hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
                     else:
                         self._process_worker_message(hook,  result)
-                if self._remote_processes and test_count >= (self._test_count - self._count):
-                    # at most one test per client now, so check that clients haven't flaked:
-                    self.validate_clients()
                 result_batch = self._result_q.get()
-        except OSError:
-            pass
         finally:
             self._result_q.close()
 
@@ -481,10 +509,13 @@ class Orchestrator:
             self._test_q.join()
         exit_dict['success'] = True
 
+    # noinspection PyProtectedMember
     def set_items(self, tests):
         """
         :param tests: the items containing the pytest hooks to the tests to be run
         """
+
+        # noinspection PyProtectedMember
         def priority(test) -> int:
             tag = getattr(test._pyfuncitem.obj, "_pytest_group", None)
             tag_priority = tag.priority if tag is not None else DEFAULT_PRIORITY
@@ -499,6 +530,7 @@ class Orchestrator:
                 else test._pyfuncitem._pytest_group
             groups.setdefault(tag, TestBatch([], priority(test))).test_ids.append(test)
         for tag, group in groups.items():
+            # noinspection PyUnresolvedReferences
             groups[tag].test_ids = [test.nodeid for test in sorted(group.test_ids, key=lambda x: priority(x))]
             groups[tag].restriction = tag.restrict_to
         self._tests.extend(groups.values())
@@ -516,13 +548,14 @@ class Orchestrator:
         start_time = time.time()
         # we are the root node, so populate the tests
         populate_tests_process = Process(target=self.populate_test_queue, args=(self._tests, exit_dict))
-
+        validate_clients = Process(target=self.validate_clients)
         try:
+            validate_clients.start()
             populate_tests_process.start()
             self.read_results(session.config.hook)  # only master will read results and post reports through pytest
         except ClientDied:
             os.write(sys.stderr.fileno(), b"\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
-            os.write(sys.stderr.fileno(), b"All clients died; Possbile incomplete run\n")
+            os.write(sys.stderr.fileno(), b"All clients died; Possible incomplete run\n")
             os.write(sys.stderr.fileno(), b"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n")
         except FatalError:
             raise session.Failed(True)
@@ -535,6 +568,7 @@ class Orchestrator:
             rusage = resource_utilization(time_span=time_span, start_rusage=start_rusage, end_rusage=end_rusage)
             sys.stdout.write("\r\n")
             self._output_summary(rusage.time_span, rusage.user_cpu, rusage.system_cpu, rusage.memory_consumed)
+            # noinspection PyProtectedMember
             for client in self._mp_manager._clients:
                 client.join()
             self._queue_manager.shutdown()

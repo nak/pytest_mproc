@@ -1,9 +1,9 @@
+import json
 import logging
 import os
 import shutil
 import socket
 import sys
-from base64 import b64encode
 from multiprocessing.process import current_process
 
 import pytest
@@ -11,6 +11,7 @@ import subprocess
 from asyncio import Semaphore
 from pathlib import Path
 
+from pytest_mproc import find_free_port
 from pytest_mproc.main import RemoteExecutionThread
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 
@@ -44,9 +45,13 @@ def bundle(tmpdir_factory):
     tmpdir = tmpdir_factory.mktemp("remote_testing")
     with Bundle.create(
             root_dir=Path(str(tmpdir)),
-            src_dirs=[_base_dir / "src", _base_dir / "testsrc"],
-            requirements_paths=[_base_dir / "requirements.txt"],
-            tests_dir=_base_dir / "test",
+            project_config=ProjectConfig(
+                src_paths=[_base_dir / "src", _base_dir / "testsrc"],
+                resource_paths=[],
+                requirements_paths=[],
+                pure_requirements_paths=[_base_dir / "requirements.txt"],
+                tests_path=_base_dir / "test",
+            )
     ) as bundle:
         bundle.add_file(_base_dir / "test" / "run_test.sh", "scripts/run_test.sh")
         yield bundle
@@ -78,14 +83,49 @@ async def test_execute_bundle(bundle):
 async def test_execute_remote_multi(bundle):
     hosts = [
         RemoteHostConfig("localhost", {"cores": "1"}),
-        RemoteHostConfig("localhost", {"cores": "1"}),
+        RemoteHostConfig("localhost"),
         RemoteHostConfig("localhost", {"cores": "1"}),
     ]
+    sys.argv.extend(['--cores', '2'])
     sem = Semaphore(0)
     procs = await bundle.execute_remote_multi(hosts, sem, ".", "-k", "alg3", deploy_timeout=100, timeout=200)
     for host, proc in procs.items():
         assert host == "localhost"
         assert proc.returncode != 0  # alg3 delibrately coded to fail
+
+
+def test_remote_execution_cli(tmp_path):
+    root = Path(__file__).parent.parent
+    ipname = socket.gethostbyname(socket.gethostname())
+    project_config = ProjectConfig(requirements_paths=[root / "test" / "resources" / "requirements1.txt"],
+                                   src_paths=[root / "src", root / "testsrc"],
+                                   tests_path=root / "test",
+                                   )
+    project_config_path = tmp_path / "project.cfg"
+    with open(project_config_path, 'w') as out:
+        converted = {}
+        converted['requirements_paths'] = [str(p) for p in project_config.requirements_paths]
+        converted['src_paths'] = [str(p) for p in project_config.src_paths]
+        converted['tests_path'] = str(project_config.tests_path)
+        converted['resource_paths'] = []
+        out.write(json.dumps(converted))
+        out.flush()
+        args =['pytest', '-s', 'test_mproc_runs.py', '-k', 'alg2',
+               '--cores', '3',
+               '--as-server', f"{ipname}:{find_free_port()}",
+               '--project-structure', str(project_config_path),
+               '--remote-client', f'127.0.0.1',
+               '--remote-client', f'127.0.0.1',
+               '--remote-client', f'127.0.0.1',
+               '--remote-client', f'127.0.0.1',
+               '--remote-client', f'127.0.0.1',
+               ]
+        sys.path.insert(0, str((Path(__file__).parent / "src").absolute()))
+        env = os.environ.copy()
+        env['PYTHONPATH'] = "../src"
+        completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=120, env=env,
+                                   cwd=str(Path(__file__).parent.absolute()))
+        assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from {str(Path(__file__).parent.absolute())}"
 
 
 def test_remote_execution_thread(tmp_path):
@@ -105,7 +145,7 @@ def test_remote_execution_thread(tmp_path):
     ipname = socket.gethostbyname(socket.gethostname())
     command = [
         shutil.which("python3"), "-m", "pytest", "--as-server", f"{ipname}:43210",
-        "--cores", "0", "-k", "alg2",
+        "--cores", "2", "-k", "alg2",
     ]
     env = os.environ.copy()
     import binascii
@@ -120,9 +160,11 @@ def test_remote_execution_thread(tmp_path):
         RemoteHostConfig(ipname),
         RemoteHostConfig(ipname),
     ]
+    tracker = {}
     thread = RemoteExecutionThread(project_config=project_config,
                                    remote_sys_executable=shutil.which("python3"),
                                    remote_hosts_config=client_hosts,
+                                   tracker=tracker
                                    )
     try:
         sem = Semaphore(0)
@@ -131,13 +173,13 @@ def test_remote_execution_thread(tmp_path):
             server_port=43210,
             auth_key=current_process().authkey,
             finish_sem=sem,
-            #stdout=sys.stdout,
             stderr=sys.stderr,
         )
         sem.release()
         sem.release()
         sem.release()
         thread.join(timeout=3*240)
+        assert len(tracker[ipname]) == 3, f"Unexpected tracker values: {tracker}"
     finally:
         try:
             assert main_proc.wait(timeout=10) == 0

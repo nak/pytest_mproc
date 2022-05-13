@@ -1,14 +1,17 @@
 import inspect
 import functools
+import logging
 import os
 import pytest
 import sys
 from multiprocessing import current_process
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
+from pytest_mproc.user_output import debug_print
 from pytest_mproc import plugin
+assert plugin  # import takes care of some things on import, but not used otherwise; here to make flake8 happy
 
-import logging
+
 logging.basicConfig(level=logging.DEBUG)
 
 
@@ -32,20 +35,20 @@ class FixtureManager(BaseManager):
 
     # noinspection PyAttributeOutsideInit
     def start(self, *args, **kwargs):
-        os.write(sys.stderr.fileno(), f"Starting {self.__class__.__qualname__} server...\n".encode('utf-8'))
+        debug_print(f"Starting {self.__class__.__qualname__} server...\n")
         # server:
         self._fixtures: Dict[str, Any] = {}
         self.__class__.register("get_fixture", self._get_fixture)
         self.__class__.register("put_fixture", self._put_fixture)
         super().start(*args, **kwargs)
-        os.write(sys.stderr.fileno(), f"Started {self.__class__.__qualname__} server\n".encode('utf-8'))
+        debug_print(f"Started {self.__class__.__qualname__} server\n")
 
     def connect(self):
-        os.write(sys.stderr.fileno(), f"Connecting {self.__class__.__name__} server...\n".encode('utf-8'))
+        debug_print(f"Connecting {self.__class__.__name__} server...\n")
         self.__class__.register("get_fixture")
         self.__class__.register("put_fixture")
         super().connect()
-        os.write(sys.stderr.fileno(), f"Connected {self.__class__.__name__} server\n".encode('utf-8'))
+        debug_print(f"Connected {self.__class__.__name__} server\n")
 
     def _put_fixture(self, name: str, value: Any) -> None:
         self._fixtures[name] = value
@@ -61,10 +64,10 @@ class Node:
 
     class Manager(FixtureManager):
 
-        def __init__(self, as_main: bool, port: int, name: str = "Node.Manager", connection_timeout:int = 30):
+        def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
             super().__init__(("127.0.0.1", port))
             if not as_main:
-                os.write(sys.stderr.fileno(), f"Connected [{name}]\n".encode('utf-8'))
+                debug_print(f"Connected [{name}]\n")
 
         PORT = 7038
         _singleton = None
@@ -77,20 +80,22 @@ class Node:
                     cls._singleton.connect()
                     cls._singleton._is_serving = False
                 else:
+                    # noinspection PyBroadException
                     try:
-                        cls._singleton = cls(as_main=False, port=cls.PORT, connection_timeout=10)
+                        cls._singleton = cls(as_main=False, port=cls.PORT)
                         cls._singleton.connect()
                         cls._singleton._is_serving = False
                     except (OSError, EOFError):
                         cls._singleton = cls(as_main=True, port=cls.PORT)
                         cls._singleton.start()
                         cls._singleton._is_serving = True
-                    except Exception as e:
+                    except Exception:
                         pytest.exit(f"FAILED TO START NODE MANAGER")
             return cls._singleton
 
         @classmethod
         def shutdown(cls) -> None:
+            # noinspection PyProtectedMember
             if cls._singleton is not None and cls._singleton._is_serving:
                 cls._singleton.shutdown()
                 cls._singleton = None
@@ -103,26 +108,26 @@ class Global:
         PORT = 8039
         _singleton = None
 
-        def __init__(self, as_main: bool, host: str, port: int, name: str = "Global.Manager"):
+        def __init__(self, host: str, port: int):
             super().__init__((host, port))
 
         @classmethod
         def singleton(cls, host: str, port: int) -> "Global.Manager":
             if cls._singleton is None:
-                assert host is not None and port is not None, "Internal error: host and port not provided for global manager"
+                assert host is not None and port is not None, \
+                    "Internal error: host and port not provided for global manager"
                 if "PYTEST_WORKER" in os.environ:
-                    cls._singleton = cls(as_main=False, host=host, port=cls.PORT)
+                    cls._singleton = cls(host=host, port=cls.PORT)
                     cls._singleton.connect()
                     cls._singleton._is_serving = False
                 else:
                     try:
-                        cls._singleton = cls(as_main=False, host=host, port=cls.PORT)
+                        cls._singleton = cls(host=host, port=cls.PORT)
                         cls._singleton.connect()
                         cls._singleton._is_serving = False
                     except (EOFError, OSError):
-                        os.write(sys.stderr.fileno(),
-                                 b"Failed to connect, trying to start server as not server present...\n")
-                        cls._singleton = cls(as_main=True, host=host, port=port)
+                        debug_print("Failed to connect, trying to start server as not server present...\n")
+                        cls._singleton = cls(host=host, port=port)
                         cls._singleton.start()
                         cls._singleton._is_serving = True
                     except Exception as e:
@@ -132,6 +137,7 @@ class Global:
 
         @classmethod
         def shutdown(cls) -> None:
+            # noinspection PyProtectedMember
             if cls._singleton is not None and cls._singleton._is_serving:
                 cls._singleton.shutdown()
                 cls._singleton = None
@@ -149,9 +155,12 @@ def global_fixture(host: str, port: Optional[int] = None, **kwargs):
     value = None
 
     def _decorator(func):
+
+        # noinspection DuplicatedCode
         @functools.wraps(func)
         def _wrapper(*args, **kwargs):
             nonlocal value
+            # noinspection PyUnresolvedReferences
             value = value or global_mgr.get_fixture(func.__name__).value()
             if type(value) == FixtureManager.NoneValue:
                 v = func(*args, **kwargs)
@@ -162,6 +171,7 @@ def global_fixture(host: str, port: Optional[int] = None, **kwargs):
                         raise Exception("Generator did not yield")
                 else:
                     value = v
+                # noinspection PyUnresolvedReferences
                 global_mgr.put_fixture(func.__name__, value)
             return value
 
@@ -179,9 +189,12 @@ def node_fixture(**kwargs):
 
     def _decorator(func):
         value = None
+
+        # noinspection DuplicatedCode
         @functools.wraps(func)
         def _wrapper(*args, **kwargs):
             nonlocal value
+            # noinspection PyUnresolvedReferences
             value = value or node_mgr.get_fixture(func.name).value()
             if type(value) == FixtureManager.NoneValue:
                 v = func(*args, **kwargs)
@@ -192,6 +205,7 @@ def node_fixture(**kwargs):
                         raise Exception("Generator did not yield")
                 else:
                     value = v
+                # noinspection PyUnresolvedReferences
                 node_mgr.put_fixture(func.name, value)
             return value
 

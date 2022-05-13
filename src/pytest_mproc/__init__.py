@@ -4,8 +4,6 @@ import sys
 from contextlib import closing
 from typing import Union
 
-import pytest
-
 from pytest_mproc.data import ResourceUtilization
 from pytest_mproc.data import GroupTag, DEFAULT_PRIORITY
 
@@ -78,3 +76,4 @@ def find_free_port():
 def fixture(fixturefunction, *, scope, **kargs):
     from _pytest.fixtures import fixture
     return fixture(fixturefunction, scope=scope, **kargs)
+

@@ -8,7 +8,8 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Optional, Tuple, Dict, AsyncIterator, Callable, TextIO, Union
+from threading import RLock
+from typing import Optional, Tuple, Dict, AsyncIterator, Callable, TextIO, Union, List
 
 try:
     from aiocontext import async_contextmanager as asynccontextmanager
@@ -343,7 +344,7 @@ class SSHClient:
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
         full_command = command + ' ' + ' '.join(map(shlex.quote, args))
-        proc = await self._remote_execute(
+        return await self._remote_execute(
             full_command,
             stdin=stdin,
             stdout=stdout,
@@ -352,7 +353,6 @@ class SSHClient:
             cwd=cwd,
             auth_key=auth_key
         )
-        return proc
 
     async def execute_remote_cmd(self,  command, *args,
                                  stdout: TextIO = sys.stdout,
@@ -361,6 +361,7 @@ class SSHClient:
                                  auth_key: Optional[bytes] = None,
                                  timeout: Optional[float] = None,
                                  cwd: Optional[Path] = None,
+                                 tracker: Optional[Tuple[Dict[str, List[asyncio.subprocess.Process]], RLock]] = None,
                                  env: Optional[Dict[str, str]] = None) -> asyncio.subprocess.Process:
         """
         execute command on remote host
@@ -386,5 +387,9 @@ class SSHClient:
             auth_key = binascii.b2a_hex(auth_key)
             proc.stdin.write(auth_key + b'\n')
             proc.stdin.close()
+        if tracker is not None:
+            tracker2, lock = tracker
+            with lock:
+                tracker2.setdefault(self.host, []).append(proc)
         await asyncio.wait_for(proc.wait(), timeout=timeout)
         return proc

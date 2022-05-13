@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, asdict
 
 SRC_PATHS = 'src_paths'
 REQUIREMENTS_PATHS = 'requirements_paths'
+PURE_REQUIREMENTS_PATHS = 'pure_requirements_paths'
 TESTS_PATH = 'tests_path'
 RESOURCE_PATHS = 'resource_paths'
 
@@ -17,7 +18,8 @@ RESOURCE_PATHS = 'resource_paths'
 @dataclass
 class ProjectConfig:
     tests_path: Path
-    requirements_paths: List[Path]
+    requirements_paths: List[Path] = field(default_factory=list)
+    pure_requirements_paths: List[Path] = field(default_factory=list)
     src_paths: List[Path] = field(default_factory=list)
     resource_paths: List[Tuple[Path, Path]] = field(default_factory=list)
 
@@ -26,7 +28,12 @@ class ProjectConfig:
         with open(path, 'rb') as in_stream:
             try:
                 data = json.load(in_stream)
-                if not isinstance(data.get(REQUIREMENTS_PATHS), Iterable):
+                if 'requirements_paths' in data and\
+                        not isinstance(data.get(REQUIREMENTS_PATHS), Iterable):
+                    raise pytest.UsageError(f"requirements_paths in project config '{path}' is either missing or not "
+                                            " a list of string paths")
+                if 'pure_requirements_paths' in data and\
+                        not isinstance(data.get(PURE_REQUIREMENTS_PATHS), Iterable):
                     raise pytest.UsageError(f"requirements_paths in project config '{path}' is either missing or not "
                                             " a list of string paths")
                 if TESTS_PATH not in data:
@@ -43,8 +50,10 @@ class ProjectConfig:
                 if RESOURCE_PATHS in data and not isinstance(data[RESOURCE_PATHS], Iterable):
                     raise pytest.UsageError(f"'{RESOURCE_PATHS}' in project config '{path}' is not a list of string paths")
                 data[REQUIREMENTS_PATHS] = [path.parent / str(p) if not Path(p).is_absolute() else Path(p)
-                                              for p in data[REQUIREMENTS_PATHS]]
-                for p in data[REQUIREMENTS_PATHS]:
+                                            for p in data.get(REQUIREMENTS_PATHS,[])]
+                data[PURE_REQUIREMENTS_PATHS] = [path.parent / str(p) if not Path(p).is_absolute() else Path(p)
+                                                 for p in data.get(PURE_REQUIREMENTS_PATHS, [])]
+                for p in data[REQUIREMENTS_PATHS] + data[PURE_REQUIREMENTS_PATHS]:
                     if not Path(p).exists():
                         raise pytest.UsageError(f"requirements path {p} in project config is not a path")
                 data[SRC_PATHS] = [path.parent / str(p) if not Path(p).is_absolute() else Path(p)
@@ -59,6 +68,7 @@ class ProjectConfig:
                         raise pytest.UsageError(f"resource path {p} in project config is not a path")
                 return ProjectConfig(
                     requirements_paths=[Path(p) for p in data[REQUIREMENTS_PATHS]],
+                    pure_requirements_paths=data[PURE_REQUIREMENTS_PATHS],
                     tests_path=Path(data[TESTS_PATH]),
                     src_paths=[Path(p) for p in data[SRC_PATHS]],
                     resource_paths=[Path(p) for p in data[RESOURCE_PATHS]]
