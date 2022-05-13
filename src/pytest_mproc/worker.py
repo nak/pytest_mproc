@@ -160,14 +160,11 @@ class WorkerSession:
 
         def generator(test_q: JoinableQueue) -> Iterator[TestBatch]:
             test = test_q.get()
-            # print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
             while test:
                 test_q.task_done()
                 yield test
                 test = test_q.get()
-                # print(f">>>>>>>>>>>>>>>>> GOT TEST {test}")
             test_q.task_done()
-        # print(f">>>>>>>>>>>>>>> TESTS EXHAUSTED")
         session.items_generator = generator(self._test_q)
         session._named_items = {item.nodeid.split(os.sep)[-1]: item for item in session.items}
         return session.items
@@ -186,7 +183,6 @@ class WorkerSession:
         import binascii
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
-        print(f">>>>>>>>>>>> LAUNCHING WORKER {index}")
         proc = subprocess.Popen([executable,  '-m', __name__, host, str(port)]\
                                 + sys.argv[1:], env=env,
                                 stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.PIPE)
@@ -305,8 +301,6 @@ def main():
     finally:
         result_q.put(ClientDied(os.getpid(), get_ip_addr()))
         Node.Manager.singleton().shutdown()
-    # time.sleep(2)
-    # os.kill(os.getpid(), 9)
 
 
 if __name__ == "__main__":

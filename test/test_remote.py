@@ -126,18 +126,21 @@ def test_remote_execution_thread(tmp_path):
                                    )
     try:
         sem = Semaphore(0)
-        thread.start(server=socket.gethostbyname(socket.gethostname()),
-                     server_port=43210,
-                     auth_key=current_process().authkey,
-                     finish_sem=sem,
-                     stdout=sys.stdout,
-                     stderr=sys.stderr)
+        thread.start(
+            server=socket.gethostbyname(socket.gethostname()),
+            server_port=43210,
+            auth_key=current_process().authkey,
+            finish_sem=sem,
+            #stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
         sem.release()
         sem.release()
         sem.release()
         thread.join(timeout=3*240)
     finally:
         try:
-            main_proc.wait(timeout=10)
+            assert main_proc.wait(timeout=10) == 0
         except (subprocess.TimeoutExpired, TimeoutError):
             main_proc.terminate()
+            raise Exception("Main process failed to terminate")

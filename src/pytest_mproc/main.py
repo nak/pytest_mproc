@@ -93,7 +93,6 @@ class RemoteExecutionThread:
         self._thread = WorkerThread(server, server_port, finish_sem, timeout, deploy_timeout,
                                     stdout, stderr, auth_key)
         self._thread.start()
-        print(f"[{os.getpid()}]>>>>>>>>>>>>>>>>>  STARTED THREAD: EXECUTE MULTI")
         self._finish_sem = finish_sem
 
     def _start(self, server: str, server_port: int,
@@ -122,7 +121,6 @@ class RemoteExecutionThread:
                 args += ["--as-client", f"{server}:{server_port}"]
                 if "--cores" not in args:
                     args += ["--cores", "1"]
-                print(f"[{os.getpid()}]>>>>>>>>>>>>>>>>>  THREAD: EXECUTE MULTI")
                 task = bundle.execute_remote_multi(
                     self._remote_hosts_config,
                     finish_sem,
@@ -209,7 +207,6 @@ class Orchestrator:
             if self._finalized:
                 raise Exception("Client registered after disconnect")
             self._clients.append(client)
-            client.start(self._main._host, self._main._port, executable)
 
         def _register_worker(self, worker):
             ip_addr, pid = worker
@@ -219,14 +216,12 @@ class Orchestrator:
             if self._finalized:
                 raise Exception("Client registered after disconnect")
             self._workers[key] = worker
-            print(f"[{os.getpid()}]>>>>>>>>>>>>>>>>>>>>>>>>>> SERVER WORKER COUNT IS {self._workers}")
 
         def _count(self):
             return self.Value(len(self._workers))
 
         def _completed(self, host: str, index: int):
             del self._workers[f"{host}-{index}"]
-            print(f">>>>>>>>>>>>>>>>>>>>>>>>>> COMPLETED:L SERVER COUNT IS {len(self._workers)}")
 
         def _finalize(self):
             self._finalized = True

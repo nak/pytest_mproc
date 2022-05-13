@@ -12,13 +12,11 @@ from pytest_mproc import worker
 if "AUTH_TOKEN_STDIN" in os.environ:
     import binascii
     auth_key = sys.stdin.readline().strip()
-    print(f">>>>>>>>>>>>>> READING STDIN KEY {auth_key}")
     current_process().authkey = binascii.a2b_hex(auth_key)
 else:
     if current_process().authkey is None:
         current_process().authkey = secrets.token_bytes(64)
     import binascii
-    print(f">>>>>>>>>>>>>> USING KEY {binascii.b2a_hex(current_process().authkey)}")
 
 import getpass
 import inspect
@@ -276,8 +274,9 @@ def mproc_pytest_cmdline_coordinator(config):
                 mgr=mgr,
                 max_simultaneous_connections=config.option.ptmproc_config.max_simultaneous_connections,
                 as_remote_client=True)
+            executable = os.environ.get('PTMPROC_EXECUTABLE', sys.argv[0])
             config.ptmproc_runtime = PytestMprocRuntime(mproc_main=None,
-                                                        coordinator=factory.launch())
+                                                        coordinator=factory.launch(host, port, executable))
             # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
 
 
@@ -330,7 +329,8 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
             mgr=config.ptmproc_runtime.mproc_main._mp_manager,
             max_simultaneous_connections=config.option.ptmproc_config.max_simultaneous_connections,
             as_remote_client=False)
-        coordinator = factory.launch()
+        executable = os.environ.get('PTMPROC_EXECUTABLE', sys.argv[0])
+        coordinator = factory.launch(host, port, executable)
         config.ptmproc_runtime.coordinator = coordinator
     config.option.dist = "no"
     val = config.getvalue

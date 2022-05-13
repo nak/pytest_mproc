@@ -45,7 +45,7 @@ class CoordinatorFactory:
             self.sm.start()
         self._mgr = mgr
 
-    def launch(self) -> "Coordinator":
+    def launch(self, host: str, port: int, executable: str) -> "Coordinator":
         if not self._is_local:
             coordinator = self.sm.Coordinator(self._num_processes,
                                               self._max_simultaneous_connections,
@@ -56,6 +56,7 @@ class CoordinatorFactory:
                                       self._is_local)
         executable = os.environ.get('PTMPROC_EXECUTABLE', sys.argv[0])
         self._mgr.register_client(coordinator, executable)
+        coordinator.start(host, port, executable)
         return coordinator
 
 
