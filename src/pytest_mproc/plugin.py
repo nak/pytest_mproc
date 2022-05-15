@@ -2,10 +2,12 @@
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
 import os
-import pytest_mproc
 import sys
 import secrets
 import time
+
+import _pytest.terminal
+
 from multiprocessing import current_process
 
 from pytest_mproc import worker, user_output
@@ -27,9 +29,6 @@ from pathlib import Path
 from traceback import format_exc
 from typing import Callable, Optional, Iterable, Union, Type
 
-import _pytest
-import _pytest.terminal
-
 from pytest_mproc.ptmproc_data import (
     PytestMprocConfig,
     RemoteHostConfig,
@@ -47,6 +46,9 @@ from multiprocessing import cpu_count
 from pytest_mproc.coordinator import CoordinatorFactory
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import is_degraded, BasicReporter
+
+
+DEPLOY_TIMEOUT = None
 
 
 # noinspection PyBroadException
@@ -80,6 +82,7 @@ def parse_numprocesses(s: str) -> int:
         raise Exception("Error: --cores argument must be an integer value or \"auto\" or \"auto*<int factor>\"")
 
 
+# noinspection PyProtectedMember
 def _add_option(group, name: str, dest: str, action: str,
                 typ: Union[Type[int], Type[str], Type[bool], Callable[[str], int]], help_text: str) -> None:
     """
@@ -97,7 +100,6 @@ def _add_option(group, name: str, dest: str, action: str,
         group._addoption(
             name,
             dest=dest,
-            #metavar=dest,
             action=action,
             type=typ,
             help=help_text,
@@ -236,7 +238,8 @@ def pytest_cmdline_main(config):
     # validation
     if config.option.ptmproc_config.num_cores is None or is_degraded() or mproc_disabled:
         if '--as-server' in sys.argv or '--as-client' in sys.argv:
-            raise pytest.UsageError("Refusing to execute on distributed system without also specifying the number of cores to use")
+            raise pytest.UsageError(
+                "Refusing to execute on distributed system without also specifying the number of cores to use")
         reporter.write(
             ">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
             "not running multiprocessing <<<<<\n", yellow=True)
@@ -254,7 +257,7 @@ def try_connect(mgr: Orchestrator.Manager):
         try:
             mgr.connect()
             break
-        except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError) as e:
+        except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError):
             ch = chars[tries_remaining % len(chars)]
             seconds_left = int(tries_remaining / 4)
             os.write(sys.stderr.fileno(), f"\r{ch} Connecting ... {seconds_left}        ".encode('utf-8'))
@@ -269,6 +272,8 @@ def try_connect(mgr: Orchestrator.Manager):
 
 
 def mproc_pytest_cmdline_coordinator(config):
+    config.option.no_summary = True
+    config.option.no_header = True
     config.option.ptmproc_config = PytestMprocConfig(
         num_cores=config.option.ptmproc_config.num_cores,
         server_port=None,
@@ -318,11 +323,13 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
                              local_proj_file if local_proj_file.exists() else None)
     if is_server:
         remote_clients = config.option.mproc_remote_clients
+        version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
         mproc_remote_sys_executable = getattr(config.option, "mproc_remote_sys_executable", None) or \
-                                      sys.executable
+            f"/usr/bin/python{version}"
         if bool(project_config) != bool(remote_clients):
             # basically if only one is None
-            raise pytest.UsageError(f"Must specify both project config and remote clients together or not at all {project_config} {remote_clients}")
+            raise pytest.UsageError(f"Must specify both project config and remote clients together or not at all "
+                                    f"{project_config} {remote_clients}")
         config.option.ptmproc_config.remote_hosts = None if not remote_clients \
             else RemoteHostConfig.from_list(remote_clients)\
             if isinstance(remote_clients, Iterable)\
@@ -343,13 +350,14 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     project_config = project_config if (project_config is not None or not default_proj_config.exists())\
         else default_proj_config
     config.ptmproc_runtime = PytestMprocRuntime(mproc_main=Orchestrator(
-        connection_timeout=config.option.ptmproc_config.connection_timeout,
+        deploy_timeout=DEPLOY_TIMEOUT,
         remote_sys_executable=config.option.ptmproc_config.remote_sys_executable,
         project_config=ProjectConfig.from_file(Path(project_config)) if project_config else None,
         host=host, port=port, remote_clients_config=config.option.ptmproc_config.remote_hosts),
         coordinator=None
     )
     if not is_server:
+        # noinspection PyProtectedMember
         factory = CoordinatorFactory(
             num_processes=config.option.ptmproc_config.num_cores,
             mgr=config.ptmproc_runtime.mproc_main._mp_manager,
@@ -400,7 +408,7 @@ def process_fixturedef(item, target, fixturedef, request, config, scope):
         return
     name = fixturedef.argname
     if name not in config.option.fixtures:
-        fixture = _pytest.fixtures.resolve_fixture_function(fixturedef, request)
+        fixture = pytest.fixtures.resolve_fixture_function(fixturedef, request)
         args = [config.option.fixtures[argname] for argname in fixturedef.argnames]
         val = fixture(*args)
         if inspect.isgenerator(val):
@@ -443,7 +451,9 @@ def pytest_runtestloop(session):
 
     if not hasattr(session.config.option, "fixtures"):
         session.config.option.fixtures = {}
-    if not session.config.option.worker and session.config.ptmproc_runtime and session.config.ptmproc_runtime.coordinator:
+    if not session.config.option.worker \
+            and session.config.ptmproc_runtime \
+            and session.config.ptmproc_runtime.coordinator:
         coordinator = session.config.ptmproc_runtime.coordinator
         for item in session.items:
             if session.shouldfail:
@@ -476,7 +486,9 @@ def pytest_runtestloop(session):
                             f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}' {format_exc()}"
                         reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
                         break
-    if not session.config.option.worker and session.config.ptmproc_runtime and session.config.ptmproc_runtime.mproc_main:
+    if not session.config.option.worker \
+            and session.config.ptmproc_runtime\
+            and session.config.ptmproc_runtime.mproc_main:
         orchestrator = session.config.ptmproc_runtime.mproc_main
         for item in session.items:
             if hasattr(item, "_request"):
@@ -508,15 +520,24 @@ def pytest_runtestloop(session):
     return True
 
 
-def pytest_collection_finish(session):
+@pytest.hookimpl(hookwrapper=True)
+def pytest_collection_finish(session) -> None:
+    config = session.config
+    verbose = config.option.verbose
+    if config.option.worker \
+            or (config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main):
+        config.option.verbose = -2
     if session.config.option.worker:
-        return session.config.option.worker.pytest_collection_finish(session)
+        session.config.option.worker.pytest_collection_finish(session)
+    yield
+    config.option.verbose = verbose
 
 
 def pytest_internalerror(excrepr):
     from pytest_mproc.worker import WorkerSession
     if WorkerSession.singleton():
         return WorkerSession.singleton().pytest_internalerror(excrepr)
+
 
 @pytest.mark.tryfirst
 def pytest_runtest_logreport(report):
@@ -525,30 +546,58 @@ def pytest_runtest_logreport(report):
         return WorkerSession.singleton().pytest_runtest_logreport(report)
 
 
+# noinspection PyUnusedLocal
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_terminal_summary(terminalreporter: _pytest.terminal.TerminalReporter, exitstatus, config):
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    verbose = config.option.verbose
     if config.option.worker:
         config.option.tbstyle = 'no'
         terminalreporter.reportchars = ""
     elif config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main:
+        config.option.verbose = -2
+    elif config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main:
+        config.option.tbstyle = 'no'
+        terminalreporter.reportchars = ""
         if user_output.verbose:
             terminalreporter.line(">>> This is a satellite processing node. "
                                   "Please see master node output for actual test summary <<<<<<<<<<<<",
                                   yellow=True)
     yield
+    if config.option.worker:
+        config.option.verbose = verbose
 
 
-@pytest.mark.tryfirst
-def pysessionfinish(exitstatus):
+# noinspection PyUnusedLocal
+@pytest.hookimpl(hookwrapper=True)
+def pytest_report_header(config, startdir):
+    verbose = config.option.verbose
+    if config.option.worker \
+            or (config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main):
+        config.option.verbose = -2
+    yield
+    config.option.verbose = verbose
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_sessionstart(session) -> None:
+    verbose = session.config.option.verbose
+    if session.config.option.worker\
+            or (session.config.ptmproc_runtime and not session.config.ptmproc_runtime.mproc_main):
+        session.config.option.verbose = -2
+    yield
+    session.config.option.verbose = verbose
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_sessionfinish(session):
     from pytest_mproc.worker import WorkerSession
-    if WorkerSession.singleton():
-        WorkerSession.singleton().pysessionfinish(exitstatus)
+    verbose = session.config.option.verbose
     fixtures.Global.Manager.shutdown()
     fixtures.Node.Manager.shutdown()
-
-
-@pytest.mark.tryfirst
-def pytest_sessionfinish(session):
+    if session.config.option.worker:
+        session.config.option.verbose = -2
+    if session.config.ptmproc_runtime and not session.config.ptmproc_runtime.mproc_main:
+        session.config.option.verbose = -2
     if session.config.ptmproc_runtime and session.config.ptmproc_runtime.mproc_main:
         with session.config.ptmproc_runtime.mproc_main:
             pass
@@ -561,10 +610,10 @@ def pytest_sessionfinish(session):
     if not session.config.option.worker and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.mproc_main is not None:
         session.config.ptmproc_runtime.mproc_main.shutdown()
-    from pytest_mproc.worker import WorkerSession
     if WorkerSession.singleton():
         WorkerSession.singleton().pysessionfinish(session)
-    return False
+    yield
+    session.config.option.verbose = verbose
 
 
 def raise_usage_error(session, msg: str):

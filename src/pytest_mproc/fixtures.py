@@ -69,7 +69,7 @@ class Node:
             if not as_main:
                 debug_print(f"Connected [{name}]\n")
 
-        PORT = 7038
+        PORT = int(os.environ.get('PTMPROC_BASE_PORT', 7038))
         _singleton = None
 
         @classmethod
@@ -105,7 +105,8 @@ class Global:
 
     class Manager(FixtureManager):
 
-        PORT = 8039
+        PORT = Node.Manager.PORT + 1
+
         _singleton = None
 
         def __init__(self, host: str, port: int):

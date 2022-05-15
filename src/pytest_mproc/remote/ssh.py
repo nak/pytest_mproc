@@ -3,20 +3,25 @@ SSH utilities for remote client interactions
 """
 import asyncio
 import logging
+import os
 import shlex
 import sys
 import time
 from contextlib import suppress
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Optional, Tuple, Dict, AsyncIterator, Callable, TextIO, Union, List
-
-try:
-    from aiocontext import async_contextmanager as asynccontextmanager
-except ImportError:
-    from contextlib import asynccontextmanager
-
-from dataclasses import dataclass
+from typing import (
+    AsyncIterator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    TextIO,
+    Tuple,
+    Union,
+)
 
 SUCCESS = 0
 
@@ -61,10 +66,11 @@ class SSHClient:
         """
         return f"{self.username}@{self.host}" if self.username else self.host
 
-    async def _remote_execute(self, command : str,
+    async def _remote_execute(self, command: str,
                               stdout, stderr, stdin=None,
                               env=None,
                               cwd=None,
+                              prefix_cmd: Optional[str] = None,
                               auth_key: Optional[bytes] = None) -> asyncio.subprocess.Process:
         """
         Execute given command on remote client a la ssh
@@ -76,9 +82,9 @@ class SSHClient:
             env["AUTH_TOKEN_STDIN"] = '1'
         if env:
             for key, value in env.items():
-                command = f"{key}={value} {command}"
+                command = f"{key}=\"{value}\" {command}"
         if cwd is not None:
-            command = f"cd {str(cwd)} && {command}"
+            command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
         return await asyncio.subprocess.create_subprocess_exec(
             "ssh", self.destination, *self._global_options,
             command,
@@ -146,11 +152,13 @@ class SSHClient:
         :raises: CommandExecutionError if command fails to execute on remote client
         """
         if local_path.is_dir():
-            cmd = f"scp {' '.join(self._global_options)} -r {str(local_path)} {self.destination}:{str(remote_path)}"
+            args = list(self._global_options) +\
+                ['-r', '-p', local_path, f"{self.destination}:{str(remote_path)}"]
         else:
-            cmd = f"scp {' '.join(self._global_options)} {str(local_path)}  {self.destination}:{str(remote_path)}"
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
+            args = list(self._global_options) +\
+                ['-p', local_path, f"{self.destination}:{str(remote_path)}"]
+        proc = await asyncio.create_subprocess_exec(
+            "scp", *args,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -172,21 +180,25 @@ class SSHClient:
         :raises: TimeoutError if command fails to execute in time
         :raises: CommendExecutionFailure if command faile to execute on remote host
         """
-        if recursive:
-            cmd = f"scp -r {self.destination}:{str(remote_path)}  {str(local_path)}"
+        if recursive or local_path.is_dir():
+            args = ['-p', '-r',  f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
         else:
-            cmd = f"scp {self.destination}:{str(remote_path)} {str(local_path)}"
-        proc = await self._remote_execute(
-            cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            args = ['-p', f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
+        proc = await asyncio.create_subprocess_exec(
+            "scp", *self._global_options, *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
         if timeout:
             rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
         else:
             rc = await proc.wait()
         if rc != 0:
-            raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)}", rc)
+            stdout = await proc.stdout.read()
+            cmd = "scp " + ' '.join(self._global_options) + ' ' + ' '.join(args)
+            msg = f"\n!!! Copy from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} using\n"\
+                  f"{cmd}\n\n{stdout.decode('utf-8')}"
+            raise CommandExecutionFailure(msg, rc)
 
     async def get_remote_platform_info(self):
         """
@@ -214,6 +226,7 @@ class SSHClient:
         """
         install Python requirements  on remote client
 
+        :param cwd: directory to run from on remote host
         :param remote_py_executable: path to python executable to use on remote client
         :param remote_root: root directory on remote client
         :param requirements_path: path, relative to remote_root, where requirments file is to be found
@@ -224,7 +237,7 @@ class SSHClient:
         remote_py_executable = remote_py_executable or sys.executable
         if site_packages:
             cmd = f"{remote_py_executable} -m pip install -t {str(remote_root / site_packages)} "\
-                f"-r {str( remote_root / requirements_path)}",
+                f"-r {str( remote_root / requirements_path)}"
         else:
             cmd = f"{remote_py_executable} -m pip install -r {str(remote_root / requirements_path)}"
         proc = await self._remote_execute(
@@ -235,6 +248,7 @@ class SSHClient:
         )
         stdout, _ = await proc.communicate()
         if proc.returncode != 0:
+            os.write(sys.stderr.fileno(), f"Failed to install on remote: {cmd} {stdout}".encode('utf-8'))
             raise CommandExecutionFailure(f"{cmd} {stdout}",
                                           proc.returncode)
 
@@ -314,11 +328,13 @@ class SSHClient:
         proc = await self._remote_execute(
             f"mktemp -d",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
         await asyncio.wait_for(proc.wait(), timeout=5)
         if proc.returncode != 0:
-            raise SystemError("Failed to create tmp dir on remote client")
+            stdout = await proc.stdout.read()
+            stderr = await proc.stderr.read()
+            raise SystemError(f"Failed to create tmp dir on remote client: {stdout}\n  {stderr}")
         # noinspection SpellCheckingInspection
         tmpdir = (await proc.stdout.read()).decode('utf-8').strip()
 
@@ -332,6 +348,7 @@ class SSHClient:
                                     stderr: Union[TextIO, int],
                                     cwd: Optional[Path] = None,
                                     env: Optional[Dict[str, str]] = None,
+                                    prefix_cmd:Optional[str] = None,
                                     auth_key: Optional[bytes] = None) -> asyncio.subprocess.Process:
         """
         execute command on remote host
@@ -351,16 +368,18 @@ class SSHClient:
             stderr=stderr,
             env=env,
             cwd=cwd,
+            prefix_cmd=prefix_cmd,
             auth_key=auth_key
         )
 
     async def execute_remote_cmd(self,  command, *args,
-                                 stdout: TextIO = sys.stdout,
-                                 stderr: TextIO = sys.stderr,
+                                 stdout: Union[int, TextIO] = sys.stdout,
+                                 stderr: Union[int, TextIO] = sys.stderr,
                                  stdin: Optional[TextIO] = None,
                                  auth_key: Optional[bytes] = None,
                                  timeout: Optional[float] = None,
                                  cwd: Optional[Path] = None,
+                                 prefix_cmd: Optional[str] = None,
                                  tracker: Optional[Tuple[Dict[str, List[asyncio.subprocess.Process]], RLock]] = None,
                                  env: Optional[Dict[str, str]] = None) -> asyncio.subprocess.Process:
         """
@@ -381,6 +400,7 @@ class SSHClient:
                                                 stderr=stderr,
                                                 cwd=cwd,
                                                 auth_key=auth_key,
+                                                prefix_cmd=prefix_cmd,
                                                 env=env)
         if auth_key is not None:
             import binascii

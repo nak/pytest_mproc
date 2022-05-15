@@ -1,5 +1,4 @@
 import asyncio
-import datetime
 import json
 import logging
 import os
@@ -26,13 +25,16 @@ from typing import (
     Union,
 )
 
+from pytest_mproc import user_output
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
-from pytest_mproc.user_output import debug_print
+from pytest_mproc.user_output import debug_print, always_print
 from pytest_mproc.remote import env
 
 _root = os.path.dirname(__file__)
 FIVE_MINUTES = 5*60
+artifacts_root = os.environ.get('PTMPROC_HOST_ARTIFACTS_DIR', './artifacts')
+lock = RLock()
 
 
 class Bundle:
@@ -44,11 +46,15 @@ class Bundle:
                  requirements_paths: List[Path],
                  pure_requirements_paths: List[Path],
                  system_executable: str,
+                 prepare_script: Optional[Path] = None,
+                 finalize_script: Optional[Path] = None,
                  env: Optional[Dict[str, str]] = None):
         """
         create a bundle for remote host deployment
         :param root_dir: a delicious carbonated beverage (and also the root where bundle files are created)
         """
+        self._prepare_script = Path(prepare_script) if prepare_script else None
+        self._finalize_script = Path(finalize_script) if finalize_script else None
         self._remote_executable = system_executable
         self._requirements_paths = requirements_paths
         self._pure_requirements_paths = pure_requirements_paths
@@ -57,13 +63,9 @@ class Bundle:
         if not tests_dir.exists():
             raise FileNotFoundError(f"'{tests_dir}' does not exist")
         self._sources: List[Path] = []
-        self._shiv_path = root_dir / "test_exec.pyz"
-        if os.path.exists(self._shiv_path):
-            raise FileExistsError(f"File {self._shiv_path} already exists")
-        self._test_zip_path = root_dir / "tests.zip"
-        self._requirements_zip_path = root_dir / "requirements.zip"
-        if os.path.exists(self._test_zip_path):
-            raise FileExistsError(f"File {self._test_zip_path} already exists")
+        self._zip_path = root_dir / "bundle.zip"
+        if os.path.exists(self._zip_path):
+            raise FileExistsError(f"File {self._zip_path} already exists")
         # noinspection SpellCheckingInspection
         self._site_pkgs = tempfile.TemporaryDirectory()
         self._resources: List[Tuple[Path, Path]] = []
@@ -73,8 +75,16 @@ class Bundle:
         self._env = env or {}
 
     @staticmethod
-    def remote_tests_dir(remote_root: Path) -> Path:
-        return remote_root / "tests"
+    def remote_run_dir(remote_root: Path) -> Path:
+        return remote_root / "run"
+
+    @property
+    def prepare_script(self):
+        return self._prepare_script
+
+    @property
+    def finalize_script(self):
+        return self._finalize_script
 
     def __enter__(self) -> "Bundle":
         self._site_pkgs.__enter__()
@@ -84,12 +94,8 @@ class Bundle:
         self._site_pkgs.__exit__(exc_type, exc_val, exc_tb)
 
     @property
-    def shiv_path(self) -> Path:
-        return self._shiv_path
-
-    @property
-    def tests_zip_path(self):
-        return self._test_zip_path
+    def zip_path(self):
+        return self._zip_path
 
     @property
     def tests_dir(self):
@@ -99,7 +105,7 @@ class Bundle:
         """
         add given file to bundle
         :param path: path to the file to add
-        :param relative_path: relative path within shiv zip app
+        :param relative_path: path relative remote root directory
         """
         path = Path(path) if isinstance(path, str) else path
         relative_path = Path(relative_path) if isinstance(relative_path, str) else relative_path
@@ -188,14 +194,12 @@ class Bundle:
         :param system_executable: path ON REMOTE HOST of system python executable to use
         :return: created Bundle
         """
-        import shiv.builder  # type: ignore
-        import shiv.constants  # type: ignore
-        from shiv.bootstrap.environment import Environment  # type: ignore
-        sys_exec = system_executable or f"/usr/bin/{Path(os.path.realpath(sys.executable)).name}"
         bundle = Bundle(root_dir=root_dir,
                         tests_dir=project_config.tests_path,
                         requirements_paths=project_config.requirements_paths,
                         pure_requirements_paths=project_config.pure_requirements_paths,
+                        prepare_script=project_config.prepare_script,
+                        finalize_script=project_config.finalize_script,
                         system_executable=system_executable)
         # noinspection SpellCheckingInspection
         for path, relpath in project_config.resource_paths or []:
@@ -204,17 +208,37 @@ class Bundle:
         os.write(sys.stderr.fileno(), f"\n\n>>> Building bundle.  This may take a little while...\n\n".encode('utf-8'))
         site_pkgs = env.set_up_local(project_config=project_config, cache_dir=cls.CACHE_DIR)
         bundle._sources.append(site_pkgs)
-        shiv_env = Environment(built_at=datetime.datetime.strftime(datetime.datetime.utcnow(),
-                                                                   shiv.constants.BUILD_AT_TIMESTAMP_FORMAT),
-                               shiv_version="0.1.1")
-        shiv.builder.create_archive(
-            sources=bundle._sources,
-            target=bundle._shiv_path,
-            main="_bootstrap:bootstrap",
-            env=shiv_env,
-            compressed=True,
-            interpreter=sys_exec
-        )
+        debug_print(">>> Zipping contents for remote worker...")
+        with zipfile.ZipFile(bundle.zip_path, mode='w') as zfile:
+            for f in bundle.tests_dir.absolute().glob("**/*"):
+                if f.is_file() and '__pycache__' not in str(f) and not f.name.startswith('.'):
+                    zfile.write(f, f"run/{f.relative_to(bundle.tests_dir.parent)}")
+            if bundle.prepare_script:
+                zfile.write(bundle.prepare_script, 'prepare')
+            if bundle.finalize_script:
+                zfile.write(bundle.finalize_script, 'finalize')
+            for local, remote in bundle._resources:
+                if remote.is_absolute():
+                    raise pytest.UsageError(
+                        f"Resrouce in project config {local}->{remote} does not specify a relative path as target")
+                zfile.write(local, f"run/{str(remote)}")
+
+            with tempfile.NamedTemporaryFile(mode='a+') as out:
+                out.write(bundle._system)
+                out.write(bundle._machine)
+                out.flush()
+                zfile.write(out.name, "host_ptmproc_platform")
+            for source_path in bundle._sources:
+                for f in source_path.absolute().glob("**/*"):
+                    if f.is_file() and not f.name.startswith('.'):
+                        zfile.write(f, f"site-packages/{f.relative_to(source_path)}")
+            with tempfile.NamedTemporaryFile(mode='a+') as out:
+                for path in bundle._requirements_paths:
+                    with open(path, 'r') as in_stream:
+                        out.write(in_stream.read())
+                    out.write('\n')
+                out.flush()
+                zfile.write(out.name, 'requirements.txt')
         return bundle
 
     @asynccontextmanager
@@ -232,73 +256,43 @@ class Bundle:
         :param timeout: raise TimeoutError if deployment takes too long
         :param remote_root: remote path to where bundle is deployed
         """
-        # noinspection SpellCheckingInspection
-        debug_print(">>> Zipping contents for remote worker...")
-        with zipfile.ZipFile(self.tests_zip_path, mode='w') as zfile:
-            for f in self.tests_dir.absolute().glob("**/*"):
-                if f.is_file() and '__pycache__' not in str(f) and not f.name.startswith('.'):
-                    zfile.write(f, f"tests/{f.relative_to(self.tests_dir.parent)}")
-            for local, remote in self._resources:
-                zfile.write(local, str(remote))
-        with zipfile.ZipFile(self._requirements_zip_path, mode='w') as reqzfile:
-            with tempfile.NamedTemporaryFile(mode='a+') as out:
-                out.write(self._system)
-                out.write(self._machine)
-                out.flush()
-                reqzfile.write(out.name, "ptmproc_platform")
-            with tempfile.NamedTemporaryFile(mode='a+') as out:
-                for path in self._requirements_paths:
-                    with open(path, 'r') as in_stream:
-                        out.write(in_stream.read())
-                    out.write('\n')
-                out.flush()
-                reqzfile.write(out.name, 'requirements.txt')
-        await ssh_client.mkdir(self.remote_tests_dir(remote_root))
-        debug_print(">>> Pushing contents to remote worker...")
-        await ssh_client.push(self._shiv_path, remote_root / self._shiv_path.name)
-        await ssh_client.push(self._test_zip_path, remote_root / self._test_zip_path.name)
-        await ssh_client.push(self._requirements_zip_path, remote_root / self._requirements_zip_path.name)
-        debug_print(">>> Installing tests on remote worker...")
-        # noinspection PyProtectedMember
-        proc = await ssh_client._remote_execute(
-            f"cd {str(remote_root)} && unzip {str(self._test_zip_path.name)}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=sys.stderr
-        )
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-        if proc.returncode != 0:
-            text = await proc.stdout.read()
-            raise CommandExecutionFailure(f"Failed to unzip tests on remote client {text}", proc.returncode)
-        debug_print(">>> Unzipping contents on remote worker...")
-        proc = await asyncio.subprocess.create_subprocess_exec(
-            "ssh", ssh_client.destination,
-            f"cd {str(remote_root)} && unzip {str(self._requirements_zip_path.name)}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
-        )
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-        with suppress(Exception):
-            await ssh_client.remove(self.remote_tests_dir(remote_root) / self._test_zip_path.name)
-            await ssh_client.remove(remote_root / self._requirements_zip_path.name)
-        if proc.returncode != 0:
-            text = await proc.stdout.read()
-            raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
-        system, machine = await ssh_client.get_remote_platform_info()
-        assert isinstance(system, str)
-        if self._requirements_paths:
-            if "PYTHONPATH" in self._env:
-                self._env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + self._env["PYTHONPATH"]
-            else:
-                self._env["PYTHONPATH"] = str(remote_root / 'site-packages')
-            await ssh_client.mkdir(remote_root / 'site_packages')
-            debug_print(f">>> Installing requirements on remote worker...")
-            await ssh_client.install(
-                remote_py_executable=self._remote_executable,
-                remote_root=remote_root,
-                site_packages='site-packages',
-                requirements_path='requirements.txt',
-                cwd=remote_root
+        try:
+            # noinspection SpellCheckingInspection
+            await ssh_client.mkdir(self.remote_run_dir(remote_root))
+            debug_print(f">>> Pushing contents to remote worker {ssh_client.host}...")
+            await ssh_client.push(self._zip_path, remote_root / self._zip_path.name)
+            debug_print(f">>> Unpacking tests on remote worker {ssh_client.host}...")
+            # noinspection PyProtectedMember
+            proc = await ssh_client._remote_execute(
+                f"cd {str(remote_root)} && unzip {str(self._zip_path.name)}",
+                stdout=sys.stdout if user_output.verbose else asyncio.subprocess.DEVNULL,
+                stderr=sys.stderr
             )
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+            if proc.returncode != 0:
+                text = await proc.stdout.read()
+                raise CommandExecutionFailure(f"Failed to unzip tests on remote client {text}", proc.returncode)
+            debug_print(f">>> Unzipping contents on remote worker {ssh_client.host}...")
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+            with suppress(Exception):
+                await ssh_client.remove(remote_root / self._zip_path.name)
+            if proc.returncode != 0:
+                text = await proc.stdout.read()
+                raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
+            if self._requirements_paths:
+                debug_print(f">>> Installing requirements on remote worker {ssh_client.host}...")
+                assert not (remote_root / "site-packages" / "dataclasses.py").exists()
+                await ssh_client.install(
+                    remote_py_executable=self._remote_executable,
+                    remote_root=remote_root,
+                    site_packages='site-packages',
+                    requirements_path='requirements.txt',
+                    cwd=remote_root
+                )
+            debug_print(f">>> Done deploying to host {ssh_client.host}")
+        except Exception as e:
+            always_print(f"!!! Failed to deploy to {ssh_client.host}: {e}")
+            raise
 
     async def execute_remote_multi(
             self,
@@ -333,11 +327,12 @@ class Bundle:
         sem = Semaphore(0)
         tasks: List[asyncio.Task] = []
         if isinstance(remote_hosts_config, Iterable):
-            for worker_config in remote_hosts_config:
+            for index, worker_config in enumerate(remote_hosts_config):
                 cli_args, cli_env = worker_config.argument_env_list()
                 task = asyncio.get_event_loop().create_task(
                     self.execute_remote(worker_config.remote_host,
                                         *(list(args) + list(cli_args)),
+                                        worker_id=f"Worker-{index}",
                                         env=cli_env,
                                         username=username,
                                         password=password,
@@ -352,12 +347,14 @@ class Bundle:
                 tasks.append(task)
         else:
             async def lazy_distribution():
+                index = 0
                 async for worker_config in remote_hosts_config:
                     sem.release()
                     cli_args, cli_env = worker_config.argument_env_list()
                     task = asyncio.get_event_loop().create_task(
                         self.execute_remote(worker_config.remote_host,
                                             *(list(args) + list(cli_args)),
+                                            worker_id=f"Worker-{index}",
                                             auth_key=auth_key,
                                             env=cli_env,
                                             username=username,
@@ -366,6 +363,7 @@ class Bundle:
                                             timeout=timeout,
                                             tracker=tracker,
                                             remote_root=worker_config.remote_root))
+                    index += 1
                     tasks.append(task)
                     if not finish_sem.locked():
                         break
@@ -378,6 +376,13 @@ class Bundle:
         results, _ = await asyncio.wait(tasks, timeout=timeout,
                                         return_when=asyncio.ALL_COMPLETED)
         results = [r.result() for r in results]
+        with open(Path("./artifacts") / "worker_info.txt", 'w') as out_stream:
+            for index, r in enumerate(results):
+                if not isinstance(r, Exception):
+                    host, proc = r
+                    out_stream.write(f"Worker-{index}: host={host}, pid={proc.pid}")
+                else:
+                    out_stream.write(f"Worker-{index}: <<see exception for this worker>>")
         procs = {host: proc for host, proc in results if not isinstance(proc, Exception)}
         exceptions = [e for e in results if isinstance(e, Exception)]
         if exceptions:
@@ -401,7 +406,8 @@ class Bundle:
                              tracker: Tuple[Dict[str, List[asyncio.subprocess.Process]], RLock] = None,
                              stdout: Optional[Union[TextIO, int]] = None,
                              stderr: Optional[Union[TextIO, int]] = None,
-                             auth_key: Optional[bytes] = None
+                             auth_key: Optional[bytes] = None,
+                             worker_id: Optional[str] = None,
                              ) -> Tuple[str, asyncio.subprocess.Process]:
         """
         Execute tests on remote host
@@ -418,29 +424,97 @@ class Bundle:
         :param timeout: optional timeout if execution takes too long; if None return proc instance immediately
             with no waiting
         :param remote_root: where on remote host to deploy bundle
+        :param worker_id: Optional identifier to assign to worker
         :return: asyncio.subprocess.Process instance
         """
         ssh_client = SSHClient(host, username, password)
         async with self.remote_root_context(ssh_client, remote_root) as remote_root:
             await self.deploy(ssh_client, remote_root=remote_root, timeout=deploy_timeout)
-            command = f"{str(remote_root / self._shiv_path.name)} -m pytest"
+            remote_artifacts_dir = remote_root / "artifacts"
+            command = self._remote_executable
             env.update(self._env)
             if auth_key:
                 env['AUTH_TOKEN_STDIN'] = "1"
             # noinspection SpellCheckingInspection
             env['PTMPROC_EXECUTABLE'] = command.split()[0]
-            debug_print(f">>> Executing tests on remote...")
-            proc = await ssh_client.execute_remote_cmd(command, *args,
-                                                       timeout=timeout,
-                                                       env=env,
-                                                       cwd=self.remote_tests_dir(remote_root) / self._tests_dir.name,
-                                                       auth_key=auth_key,
-                                                       stdout=stdout,
-                                                       stderr=stderr,
-                                                       tracker=tracker,
-                                                       stdin=None if auth_key is None else asyncio.subprocess.PIPE)
-            await asyncio.wait_for(proc.wait(), timeout=timeout)
-        return host, proc
+            if "PYTHONPATH" in env:
+                env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + env["PYTHONPATH"]
+            else:
+                env["PYTHONPATH"] = str(remote_root / 'site-packages')
+            if "PTMPROC_BASE_PORT" in os.environ:
+                env["PTMPROC_BASE_PORT"] = os.environ["PTMPOC_BASE_PORT"]
+            always_print(f">>> Executing tests on remote...")
+            run_dir = self.remote_run_dir(remote_root)
+            try:
+                rel_path = Path(os.getcwd()).relative_to(self._tests_dir.parent)
+                if len(rel_path.parts) > 1:
+                    raise pytest.UsageError("You must run from the location of your project tests path "
+                                            "(as defined in your project config file), or one level above that")
+                if str(rel_path) != '.':
+                    run_dir = run_dir / rel_path
+            except ValueError:
+                pass
+            await ssh_client.mkdir(remote_root / "artifacts", exists_ok=True)
+            pid = None
+            try:
+                if self.prepare_script:
+                    proc = await ssh_client.execute_remote_cmd(
+                        f"./prepare | tee \"{remote_root}/artifacts/{self._prepare_script.stem}.log\"",
+                        prefix_cmd=f"set -o pipefail; ",
+                        cwd=remote_root,
+                        env=env,
+                        timeout=timeout,
+                        stdout=stdout if user_output.verbose else asyncio.subprocess.DEVNULL,
+                        stderr=stderr if user_output.verbose else asyncio.subprocess.DEVNULL,
+                    )
+                    if proc.returncode != 0:
+                        msg = f"!!! Failed to execute prepare script on host [{proc.returncode}]; " \
+                              f"see log in artifacts. worker-{worker_id}/{self._prepare_script.stem}.log"
+                        debug_print(msg)
+                        raise SystemError(msg)
+                cmd = f"{command} -m pytest {' '.join(args)} | tee {remote_root}/artifacts/pytest_stdout.log"
+                env["PTMPROC_WORKER_ARTIFACTS_DIR"] = str(remote_artifacts_dir)
+                proc = await ssh_client.execute_remote_cmd(
+                    cmd,
+                    timeout=timeout,
+                    env=env,
+                    cwd=run_dir,
+                    auth_key=auth_key,
+                    stdout=stdout,
+                    stderr=stderr,
+                    tracker=tracker,
+                    stdin=None if auth_key is None else asyncio.subprocess.PIPE)
+                pid = proc.pid
+            finally:
+                if self._finalize_script:
+                    with suppress(Exception):
+                        # noinspection SpellCheckingInspection
+                        proc = await ssh_client.execute_remote_cmd(
+                            f"./finalize  | tee \"{remote_root}/artifacts/{self._finalize_script.stem}.log\"",
+                            cwd=remote_root,
+                            prefix_cmd=f"set -o pipefail; ",
+                            env=env,
+                            timeout=timeout,
+                            stdout=stdout if user_output.verbose else asyncio.subprocess.DEVNULL,
+                            stderr=stderr if user_output.verbose else asyncio.subprocess.DEVNULL,
+                        )
+                        if proc.returncode:
+                            debug_print(f"!!! WARNING: finalize script failed! ")
+                try:
+                    worker_id = worker_id or (f"{host}-{pid}" if pid else host)
+                    destination_dir = (Path(artifacts_root) / worker_id).absolute()
+                    destination_dir.mkdir(exist_ok=True, parents=True)
+                    await ssh_client.execute_remote_cmd(cwd=remote_artifacts_dir,
+                                                        command=f"zip -r {str(remote_root / 'artifacts.zip')} *",
+                                                        stdout=asyncio.subprocess.DEVNULL,
+                                                        stderr=asyncio.subprocess.DEVNULL)
+                    await ssh_client.pull(remote_root / "artifacts.zip", destination_dir / "artifacts.zip",
+                                          recursive=False)
+                except CommandExecutionFailure as e:
+                    os.write(sys.stderr.fileno(),
+                             f"\n\n!!! Failed to pull {str(remote_artifacts_dir)} to {destination_dir}:\n"
+                             f"    {e}\n\n".encode('utf-8'))
+            return host, proc
 
     async def monitor_remote_execution(self, host: str, *args: str,
                                        username: Optional[str] = None,
@@ -453,8 +527,8 @@ class Bundle:
         ssh_client = SSHClient(host, username, password)
         async with self.remote_root_context(ssh_client, remote_root) as remote_root:
             await self.deploy(ssh_client, remote_root=remote_root, timeout=deploy_timeout)
-            command = f"{str(remote_root / self._shiv_path.name)}"
-            async for line in ssh_client.monitor_remote_execution(command, *args, timeout=timeout,
-                                                                  cwd=self.remote_tests_dir(remote_root) / "tests",
+            command = self._remote_executable
+            async for line in ssh_client.monitor_remote_execution(command, '-m', 'pytest', *args, timeout=timeout,
+                                                                  cwd=self.remote_run_dir(remote_root) / "tests",
                                                                   ):
                 yield line

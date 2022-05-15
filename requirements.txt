@@ -1,11 +1,2 @@
-pytest
-pytest-cov
-pytest-html
-pytest-asyncio
-shiv
-dataclasses
-requests
-aiohttp
-aiofile
-aiocontext
-shiv
+-r pure_requirements.txt
+-r impure_requirements.txt

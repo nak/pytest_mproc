@@ -1,6 +1,20 @@
+from pathlib import Path
+
 import setuptools
 
-VERSION = "4.2.0"
+VERSION = "5.0.0"
+
+requirements = []
+with open(Path(__file__).parent / 'pure_requirements.txt', 'r') as in_stream:
+    for line in in_stream:
+        line = line.strip()
+        if line:
+            requirements.append(line)
+with open(Path(__file__).parent / 'impure_requirements.txt', 'r') as in_stream:
+    for line in in_stream:
+        line = line.strip()
+        if line:
+            requirements.append(line)
 
 setuptools.setup(
     name='pytest_mproc',
@@ -9,6 +23,8 @@ setuptools.setup(
     version=VERSION,
     description="low-startup-overhead, scalable, distributed-testing pytest plugin",
     package_dir={'': 'src'},
+    package_data={'': ['pure_requirements.txt', 'impure_requirements.txt']},
+    include_package_data=True,
     packages=setuptools.find_packages('src'),
     entry_points={
        "pytest11": ["name_of_plugin = pytest_mproc.plugin"],
@@ -17,16 +33,8 @@ setuptools.setup(
                  "Development Status :: 4 - Beta",
                  "License :: OSI Approved :: BSD License"],
     license='BSD 2-CLAUSE',
-    keywrds='pytest distributed multiprocessing',
+    keywords='pytest distributed multiprocessing',
     url='https://github.com/nak/pytest_mproc',
     download_url="https://github.com/nak/pytest_mproc/dist/%s" % VERSION,
-    install_requires=[
-        'pytest',
-        'pytest-cov',
-        'shiv',
-        'dataclasses',
-        "asyncio-contextmanager",
-        'requests',
-        'aiohttp',
-    ]
+    install_requires=requirements
 )

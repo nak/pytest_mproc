@@ -124,7 +124,7 @@ class WorkerSession:
                 return  # should never really get here, but for consistency
             for test_batch in session.items_generator:
                 if test_batch is None:
-                    raise Exception("DONE")
+                    break
                 # test item comes through as a unique string nodeid of the test
                 # We use the pytest-collected mapping we squirrelled away to look up the
                 # actual _pytest.python.Function test callable
@@ -202,11 +202,12 @@ class WorkerSession:
         if not user_output.verbose or '--as-client' not in sys.argv:
             # if on same host as main, don't spit out output from worker so as to not clutter stdout/stderr
             stdout = subprocess.DEVNULL
+            stderr = subprocess.DEVNULL
         else:
             stdout = sys.stdout
-        stderr = sys.stderr
+            stderr = sys.stderr
         executable = executable or sys.executable
-        verbose = ['-s'] if user_output.verbose else []
+        verbose = ['-s']  # if user_output.verbose else []
         proc = subprocess.Popen([executable, '-m', __name__, host, str(port)] + sys.argv[1:] + verbose,
                                 env=env,
                                 stdout=stdout, stderr=stderr, stdin=subprocess.PIPE)
@@ -301,6 +302,7 @@ def pytest_cmdline_main(config):
 
 def main():
     from pytest_mproc import plugin  # ensures auth_key is set
+    # noinspection PyUnresolvedReferences
     from pytest_mproc.worker import WorkerSession  # to make Python happy
     assert plugin  # to prevent flake8 unused import
     # from pytest_mproc.worker import WorkerSession
@@ -332,6 +334,7 @@ def main():
     except Exception as e:
         errored = True
         msg = f"Worker {get_ip_addr()}-{os.getpid()} died with exception {e}\n {traceback.format_exc()}"
+        os.write(sys.stderr.fileno(), msg.encode('utf-8'))
     finally:
         result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
         Node.Manager.singleton().shutdown()

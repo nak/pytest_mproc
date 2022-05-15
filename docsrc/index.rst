@@ -36,16 +36,16 @@ Why Use *pytest_mproc* over *pytest-xdist*?
 
 *pytest_mproc* has several advantages over xdist, depending on your situation:
 
-#. Overhead furing startup is much less, and start-up time does not grow with increasing number of cores as in xdist
-#. It uses a pull model, so that each worker pulls the next test from a master queue.  There is no need to figure
-   out how to divide the tests beforehand.  The disadvantage is that the developer needs to know how long roughly each
-   test takes and prioritize the longer running tests first for optimal efficiency.
-#. It provides a 'global' scoped test fixture to provide a single instance of a fixture across all tests, regardless of
-   how many nodes.
-#. It provide a 'node' scoped test fixture that is a single instance across all workers on a single machine (node)
-#. It allows you to programatically group together a bunch of tests to run serially on a single worker process
-#. Support for execution across multiple machines
-#. It provides a better mechanism for prioritizing and configuring test execution
+* Overhead furing startup is much less, and start-up time does not grow with increasing number of cores as in xdist
+* It uses a pull model, so that each worker pulls the next test from a master queue, with no need to figure
+  out how to divide the tests beforehand.  The disadvantage is that optimal efficiency requires knowledge to
+  prioritize longer running tests first.
+* It provides a 'global' scoped test fixture to provide a single instance of a fixture across all tests, regardless of
+  how many nodes.
+* It provide a 'node' scoped test fixture that is a single instance across all workers on a single machine (node)
+* It allows you to programatically group together a bunch of tests to run serially on a single worker process
+* Support for execution across multiple machines
+* It provides a better mechanism for prioritizing and configuring test execution
 
 
 Usage
@@ -368,29 +368,41 @@ referenced in options is the *ssh* port to be used.
 Project definition consists of defining a set of properties in a config file in JSON format:
 
 .. code-block:: json
+
    {
     "requirements_paths": ["/abs/path/tor/requirements1.txt", "./relative/path/to/requirements2.txt"],
+    "pure_requirements_paths": ["/abs/path/tor/pure_requirements1.txt", "./relative/path/to/pure_requirements2.txt"],
     "src_paths": ["./path/to/src1", "./path/to/src2"],
-    "resource_paths": [("/abs/path/to/resources1", "./relative/path/to/bundle/resources1),
-                       ("./path/to/resources2", "./relative/path/to/bundle/resources2)],
+    "resource_paths": [["/abs/path/to/resources1", "./relative/path/to/bundle/resources1"],
+                       ["./path/to/resources2", "./relative/path/to/bundle/resources2"]],
     "tests_path": "./path/to/project_tests",
    }
 
 These have the following meanings for creating the bundle to send to workers:
-* *requierments_paths* : list of paths where python requirements are located that list needed dependencies
+
+* *requierments_paths* : list of paths where python requirements are located that list needed dependencies that
+  are to be installed post-deployment to worker (for depenencies that are not pure python, this is required;
+  it is recommended that only "impure" depdnencies be included)
+* *pure_requierments_paths* : list of paths where python requirements are located that list needed dependencies
+  that are only PURE python (no native C/C++ shared libraries in dependency)
 * *src_paths*: list of directories or evein site-package directories to include in the bundle
-* *resource_paths* list of tuple pairs where the first is a directory containing resourcs to be bundle, and
-   the second the directory, which must be relative (to the root where the bundle will be installed), that
-   specifies where the resources will be deployed on the remote host (relative to a root directory)
-* *tests_path* : location of where test code is kept, to be bundled as as directory
+* *resource_paths*: list of tuple pairs where the first is a directory containing resourcs to be bundle, and
+  the second the directory, which must be relative to the root where the bundle will be installed
+* *tests_path*: location of where test code is kept, to be bundled as as directory
+* *prepare_script*: an optional script that is run before pytest execution on a remote host, to prep the
+  test environment if needed
+* *finalize_script*: an optional script that is run after pytest execution on a remote host, to tear down the
+  test environment if needed
+
 Project configurations are specified in a file with the path to that file specified on the command line via
 the *--project_structure* command line option, or if not provided and *project.cfg" file exists in the current
-workding directory of test execution, that file will be used.  If you specify a remote hosts configuration
+working directory of test execution, that file will be used.  If you specify a remote hosts configuration
 for automated distribute execution, the project conbifuration file is required to tell *pytest_mproc* how
 to bundle the necessary items to send to the remote hosts.
 
 The remote hosts configuration is specified on the command line through the *--remote-client* command line option.
 The value of this option can be
+
 * a fixed host specification in the form of "<host>[:<port>];optoin1=value1;...";  the option/value pair can be
   repeated to specify multiple remote clients
 * a file with line-by-line JSON content specifying the remote host/port and options as specified below
@@ -407,6 +419,7 @@ The format of the http response or in the file is in a line-by-line JSON format.
 to drive execution from remote hosts against attached Android devices, the content might look like:
 
 .. code-block:: json
+
    {"host": "host.name.or.ip", "arguments": {"device": "ANDROID_DEVICE1", "argument1": "value1"}}
 
 Arguments that are all upper case names will be passed to the remote host as environment variables.  All others will
@@ -414,13 +427,14 @@ be passed to pytest as command line options in the form "--<option> <value>" and
 to add and accept those command line options.  There are a few command line options that are reserved for use
 by *pytest_mproc*:
 * *cores* : specifies the number of cores (worker threads) to instantiate on the remote host;  if not specified
-  the number of cores specified on the main host command line will be used (see below)
+the number of cores specified on the main host command line will be used (see below)
 * *jump_host* : if specified, this host:port pair will be used to add a jump host option when invoking ssh against
-  the remote host
+the remote host
 
 Distributed parallel execution from the command line can then be done through a single invocation:
 
 .. code-block:: bash
+
     % pytest --as-server", <server_host>:<server_port> --cores 1 -k alg2 --project_structure path/to/project.cfg --remote-client https://some.endpoint.com/reserver?count=5"
 
 Note that pytest options not specific to pytest_mproc itself are passed along to the client workers (in this case,
@@ -433,21 +447,45 @@ invocation.
 Breaking this down, lets say we are testing against Android devices on remote hosts and the https endpoint returns:
 
 .. code-block:: json
-   {"host": "host.name.or.ip1", "arguments": {"DEVICE_SERIAL": "Z02348FHJ", "default_orientation": "landscape"}}
-   {"host": "host.name.or.ip2", "arguments": {"DEVICE_SERIAL": "Z0B983HH1", "default_orientation": "portrait"}}
+
+    {"host": "host.name.or.ip1", "arguments": {"DEVICE_SERIAL": "Z02348FHJ", "default_orientation": "landscape"}}
+    {"host": "host.name.or.ip2", "arguments": {"DEVICE_SERIAL": "Z0B983HH1", "default_orientation": "portrait"}}
 
 Then the above command on the server will:
-* collect all test cases to be executed (pytest functionality)
-* populate a test queue for workers to pull from with these cases
-* in parallel, bundle, deploy and execute pytest on the worker threads
+
+#. collect all test cases to be executed (pytest functionality)
+#. populate a test queue for workers to pull from with these cases
+#. in parallel, bundle, deploy and execute pytest on the worker threads
 
 Each worker host will:
-* collect all test cases to be executed (pytest functionality)
-* have DEVICE_SERIAL available in *os.environ" during execution
-* be provided the option "default_orientation" as given above
-* launch with a single worker thread (cores = 1) providing a 1-to-1 worker-host-to-device
-* each worker thread start a test loop that pulls each test from the main test queue and executes each test until
-  the queue is exhausted
+
+#. collect all test cases to be executed (pytest functionality)
+#. have DEVICE_SERIAL available in *os.environ* during execution
+#. be provided the option *default_orientation* as given above
+#. launch with a single worker thread (cores = 1) providing a 1-to-1 worker-host-to-device
+#. each worker thread start a test loop that pulls each test from the main test queue and executes each test until
+   the queue is exhausted
 
 If --cores were specified as 4, then each worker host would launch with 4 parallel worker threads, unless
 the https endpoint provided a "cores" option with a different value as an override.
+
+Logs and Artifacts
+------------------
+
+*pytest_mproc* will collect logs from remote workers and pull hem back to the main host.  By default,
+these are collected on the main host in "./artifacts" when running, but the location can be overriden by setting the
+environment variable PTMPROC_HOST_ARTIFACTS_DIR.
+
+On the worker nodes (when runing distributed automatically), the environment variable PTMPROC_WORKER_ARTIFACTS_DIR
+is set to tell pytest where to find the artifacts dir (absolute path) on the worker host.
+Setting this environment variable will
+have no effect, it is only read in at the beginning of the program. In other words, the location for workers
+is fixed by the program and cannot be changed, and should be used as the top-level
+location to store (or copy) artifacts.  Any artifacts collected under this directory will be zipped and pulled
+back to:
+
+.. code-block:: bash
+
+   $(PTMPROC_HOST_ARTIFACTS_DIR)/Worker-<n>/artifacts.zip
+
+If not set, "./artifacts" is used for PTMPROC_HOST_ARTIFACTS_DIR.

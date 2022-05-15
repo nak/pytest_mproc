@@ -1,3 +1,5 @@
+import os
+
 import aiohttp
 import json
 import pytest
@@ -6,7 +8,7 @@ import pytest_mproc
 from aiofile import async_open
 from pathlib import Path
 from typing import Optional, Dict, List, Iterable, Tuple, AsyncGenerator, Any
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 
 SRC_PATHS = 'src_paths'
 REQUIREMENTS_PATHS = 'requirements_paths'
@@ -22,6 +24,8 @@ class ProjectConfig:
     pure_requirements_paths: List[Path] = field(default_factory=list)
     src_paths: List[Path] = field(default_factory=list)
     resource_paths: List[Tuple[Path, Path]] = field(default_factory=list)
+    prepare_script: Optional[Path] = None
+    finalize_script: Optional[Path] = None
 
     @classmethod
     def from_file(cls, path: Path) -> "ProjectConfig":
@@ -36,6 +40,14 @@ class ProjectConfig:
                         not isinstance(data.get(PURE_REQUIREMENTS_PATHS), Iterable):
                     raise pytest.UsageError(f"requirements_paths in project config '{path}' is either missing or not "
                                             " a list of string paths")
+                if 'finalize_script' in data and (not Path(data['finalize_script']).exists or
+                                                  not os.access(data['finalize_script'], os.X_OK)):
+                    raise pytest.UsageError(
+                        f"finalize script {data['finalize_script']} either does not exist or is not executable")
+                if 'prepare_script' in data and (not Path(data['prepare_script']).exists or
+                                                 not os.access(data['prepare_script'], os.X_OK)):
+                    raise pytest.UsageError(
+                        f"prepare script {data['prepare_script']} either does not exist or is not executable")
                 if TESTS_PATH not in data:
                     raise pytest.UsageError(f"'{TESTS_PATH}' is not in project config '{path}'")
                 if type(data[TESTS_PATH]) != str:
@@ -71,7 +83,9 @@ class ProjectConfig:
                     pure_requirements_paths=data[PURE_REQUIREMENTS_PATHS],
                     tests_path=Path(data[TESTS_PATH]),
                     src_paths=[Path(p) for p in data[SRC_PATHS]],
-                    resource_paths=[Path(p) for p in data[RESOURCE_PATHS]]
+                    resource_paths=[Path(p) for p in data[RESOURCE_PATHS]],
+                    prepare_script=data.get('prepare_script'),
+                    finalize_script=data.get('finalize_script'),
                 )
             except json.JSONDecodeError:
                 raise pytest.UsageError(f"Invalid json format in project config '{path}'")

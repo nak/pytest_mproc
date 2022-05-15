@@ -1,6 +1,8 @@
 import asyncio
 import multiprocessing
 import os
+from queue import Empty
+
 import resource
 import signal
 import socket
@@ -38,6 +40,7 @@ from pytest_mproc.data import (
 from pytest_mproc.fixtures import FixtureManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteHostConfig
 from pytest_mproc.remote.bundle import Bundle
+from pytest_mproc.user_output import debug_print
 from pytest_mproc.utils import BasicReporter
 
 __all__ = ["Orchestrator"]
@@ -81,9 +84,11 @@ class RemoteExecutionThread:
         self._tracker = tracker
 
     def start(self,
-              server: str, server_port: int, finish_sem: Semaphore, timeout: Optional[float] = None,
+              server: str, server_port: int, finish_sem: Semaphore,
+              result_q: Queue,
+              timeout: Optional[float] = None,
               deploy_timeout: Optional[float] = None, stdout=None, stderr=None,
-              auth_key: Optional[bytes] = None
+              auth_key: Optional[bytes] = None,
               ):
         this = self
 
@@ -99,24 +104,25 @@ class RemoteExecutionThread:
                     this._start(*self._args, **self._kwargs)
                 except Exception as e:
                     import traceback
-                    os.write(sys.stderr.fileno(), f"Exception starting coordinator: {e}\n{traceback.format_exc()}".encode('utf-8'))
+                    os.write(sys.stderr.fileno(), f"Exception starting coordinator: {e}\n{traceback.format_exc()}"
+                             .encode('utf-8'))
 
         self._thread = WorkerThread(server, server_port, self._tracker, finish_sem, timeout, deploy_timeout,
-                                stdout, stderr, auth_key)
+                                    stdout, stderr, auth_key, result_q)
         self._thread.start()
         # noinspection PyAttributeOutsideInit
         self._finish_sem = finish_sem
 
     def _start(self, server: str, server_port: int, tracker: Dict[str, List[asyncio.subprocess.Process]],
                finish_sem: Semaphore, timeout: Optional[float], deploy_timeout: Optional[float],
-               stdout, stderr, auth_key: bytes):
+               stdout, stderr, auth_key: bytes, result_q: Queue):
         try:
             with tempfile.TemporaryDirectory() as tmpdir,\
                     Bundle.create(root_dir=Path(tmpdir),
                                   project_config=self._project_config,
                                   system_executable=self._remote_sys_executable) as bundle:
                 args = list(sys.argv[1:])  # copy of
-                # remove pytest mproc cli args to pass to client (aka addtional non-pytest-mproc args)
+                # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
                 for arg in sys.argv[1:]:
                     typ = Orchestrator.ptmproc_args.get(arg)
                     if not typ:
@@ -161,6 +167,10 @@ class RemoteExecutionThread:
                 if all([p.returncode != 0 for p in procs.values()]):
                     raise Exception("Failed on all client hosts to executed pytest")
         except Exception as e:
+            import traceback
+            msg = f"!!! Execption in creating bundle {e}:\n {traceback.format_exc()}"
+            os.write(sys.stderr.fileno(), msg.encode('utf-8'))
+            result_q.put(FatalError(msg))
             self._q.put(e)
 
     def join(self, timeout: Optional[float] = None):
@@ -261,7 +271,7 @@ class Orchestrator:
 
     def __init__(self,
                  host: str = _localhost(), port: int = find_free_port(),
-                 connection_timeout: int = 30,
+                 deploy_timeout: Optional[int] = None,
                  remote_sys_executable: str = 'python{}.{}'.format(*sys.version_info),
                  project_config: Optional[ProjectConfig] = None,
                  remote_clients_config: Optional[Union[List[RemoteHostConfig],
@@ -273,7 +283,6 @@ class Orchestrator:
         """
         self._host = host
         self._port = port
-        self._connection_timeout = connection_timeout
         self._tests: List[TestBatch] = []  # set later
         self._count = 0
         self._exit_results: List[ResultExit] = []
@@ -291,13 +300,14 @@ class Orchestrator:
                                                              remote_sys_executable=remote_sys_executable,
                                                              project_config=project_config,
                                                              tracker=self._remote_processes)
-            self._remote_exec_thread.start(server=host, server_port=port, finish_sem=self._finish_sem,
-                                           deploy_timeout=connection_timeout, auth_key=current_process().authkey)
             SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "task_done", "join", "close"])
             self._queue_manager = SyncManager(authkey=current_process().authkey)
             self._queue_manager.start()
             self._test_q = JoinableQueue()
             self._result_q = JoinableQueue()
+            self._remote_exec_thread.start(server=host, server_port=port, finish_sem=self._finish_sem,
+                                           deploy_timeout=deploy_timeout, auth_key=current_process().authkey,
+                                           result_q=self._result_q)
         else:
             SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "task_done", "join", "close"])
             self._queue_manager = SyncManager(authkey=current_process().authkey)
@@ -376,7 +386,7 @@ class Orchestrator:
         """
         try:
             if isinstance(result, ResultTestStatus):
-                if result.report.when == 'call' or (result.report.when == 'setup' and not result.report.passed):
+                if result.report.when == 'call':
                     self._count += 1
                 hook.pytest_runtest_logreport(report=result.report)
             elif isinstance(result, ResultExit):
@@ -461,8 +471,7 @@ class Orchestrator:
                         error_count += 1
                     else:
                         # noinspection PyUnresolvedReferences
-                        os.write(sys.stderr.fileno(),
-                                 f"\nWorker-{key} finished [{self._mp_manager.count().value()}]\n".encode('utf-8'))
+                        debug_print(f"\nWorker-{key} finished [{self._mp_manager.count().value()}]\n")
                     # noinspection PyUnresolvedReferences
                     self._mp_manager.completed(result_batch.host, result_batch.pid)
                     # noinspection PyUnresolvedReferences
@@ -474,6 +483,14 @@ class Orchestrator:
                     else:
                         result_batch = self._result_q.get()
                     continue
+                elif isinstance(result_batch, Exception):
+                    while True:
+                        try:
+                            self._test_q.get_nowait()
+                        except Empty:
+                            break
+                    self._test_q.close()
+                    raise result_batch
                 for result in result_batch:
                     test_count += 1
                     if isinstance(result, ResultException):
@@ -558,9 +575,11 @@ class Orchestrator:
             os.write(sys.stderr.fileno(), b"All clients died; Possible incomplete run\n")
             os.write(sys.stderr.fileno(), b"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n")
         except FatalError:
+            populate_tests_process.terminate()
             raise session.Failed(True)
         finally:
             populate_tests_process.join(timeout=1)  # should never time out since workers are done
+            populate_tests_process.terminate()
             if exit_dict.get('success') is not True:
                 raise Exception("Failed to get all results")
             end_rusage = resource.getrusage(resource.RUSAGE_SELF)
