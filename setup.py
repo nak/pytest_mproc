@@ -2,7 +2,7 @@ from pathlib import Path
 
 import setuptools
 
-VERSION = "5.0.0"
+VERSION = "5.0.1"
 
 requirements = []
 with open(Path(__file__).parent / 'pure_requirements.txt', 'r') as in_stream:

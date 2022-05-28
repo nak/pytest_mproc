@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Any, Set, Dict, Union, Optional
 
@@ -33,12 +33,19 @@ class ResourceUtilization:
 class ResultException(Exception):
     excrepr: ReprExceptionInfo
 
+
 @dataclass
 class ClientDied(Exception):
     pid: int
     host: str
     errored: bool = False
     message: Optional[str] = None
+
+
+@dataclass
+class AllClientsCompleted:
+    hosts: List[str]
+
 
 @dataclass
 class ResultTestStatus:

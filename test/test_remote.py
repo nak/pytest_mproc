@@ -97,20 +97,21 @@ async def test_execute_remote_multi(bundle):
 def test_remote_execution_cli(tmp_path):
     root = Path(__file__).parent.parent
     ipname = socket.gethostbyname(socket.gethostname())
-    project_config = ProjectConfig(requirements_paths=[root / "test" / "resources" / "requirements1.txt"],
-                                   src_paths=[root / "src", root / "testsrc"],
-                                   tests_path=root / "test",
+    project_config = ProjectConfig(src_paths=[Path("src"), Path("testsrc")],
+                                   test_files=[Path("test") / "*.py", Path("requirements.txt")],
+                                   project_root=root
                                    )
     project_config_path = tmp_path / "project.cfg"
+    for path in project_config.src_paths + [Path("test")]:
+        shutil.copytree(root / path, tmp_path / path.name)
+    shutil.copy(root / "test" / "resources" / "requirements.txt", tmp_path / "requirements.txt")
     with open(project_config_path, 'w') as out:
         converted = {}
-        converted['requirements_paths'] = [str(p) for p in project_config.requirements_paths]
         converted['src_paths'] = [str(p) for p in project_config.src_paths]
-        converted['tests_path'] = str(project_config.tests_path)
-        converted['resource_paths'] = []
+        converted['test_files'] = [str(p) for p in project_config.test_files]
         out.write(json.dumps(converted))
         out.flush()
-        args =['pytest', '-s', 'test_mproc_runs.py', '-k', 'alg2',
+        args =['pytest', '-s', 'test/test_mproc_runs.py', '-k', 'alg2',
                '--cores', '3',
                '--as-server', f"{ipname}:{find_free_port()}",
                '--project-structure', str(project_config_path),
@@ -119,12 +120,12 @@ def test_remote_execution_cli(tmp_path):
                '--remote-client', f'127.0.0.1',
                '--remote-client', f'127.0.0.1',
                '--remote-client', f'127.0.0.1',
-               ]
+        ]
         sys.path.insert(0, str((Path(__file__).parent / "src").absolute()))
         env = os.environ.copy()
-        env['PYTHONPATH'] = "../src"
-        completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=120, env=env,
-                                   cwd=str(Path(__file__).parent.absolute()))
+        env['PYTHONPATH'] = "./src"
+        completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=120000, env=env,
+                                   cwd=str(tmp_path))
         assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from {str(Path(__file__).parent.absolute())}"
 
 
@@ -168,7 +169,7 @@ def test_remote_execution_thread(tmp_path):
                                    )
     try:
         sem = Semaphore(0)
-        thread.start(
+        thread.star_workerst(
             server=socket.gethostbyname(socket.gethostname()),
             server_port=43210,
             auth_key=current_process().authkey,

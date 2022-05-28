@@ -77,3 +77,11 @@ def fixture(fixturefunction, *, scope, **kargs):
     from _pytest.fixtures import fixture
     return fixture(fixturefunction, scope=scope, **kargs)
 
+
+def get_ip_addr():
+    hostname = socket.gethostname()
+    # noinspection PyBroadException
+    try:
+        return socket.gethostbyname(hostname)
+    except Exception:
+        return None

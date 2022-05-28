@@ -12,18 +12,14 @@ from dataclasses import dataclass, field
 
 SRC_PATHS = 'src_paths'
 REQUIREMENTS_PATHS = 'requirements_paths'
-PURE_REQUIREMENTS_PATHS = 'pure_requirements_paths'
-TESTS_PATH = 'tests_path'
-RESOURCE_PATHS = 'resource_paths'
+TEST_FILES = 'test_files'
 
 
 @dataclass
 class ProjectConfig:
-    tests_path: Path
-    requirements_paths: List[Path] = field(default_factory=list)
-    pure_requirements_paths: List[Path] = field(default_factory=list)
+    project_root: Path
+    test_files: List[Path]
     src_paths: List[Path] = field(default_factory=list)
-    resource_paths: List[Tuple[Path, Path]] = field(default_factory=list)
     prepare_script: Optional[Path] = None
     finalize_script: Optional[Path] = None
 
@@ -32,14 +28,6 @@ class ProjectConfig:
         with open(path, 'rb') as in_stream:
             try:
                 data = json.load(in_stream)
-                if 'requirements_paths' in data and\
-                        not isinstance(data.get(REQUIREMENTS_PATHS), Iterable):
-                    raise pytest.UsageError(f"requirements_paths in project config '{path}' is either missing or not "
-                                            " a list of string paths")
-                if 'pure_requirements_paths' in data and\
-                        not isinstance(data.get(PURE_REQUIREMENTS_PATHS), Iterable):
-                    raise pytest.UsageError(f"requirements_paths in project config '{path}' is either missing or not "
-                                            " a list of string paths")
                 if 'finalize_script' in data and (not Path(data['finalize_script']).exists or
                                                   not os.access(data['finalize_script'], os.X_OK)):
                     raise pytest.UsageError(
@@ -48,42 +36,19 @@ class ProjectConfig:
                                                  not os.access(data['prepare_script'], os.X_OK)):
                     raise pytest.UsageError(
                         f"prepare script {data['prepare_script']} either does not exist or is not executable")
-                if TESTS_PATH not in data:
-                    raise pytest.UsageError(f"'{TESTS_PATH}' is not in project config '{path}'")
-                if type(data[TESTS_PATH]) != str:
+                if TEST_FILES not in data:
+                    raise pytest.UsageError(f"'{TEST_FILES}' is not in project config '{path}'")
+                if any([type(f) != str for f in data[TEST_FILES]]):
                     raise pytest.UsageError(f"'test_path' must be a single string path in '{path}'")
-                data[TESTS_PATH] = path.parent / data[TESTS_PATH] \
-                    if not Path(data[TESTS_PATH]).is_absolute() else data[TESTS_PATH]
-                if not Path(data[TESTS_PATH]).exists():
-                    raise pytest.UsageError(f"'{TESTS_PATH}' {data[TESTS_PATH]}' does not exist as specified"
-                                            f" in project config {path}")
                 if SRC_PATHS in data and not isinstance(data[SRC_PATHS], Iterable):
                     raise pytest.UsageError(f"'{SRC_PATHS}' in project config '{path}' is not a list of string paths")
-                if RESOURCE_PATHS in data and not isinstance(data[RESOURCE_PATHS], Iterable):
-                    raise pytest.UsageError(f"'{RESOURCE_PATHS}' in project config '{path}' is not a list of string paths")
-                data[REQUIREMENTS_PATHS] = [path.parent / str(p) if not Path(p).is_absolute() else Path(p)
-                                            for p in data.get(REQUIREMENTS_PATHS,[])]
-                data[PURE_REQUIREMENTS_PATHS] = [path.parent / str(p) if not Path(p).is_absolute() else Path(p)
-                                                 for p in data.get(PURE_REQUIREMENTS_PATHS, [])]
-                for p in data[REQUIREMENTS_PATHS] + data[PURE_REQUIREMENTS_PATHS]:
-                    if not Path(p).exists():
-                        raise pytest.UsageError(f"requirements path {p} in project config is not a path")
-                data[SRC_PATHS] = [path.parent / str(p) if not Path(p).is_absolute() else Path(p)
-                                     for p in data[SRC_PATHS]]
                 for p in data[SRC_PATHS]:
-                    if not Path(p).exists():
+                    if not (path.parent / p).exists():
                         raise pytest.UsageError(f"source path {p} in project config is not a path")
-                data[RESOURCE_PATHS] = [path.parent / str(p) if not Path(p).is_absolute() else Path(p)
-                                          for p in data[RESOURCE_PATHS]]
-                for p in data[RESOURCE_PATHS]:
-                    if not Path(p).exists():
-                        raise pytest.UsageError(f"resource path {p} in project config is not a path")
                 return ProjectConfig(
-                    requirements_paths=[Path(p) for p in data[REQUIREMENTS_PATHS]],
-                    pure_requirements_paths=data[PURE_REQUIREMENTS_PATHS],
-                    tests_path=Path(data[TESTS_PATH]),
+                    project_root=path.parent,
+                    test_files=[Path(p) for p in data[TEST_FILES]],
                     src_paths=[Path(p) for p in data[SRC_PATHS]],
-                    resource_paths=[Path(p) for p in data[RESOURCE_PATHS]],
                     prepare_script=data.get('prepare_script'),
                     finalize_script=data.get('finalize_script'),
                 )
@@ -103,7 +68,7 @@ class RemoteHostConfig:
     def from_list(cls, value: Iterable[str]) -> List["RemoteHostConfig"]:
         """
         parse a cli input string for remote host and parameters specifications
-        :param value: a string specification, a str path to a file in form file://..., or to a url in form 'http[s]://...'
+        :param value: a string spec, a str path to a file in form file://..., or to a url in form 'http[s]://...'
             (the latter two returning a json dict in correspondence with return)
         :return: dictionary keyed on host of a dictionary of key value parameters
         """
@@ -123,7 +88,7 @@ class RemoteHostConfig:
     async def from_uri_string(cls, value: str) -> AsyncGenerator["RemoteHostConfig", "RemoteHostConfig"]:
         """
         parse a cli input string for remote host and parameters specifications
-        :param value: a string specification, a str path to a file in form file://..., or to a url in form 'http[s]://...'
+        :param value: a string spec, a str path to a file in form file://..., or to a url in form 'http[s]://...'
             (the latter two returning a json dict in correspondence with return)
         :return: dictionary keyed on host of a dictionary of key value parameters
         """
@@ -170,6 +135,7 @@ class RemoteHostConfig:
             elif value.startswith('file://'):
                 async with async_open(value[7:], "r") as afp:
                     async for line in afp:
+                        line = await line
                         if line.startswith('#') or not line.strip():
                             continue
                         json_data = json.loads(line.strip())
@@ -177,7 +143,7 @@ class RemoteHostConfig:
                         for k, v in json_data['arguments'].items():
                             json_data['arguments'][k] = str(v)
                         yield RemoteHostConfig(remote_host=json_data['host'],
-                                                arguments=json_data['arguments'])
+                                               arguments=json_data['arguments'])
             else:
                 raise pytest.UsageError(f"Invalid value for remote host(s): {value}")
         except json.JSONDecodeError:
@@ -215,7 +181,6 @@ class PytestMprocWorkerRuntime:
     def is_worker(cls):
         return True
 
-    #worker: Optional["pytest_mproc.worker.WorkerSession"] = None
     coordinator: Optional["pytest_mproc.coordinator.Coordinator"] = None
 
 

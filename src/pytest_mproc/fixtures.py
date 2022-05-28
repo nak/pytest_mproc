@@ -35,20 +35,20 @@ class FixtureManager(BaseManager):
 
     # noinspection PyAttributeOutsideInit
     def start(self, *args, **kwargs):
-        debug_print(f"Starting {self.__class__.__qualname__} server...\n")
+        debug_print(f"Starting {self.__class__.__qualname__} server...")
         # server:
         self._fixtures: Dict[str, Any] = {}
         self.__class__.register("get_fixture", self._get_fixture)
         self.__class__.register("put_fixture", self._put_fixture)
         super().start(*args, **kwargs)
-        debug_print(f"Started {self.__class__.__qualname__} server\n")
+        debug_print(f"Started {self.__class__.__qualname__} server")
 
     def connect(self):
-        debug_print(f"Connecting {self.__class__.__name__} server...\n")
+        debug_print(f"Connecting {self.__class__.__name__} server...")
         self.__class__.register("get_fixture")
         self.__class__.register("put_fixture")
         super().connect()
-        debug_print(f"Connected {self.__class__.__name__} server\n")
+        debug_print(f"Connected {self.__class__.__name__} server")
 
     def _put_fixture(self, name: str, value: Any) -> None:
         self._fixtures[name] = value
@@ -67,7 +67,7 @@ class Node:
         def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
             super().__init__(("127.0.0.1", port))
             if not as_main:
-                debug_print(f"Connected [{name}]\n")
+                debug_print(f"Connected [{name}]")
 
         PORT = int(os.environ.get('PTMPROC_BASE_PORT', 7038))
         _singleton = None
@@ -127,7 +127,7 @@ class Global:
                         cls._singleton.connect()
                         cls._singleton._is_serving = False
                     except (EOFError, OSError):
-                        debug_print("Failed to connect, trying to start server as not server present...\n")
+                        debug_print("Failed to connect, trying to start server as not server present...")
                         cls._singleton = cls(host=host, port=port)
                         cls._singleton.start()
                         cls._singleton._is_serving = True

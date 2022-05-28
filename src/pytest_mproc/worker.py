@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import suppress
 from multiprocessing import (
     JoinableQueue,
     Queue,
@@ -16,7 +17,7 @@ import pytest
 from _pytest.config import _prepareconfig
 import resource
 
-from pytest_mproc import resource_utilization, TestError, user_output
+from pytest_mproc import resource_utilization, TestError, user_output, get_ip_addr
 from pytest_mproc.data import (
     ClientDied,
     ResultException,
@@ -43,15 +44,6 @@ else:
 
 """maximum time between reporting status back to coordinator"""
 MAX_REPORTING_INTERVAL = 1.0  # seconds
-
-
-def get_ip_addr():
-    hostname = socket.gethostname()
-    # noinspection PyBroadException
-    try:
-        return socket.gethostbyname(hostname)
-    except Exception:
-        return None
 
 
 class WorkerSession:
@@ -139,6 +131,10 @@ class WorkerSession:
                     except TestError:
                         has_error = True
                         self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id, test_batch))
+                    except Exception as e:
+                        import traceback
+                        raise Exception(f"Exception running test: {e}: {traceback.format_exc()}")
+
                     finally:
                         if not has_error:
                             self._put(TestState(TestStateEnum.FINISHED, self._this_host, self._pid,
@@ -199,16 +195,12 @@ class WorkerSession:
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
         env["AUTH_TOKEN_STDIN"] = "1"
-        if not user_output.verbose or '--as-client' not in sys.argv:
-            # if on same host as main, don't spit out output from worker so as to not clutter stdout/stderr
-            stdout = subprocess.DEVNULL
-            stderr = subprocess.DEVNULL
-        else:
-            stdout = sys.stdout
-            stderr = sys.stderr
+        if user_output.verbose:
+            env['PTMPROC_VERBOSE'] = '1'
+        stdout = sys.stdout
+        stderr = sys.stderr
         executable = executable or sys.executable
-        verbose = ['-s']  # if user_output.verbose else []
-        proc = subprocess.Popen([executable, '-m', __name__, host, str(port)] + sys.argv[1:] + verbose,
+        proc = subprocess.Popen([executable, '-m', __name__, host, str(port)] + sys.argv[1:],
                                 env=env,
                                 stdout=stdout, stderr=stderr, stdin=subprocess.PIPE)
         proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
@@ -218,6 +210,7 @@ class WorkerSession:
     @staticmethod
     def run(index: int, is_remote: bool, start_sem: Semaphore, fixture_sem: Semaphore,
             test_q: JoinableQueue, result_q: Queue, sync_sem: Semaphore()) -> None:
+        from pytest_mproc.main import OrchestrationManager
         sync_sem.release()
         start_sem.acquire()
         worker = WorkerSession(index, is_remote, test_q, result_q)
@@ -234,9 +227,7 @@ class WorkerSession:
         # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
         config.pluginmanager.unregister(name="terminal")
         config.pluginmanager.register(worker, "mproc_worker")
-        config.ptmproc_runtime.worker = worker
-        from pytest_mproc.main import Orchestrator
-        worker._client = Orchestrator.Manager(addr=(config.option.ptmproc_config.server_host,
+        worker._client = OrchestrationManager(addr=(config.option.ptmproc_config.server_host,
                                                     config.option.ptmproc_config.server_port))
         workerinput = {'slaveid': "worker-%d" % worker._index,
                        'workerid': "worker-%d" % worker._index,
@@ -306,11 +297,11 @@ def main():
     from pytest_mproc.worker import WorkerSession  # to make Python happy
     assert plugin  # to prevent flake8 unused import
     # from pytest_mproc.worker import WorkerSession
-    from pytest_mproc.main import Orchestrator
+    from pytest_mproc.main import OrchestrationManager
     from pytest_mproc.fixtures import Node
     host, port = sys.argv[1:3]
     port = int(port)
-    mgr = Orchestrator.Manager(addr=(host, port))
+    mgr = OrchestrationManager(addr=(host, port))
     mgr.connect()
     # noinspection PyUnresolvedReferences
     mgr.register_worker((get_ip_addr(), os.getpid()))
@@ -337,7 +328,8 @@ def main():
         os.write(sys.stderr.fileno(), msg.encode('utf-8'))
     finally:
         result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
-        Node.Manager.singleton().shutdown()
+        with suppress(Exception):
+            Node.Manager.singleton().shutdown()
 
 
 if __name__ == "__main__":

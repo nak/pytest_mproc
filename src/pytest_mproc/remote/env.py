@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from pytest_mproc import user_output
 from pytest_mproc.ptmproc_data import ProjectConfig
-from pytest_mproc.user_output import debug_print
+# from pytest_mproc.user_output import debug_print
 
 
 def set_up_local(project_config: ProjectConfig, cache_dir: Path) -> Path:
@@ -18,20 +18,16 @@ def set_up_local(project_config: ProjectConfig, cache_dir: Path) -> Path:
     """
     quiet = ['-q'] if user_output.verbose else []
     m = hashlib.sha256()
-    for requirements_path in project_config.pure_requirements_paths:
-        with open(requirements_path, 'rb') as in_stream:
-            for line in in_stream:
-                m.update(line)
     hash_value = m.hexdigest()
     site_pkgs_dir = cache_dir / hash_value / "site-packages"
     install_wheel = any([(Path(d) / "pytest_mproc").exists for d in project_config.src_paths])
-    if install_wheel:
+    if False and install_wheel:
         # mostly for running raw pytest_mproc code during unit/integration testing:
         root = Path(__file__).parent.parent.parent.parent
         setup = root / "setup.py"
         if (root / "dist").exists():
             shutil.rmtree(root / "dist")
-        assert subprocess.run([sys.executable, setup, "sdist"],
+        assert subprocess.run([sys.executable, str(setup), "sdist"],
                               cwd=str(root),
                               stdout=subprocess.DEVNULL).returncode == 0
         sdist = next((root / "dist").glob('*.tar.gz'))
@@ -46,13 +42,6 @@ def set_up_local(project_config: ProjectConfig, cache_dir: Path) -> Path:
     if not site_pkgs_dir.exists():
         try:
             site_pkgs_dir.mkdir(parents=True)
-            for requirements_path in project_config.pure_requirements_paths:
-                completed = subprocess.run([sys.executable, '-m', 'pip', "install", "--target", str(site_pkgs_dir),
-                                            "--force-reinstall",
-                                            "-r", str(requirements_path)] + quiet,
-                                           stderr=sys.stderr)
-                if completed.returncode != 0:
-                    raise SyntaxError(f"Failed to install {str(requirements_path)}")
             completed = subprocess.run([sys.executable, '-m', 'pip', "install", "--target", str(site_pkgs_dir),
                                         "--force-reinstall",
                                         "pytest"] + quiet,

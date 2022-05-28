@@ -11,17 +11,17 @@ from contextlib import suppress
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
 from typing import (
     AsyncIterator,
     Callable,
     Dict,
-    List,
     Optional,
     TextIO,
     Tuple,
     Union,
 )
+
+from pytest_mproc import user_output
 
 SUCCESS = 0
 
@@ -83,6 +83,8 @@ class SSHClient:
         if env:
             for key, value in env.items():
                 command = f"{key}=\"{value}\" {command}"
+        if user_output.verbose:
+            env["PTMPROC_VERBOSE"] = '1'
         if cwd is not None:
             command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
         return await asyncio.subprocess.create_subprocess_exec(
@@ -153,10 +155,10 @@ class SSHClient:
         """
         if local_path.is_dir():
             args = list(self._global_options) +\
-                ['-r', '-p', local_path, f"{self.destination}:{str(remote_path)}"]
+                ['-r', '-p', str(local_path), f"{self.destination}:{str(remote_path)}"]
         else:
             args = list(self._global_options) +\
-                ['-p', local_path, f"{self.destination}:{str(remote_path)}"]
+                ['-p', str(local_path), f"{self.destination}:{str(remote_path)}"]
         proc = await asyncio.create_subprocess_exec(
             "scp", *args,
             stdout=asyncio.subprocess.DEVNULL,
@@ -247,6 +249,7 @@ class SSHClient:
             cwd=str(cwd) if cwd is not None else None
         )
         stdout, _ = await proc.communicate()
+        assert proc.returncode is not None
         if proc.returncode != 0:
             os.write(sys.stderr.fileno(), f"Failed to install on remote: {cmd} {stdout}".encode('utf-8'))
             raise CommandExecutionFailure(f"{cmd} {stdout}",
@@ -263,10 +266,12 @@ class SSHClient:
 
         :param command: command to execute on remote client
         :param args: args to the command
-        :param timeout: optional timeout for commnand
+        :param timeout: optional timeout for command
         :param cwd: directory on remote client in which to execute
         :param success_code: None if not to check return code, otherwise lambda taking return code an returning
            True is success or False otherwise (defaults to 0 being success code)
+        :param stdin: stream to use for stdin (as in subprocess.Popen)
+
         :return: AsyncIterator of string providing line-by-line output from command
         :raises: TimeoutError if command fails to finish in time
         :raises: CommandExecutionFailure if command return non-success error code
@@ -348,14 +353,18 @@ class SSHClient:
                                     stderr: Union[TextIO, int],
                                     cwd: Optional[Path] = None,
                                     env: Optional[Dict[str, str]] = None,
-                                    prefix_cmd:Optional[str] = None,
+                                    prefix_cmd: Optional[str] = None,
                                     auth_key: Optional[bytes] = None) -> asyncio.subprocess.Process:
         """
         execute command on remote host
 
         :param command: command to execute
+        :param prefix_cmd: an optional prefix to insert before command in shell command string
         :param args: args to command
         :param cwd: optional directory on remote host to execute under
+        :param stdin: stream to use for stdin (as in subprocess.Popen)
+        :param stdout: stream to use for stdout (as in subprocess.Popen)
+        :param stderr: stream to use for stderr (as in subprocess.Popen)
         :param env: optional dictionary of environment variables for command
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
@@ -376,20 +385,24 @@ class SSHClient:
                                  stdout: Union[int, TextIO] = sys.stdout,
                                  stderr: Union[int, TextIO] = sys.stderr,
                                  stdin: Optional[TextIO] = None,
-                                 auth_key: Optional[bytes] = None,
                                  timeout: Optional[float] = None,
                                  cwd: Optional[Path] = None,
                                  prefix_cmd: Optional[str] = None,
-                                 tracker: Optional[Tuple[Dict[str, List[asyncio.subprocess.Process]], RLock]] = None,
-                                 env: Optional[Dict[str, str]] = None) -> asyncio.subprocess.Process:
+                                 env: Optional[Dict[str, str]] = None,
+                                 auth_key: Optional[bytes] = None,
+                                 ) -> asyncio.subprocess.Process:
         """
         execute command on remote host
 
         :param command: command to execute
+        :param prefix_cmd: an optional prefix to insert before command in shell command string
         :param args: args to command
         :param timeout: optional timeout for command execution;  if None, function will return Process created
            without waiting for completion
         :param cwd: optional directory on remote host to execute under
+        :param stdin: stream to use for stdin (as in subprocess.Popen)
+        :param stdout: stream to use for stdout (as in subprocess.Popen)
+        :param stderr: stream to use for stderr (as in subprocess.Popen)
         :param env: optional dictionary of environment variables for command
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
@@ -407,9 +420,5 @@ class SSHClient:
             auth_key = binascii.b2a_hex(auth_key)
             proc.stdin.write(auth_key + b'\n')
             proc.stdin.close()
-        if tracker is not None:
-            tracker2, lock = tracker
-            with lock:
-                tracker2.setdefault(self.host, []).append(proc)
         await asyncio.wait_for(proc.wait(), timeout=timeout)
         return proc

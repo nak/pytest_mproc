@@ -43,8 +43,6 @@ from pytest_mproc import find_free_port, fixtures
 import socket
 
 from multiprocessing import cpu_count
-from pytest_mproc.coordinator import CoordinatorFactory
-from pytest_mproc.main import Orchestrator
 from pytest_mproc.utils import is_degraded, BasicReporter
 
 
@@ -88,6 +86,7 @@ def _add_option(group, name: str, dest: str, action: str,
     """
     internal add option function to allow us to keep track of pytest-specific options from command line
     """
+    from pytest_mproc.main import Orchestrator, OrchestrationManager
     # noinspection PyProtectedMember
     if typ == bool:
         group._addoption(
@@ -250,7 +249,7 @@ def pytest_cmdline_main(config):
         mproc_pytest_cmdline_main(config, reporter=reporter)
 
 
-def try_connect(mgr: Orchestrator.Manager):
+def try_connect(mgr: "OrchestratorManager"):
     chars = ['|', '\\', '-', '/', '|', '-']
     tries_remaining = 120
     while tries_remaining:
@@ -272,6 +271,8 @@ def try_connect(mgr: Orchestrator.Manager):
 
 
 def mproc_pytest_cmdline_coordinator(config):
+    from pytest_mproc.main import OrchestrationManager
+    from pytest_mproc.coordinator import CoordinatorFactory
     config.option.no_summary = True
     config.option.no_header = True
     config.option.ptmproc_config = PytestMprocConfig(
@@ -294,13 +295,12 @@ def mproc_pytest_cmdline_coordinator(config):
         config.option.ptmproc_config.server_host = host
         config.option.ptmproc_config.server_port = port
         if not config.option.collectonly:
-            mgr = Orchestrator.Manager(addr=(config.option.ptmproc_config.server_host,
+            mgr = OrchestrationManager(addr=(config.option.ptmproc_config.server_host,
                                              config.option.ptmproc_config.server_port))
             try_connect(mgr)
             factory = CoordinatorFactory(
                 num_processes=config.option.ptmproc_config.num_cores,
                 mgr=mgr,
-                max_simultaneous_connections=config.option.ptmproc_config.max_simultaneous_connections,
                 as_remote_client=True)
             config.ptmproc_runtime = PytestMprocRuntime(mproc_main=None,
                                                         coordinator=factory.launch(host, port))
@@ -308,6 +308,8 @@ def mproc_pytest_cmdline_coordinator(config):
 
 
 def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
+    from pytest_mproc.main import Orchestrator
+    from pytest_mproc.coordinator import CoordinatorFactory
     assert "--as-client" not in sys.argv
     is_server = hasattr(config.option, 'mproc_server_port')
     cli_value = getattr(config.option, 'mproc_server_port', '127.0.0.1:None')
@@ -319,8 +321,8 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     config.option.ptmproc_config.server_port = server_port
     config.option.ptmproc_config.server_host = server_host
     local_proj_file = Path("./ptmproc_project.cfg")
-    project_config = getattr(config.option, "project_structure_path",
-                             local_proj_file if local_proj_file.exists() else None)
+    project_config = getattr(config.option, "project_structure_path") or \
+        (local_proj_file if local_proj_file.exists() else None)
     if is_server:
         remote_clients = config.option.mproc_remote_clients
         version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
@@ -361,7 +363,6 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
         factory = CoordinatorFactory(
             num_processes=config.option.ptmproc_config.num_cores,
             mgr=config.ptmproc_runtime.mproc_main._mp_manager,
-            max_simultaneous_connections=config.option.ptmproc_config.max_simultaneous_connections,
             as_remote_client=False)
         coordinator = factory.launch(host, port)
         config.ptmproc_runtime.coordinator = coordinator
