@@ -439,8 +439,7 @@ class Orchestrator:
             while result_batch is not None:
                 if isinstance(result_batch, AllClientsCompleted):
                     self._test_q.close()
-                    self._result_q.close()
-                    break
+                    self._result_q.put(None)
                 elif isinstance(result_batch, ClientDied):
                     key = f"{result_batch.host}-{result_batch.pid}"
                     if result_batch.errored:
