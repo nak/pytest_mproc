@@ -25,6 +25,7 @@ from typing import (
 )
 
 from pytest_mproc import user_output
+from pytest_mproc.fixtures import Node, Global
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
 from pytest_mproc.user_output import debug_print, always_print
@@ -74,7 +75,7 @@ class Bundle:
         self._root_dir = Path(root_dir)
         self._prepare_script = Path(prepare_script) if prepare_script else None
         self._finalize_script = Path(finalize_script) if finalize_script else None
-        self._remote_executable = system_executable
+        self._remote_executable = system_executable or Path(sys.executable).name
         self._sources: List[Path] = []
         self._site_pkgs = tempfile.TemporaryDirectory()
         self._resources: List[Tuple[Path, Path]] = []
@@ -259,6 +260,7 @@ class Bundle:
             deploy_timeout: Optional[float] = FIVE_MINUTES,
             timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
+            env: Optional[Dict[str, str]] = None,
     ) -> Dict[str, asyncio.subprocess.Process]:
         """
         deploy and execute to/on multiple host targets concurrently (async)
@@ -278,6 +280,7 @@ class Bundle:
         if isinstance(remote_hosts_config, Iterable):
             for index, worker_config in enumerate(remote_hosts_config):
                 cli_args, cli_env = worker_config.argument_env_list()
+                cli_env.update(env or {})
                 task = asyncio.get_event_loop().create_task(
                     self.execute_remote(worker_config.remote_host,
                                         *(list(args) + list(cli_args)),
@@ -383,6 +386,8 @@ class Bundle:
                 env["PYTHONPATH"] = str(remote_root / 'site-packages')
             if user_output.verbose:
                 env["PTMPROC_VERBOSE"] = '1'
+            env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
+            env['PTMPROC_GLOBAL_MGR_PORT'] = str(Global.Manager.PORT)
             if "PTMPROC_BASE_PORT" in os.environ:
                 env["PTMPROC_BASE_PORT"] = os.environ["PTMPROC_BASE_PORT"]
             always_print(">>> Executing tests on remote worker %s...", ssh_client.host)
@@ -429,6 +434,7 @@ class Bundle:
                     cmd,
                     timeout=timeout,
                     env=env,
+                    prefix_cmd=f"set -o pipefail; ",
                     cwd=full_run_dir,
                     auth_key=auth_key,
                     stdout=stdout,
@@ -440,7 +446,7 @@ class Bundle:
                     always_print("Finalizing worker through finalize script on client %s...", ssh_client.host)
                     with suppress(Exception):
                         # noinspection SpellCheckingInspection
-                        proc = await ssh_client.execute_remote_cmd(
+                        finalize_proc = await ssh_client.execute_remote_cmd(
                             f"./finalize  | tee \"{remote_root}/artifacts/{self._finalize_script.stem}.log\"",
                             cwd=remote_root,
                             prefix_cmd=f"set -o pipefail; ",
@@ -449,7 +455,7 @@ class Bundle:
                             stdout=stdout,
                             stderr=sys.stderr,
                         )
-                        if proc.returncode:
+                        if finalize_proc.returncode:
                             debug_print(f"!!! WARNING: finalize script failed! ")
                 try:
                     if proc:
@@ -476,14 +482,19 @@ class Bundle:
                                        deploy_timeout: Optional[float] = FIVE_MINUTES,
                                        timeout: Optional[float] = None,
                                        remote_root: Optional[Path] = None,
+                                       env: Optional[Dict[str, str]] = None,
                                        ) -> AsyncGenerator[str, str]:
-        args = ["-m", "pytest"] + list(args)
         ssh_client = SSHClient(host, username, password)
+        env = env or {}
         async with self.remote_root_context(ssh_client, remote_root) as remote_root:
+            if "PYTHONPATH" in env:
+                env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + env["PYTHONPATH"]
+            else:
+                env["PYTHONPATH"] = str(remote_root / 'site-packages')
             await self.deploy(ssh_client, remote_root=remote_root, timeout=deploy_timeout)
             command = self._remote_executable
             async for line in ssh_client.monitor_remote_execution(
-                    command, '-m', 'pytest', *args, timeout=timeout,
+                    command, '-m', 'pytest', *args, timeout=timeout, env=env,
                     cwd=self.remote_run_dir(remote_root) / self._relative_run_path,
             ):
                 yield line

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteHostConfig
+from pytest_mproc.remote.bundle import Bundle
 
 
 class TestProjectConfig:
@@ -11,29 +12,33 @@ class TestProjectConfig:
 
     def test_from_file(self):
         project = ProjectConfig.from_file(self.ROOT / "project.cfg")
-        assert project.requirements_paths == [(self.ROOT / "./requirements1.txt").resolve(),
-                                              (self.ROOT / "./requirements2.txt").resolve()]
-        assert project.resource_paths == [(self.ROOT / "resources1").resolve(),
-                                          (self.ROOT / "resources2").resolve()]
-        assert project.src_paths == [(self.ROOT / "src1").resolve(),
-                                     (self.ROOT / "src2").resolve()]
-        assert project.tests_path == (self.ROOT / "project_tests").resolve()
+        assert project.src_paths == [Path("./src1"), Path("src2")]
+        assert project.test_files == [
+            Path("project_tests/*.py"),
+            Path("./requirements1.txt"),
+            Path("./requirements2.txt"),
+            Path("./resources1/*"),
+            Path("resources2/*"),
+        ]
 
     def test_from_file_invalid_json(self):
         with pytest.raises(pytest.UsageError) as e:
             ProjectConfig.from_file(self.ROOT / "project_invalid_json.cfg")
         assert "Invalid json" in str(e)
 
-    @pytest.mark.parametrize("key", ['requirements_paths', 'resource_paths', 'src_paths'])
-    def test_from_file_no_such_dir_or_file(self, key):
-        with pytest.raises(pytest.UsageError) as e:
-            ProjectConfig.from_file((self.ROOT / f"project_{key}_no_such_dir.cfg"))
-        assert "is not a path" in str(e)
+    @pytest.mark.parametrize("key", ['src_paths', 'test_files'])
+    def test_from_file_no_such_dir_or_file(self, chdir, key):
+        chdir.chdir(self.ROOT)
+        with pytest.raises(Exception) as e:
+            project_config = ProjectConfig.from_file((self.ROOT / f"project_{key}_no_such_dir.cfg"))
+            Bundle.create(self.ROOT, project_config)
+        if isinstance(e.value, pytest.UsageError):
+            assert "is not a path" in str(e)
+        elif isinstance(e.value, ValueError):
+            assert "did not match" in str(e)
+        else:
+            raise e.value
 
-    def test_from_file_no_such_tests_path(self):
-        with pytest.raises(pytest.UsageError) as e:
-            ProjectConfig.from_file((self.ROOT / "project_tests_path_no_such_file.cfg"))
-        assert "does not exist" in str(e)
 
 
 class TestRemoteHostConfig:

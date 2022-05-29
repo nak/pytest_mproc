@@ -22,6 +22,7 @@ from typing import (
 )
 
 from pytest_mproc import user_output
+from pytest_mproc.fixtures import Node, Global
 
 SUCCESS = 0
 
@@ -85,6 +86,8 @@ class SSHClient:
                 command = f"{key}=\"{value}\" {command}"
         if user_output.verbose:
             env["PTMPROC_VERBOSE"] = '1'
+        env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
+        env['PTMPROC_GLOBAL_MGR_PORT'] = str(Global.Manager.PORT)
         if cwd is not None:
             command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
         return await asyncio.subprocess.create_subprocess_exec(
@@ -259,6 +262,7 @@ class SSHClient:
                                        timeout: Optional[float] = None,
                                        cwd: Optional[Path] = None,
                                        stdin: Optional[Union[TextIO, int]] = None,
+                                       env: Optional[Dict[str, str]] = None,
                                        success_code: Optional[Callable[[int], bool]] = lambda x: x == 0)\
             -> AsyncIterator[str]:
         """
@@ -298,7 +302,8 @@ class SSHClient:
         proc = await self.launch_remote_command(command, *args,
                                                 stdin=stdin,
                                                 stdout=asyncio.subprocess.PIPE,
-                                                stderr=asyncio.subprocess.STDOUT, cwd=cwd)
+                                                stderr=asyncio.subprocess.STDOUT, cwd=cwd,
+                                                env=env or os.environ)
         buffer_stdout = ""
         time_left = timeout or 0.0
         while time_left > 0.0:

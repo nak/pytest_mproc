@@ -321,7 +321,7 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     config.option.ptmproc_config.server_port = server_port
     config.option.ptmproc_config.server_host = server_host
     local_proj_file = Path("./ptmproc_project.cfg")
-    project_config = getattr(config.option, "project_structure_path") or \
+    project_config = getattr(config.option, "project_structure_path", None) or \
         (local_proj_file if local_proj_file.exists() else None)
     if is_server:
         remote_clients = config.option.mproc_remote_clients
@@ -518,6 +518,10 @@ def pytest_runtestloop(session):
         session.config.option.worker.test_loop(session)
     elif session.config.ptmproc_runtime.coordinator:
         session.config.ptmproc_runtime.coordinator.join()
+    else:
+        from pytest_mproc.fixtures import Node, Global
+        Node.Manager.shutdown()
+        Global.Manager.shutdown()
     return True
 
 

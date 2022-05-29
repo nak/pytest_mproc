@@ -469,6 +469,17 @@ Each worker host will:
 If --cores were specified as 4, then each worker host would launch with 4 parallel worker threads, unless
 the https endpoint provided a "cores" option with a different value as an override.
 
+Configuration
+-------------
+
+Global and node scoped fixtures are maintained through a multirprocessing manager, and require assignemnt of a
+port.  Normally, the main process will find a free port (random selection) to use.  This behavior can be
+overridden by setting *PTMPROC_NODE_MGR_PORT* and *PTMPROC_GLOBALMGR_PORT* envorionment variables to specific
+port integger values.
+
+Setting *PTMPROC_VERBSE* to '1' will spit out a lot of information about whay steps *pytest_mproc* is taking
+to execute.
+
 Logs and Artifacts
 ------------------
 

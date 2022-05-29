@@ -8,7 +8,8 @@ from multiprocessing import current_process
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
 from pytest_mproc.user_output import debug_print
-from pytest_mproc import plugin
+from pytest_mproc import plugin, find_free_port
+
 assert plugin  # import takes care of some things on import, but not used otherwise; here to make flake8 happy
 
 
@@ -64,13 +65,13 @@ class Node:
 
     class Manager(FixtureManager):
 
+        PORT = int(os.environ.get('PTMPROC_NODE_MGR_PORT', find_free_port()))
+        _singleton = None
+
         def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
             super().__init__(("127.0.0.1", port))
             if not as_main:
                 debug_print(f"Connected [{name}]")
-
-        PORT = int(os.environ.get('PTMPROC_BASE_PORT', 7038))
-        _singleton = None
 
         @classmethod
         def singleton(cls) -> "Node.Manager":
@@ -105,7 +106,7 @@ class Global:
 
     class Manager(FixtureManager):
 
-        PORT = Node.Manager.PORT + 1
+        PORT = int(os.environ.get('PTMPROC_GLOBAL_MGR_PORT', find_free_port()))
 
         _singleton = None
 
@@ -195,8 +196,9 @@ def node_fixture(**kwargs):
         @functools.wraps(func)
         def _wrapper(*args, **kwargs):
             nonlocal value
+            func_name = func.__name__
             # noinspection PyUnresolvedReferences
-            value = value or node_mgr.get_fixture(func.name).value()
+            value = value or node_mgr.get_fixture(func_name).value()
             if type(value) == FixtureManager.NoneValue:
                 v = func(*args, **kwargs)
                 if inspect.isgenerator(v):
@@ -207,7 +209,7 @@ def node_fixture(**kwargs):
                 else:
                     value = v
                 # noinspection PyUnresolvedReferences
-                node_mgr.put_fixture(func.name, value)
+                node_mgr.put_fixture(func_name, value)
             return value
 
         return pytest.fixture(scope='session', **kwargs)(_wrapper)

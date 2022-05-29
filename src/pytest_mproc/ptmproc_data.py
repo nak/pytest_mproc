@@ -38,13 +38,16 @@ class ProjectConfig:
                         f"prepare script {data['prepare_script']} either does not exist or is not executable")
                 if TEST_FILES not in data:
                     raise pytest.UsageError(f"'{TEST_FILES}' is not in project config '{path}'")
+                if type(data[TEST_FILES]) != list:
+                    raise pytest.UsageError(f"{TEST_FILES} in project config '{path}' is not a list of paths")
                 if any([type(f) != str for f in data[TEST_FILES]]):
                     raise pytest.UsageError(f"'test_path' must be a single string path in '{path}'")
                 if SRC_PATHS in data and not isinstance(data[SRC_PATHS], Iterable):
                     raise pytest.UsageError(f"'{SRC_PATHS}' in project config '{path}' is not a list of string paths")
                 for p in data[SRC_PATHS]:
                     if not (path.parent / p).exists():
-                        raise pytest.UsageError(f"source path {p} in project config is not a path")
+                        raise pytest.UsageError(f"source path '{p}' relative to project config "
+                                                f"{str(path)} is not a path")
                 return ProjectConfig(
                     project_root=path.parent,
                     test_files=[Path(p) for p in data[TEST_FILES]],
@@ -135,7 +138,6 @@ class RemoteHostConfig:
             elif value.startswith('file://'):
                 async with async_open(value[7:], "r") as afp:
                     async for line in afp:
-                        line = await line
                         if line.startswith('#') or not line.strip():
                             continue
                         json_data = json.loads(line.strip())

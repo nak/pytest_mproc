@@ -91,7 +91,6 @@ class RemoteExecutionThread:
             result_q: Queue,
             timeout: Optional[float] = None,
             deploy_timeout: Optional[float] = None,
-            stdout=None, stderr=None,
             auth_key: Optional[bytes] = None,
         ):
         self._args = (server, server_port, finish_sem, timeout, deploy_timeout,
@@ -154,6 +153,7 @@ class RemoteExecutionThread:
                     username=os.environ.get('SSH_USERNAME'),
                 )
                 procs = asyncio.get_event_loop().run_until_complete(task)
+                result_q.join()
                 result_q.put(AllClientsCompleted(list(procs.keys())))
         except Exception as e:
             import traceback
@@ -205,7 +205,7 @@ class OrchestrationManager(FixtureManager):
         OrchestrationManager.register("completed", self._completed)
         OrchestrationManager.register("finalize", self._finalize)
         OrchestrationManager.register("JoinableQueue", JoinableQueue,
-                                      exposed=["put", "get", "task_done", "join", "close"])
+                                      exposed=["put", "get", "task_done", "join", "close", "get_nowait"])
         OrchestrationManager.register("get_test_queue", self._get_test_queue)
         OrchestrationManager.register("get_results_queue", self._get_results_queue)
         super().start()
@@ -296,16 +296,18 @@ class Orchestrator:
             self._remote_exec_thread = RemoteExecutionThread(remote_hosts_config=remote_clients_config,
                                                              remote_sys_executable=remote_sys_executable,
                                                              project_config=project_config)
-            SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "task_done", "join", "close"])
+            SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "get_nowait",
+                                                                          "task_done", "join", "close"])
             self._queue_manager = SyncManager(authkey=current_process().authkey)
             self._queue_manager.start()
             self._test_q = JoinableQueue()
             self._result_q = JoinableQueue()
             self._remote_exec_thread.start_workers(server=host, server_port=port, finish_sem=self._finish_sem,
                                                    deploy_timeout=deploy_timeout, auth_key=current_process().authkey,
-                                                   result_q=self._result_q , stdout=sys.stdout, stderr=sys.stderr) #####
+                                                   result_q=self._result_q) #####
         else:
-            SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "task_done", "join", "close"])
+            SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "get_nowait",
+                                                                          "task_done", "join", "close"])
             self._queue_manager = SyncManager(authkey=current_process().authkey)
             self._queue_manager.start()
             # noinspection PyUnresolvedReferences
@@ -439,7 +441,7 @@ class Orchestrator:
             while result_batch is not None:
                 if isinstance(result_batch, AllClientsCompleted):
                     self._test_q.close()
-                    self._result_q.put(None)
+                    break
                 elif isinstance(result_batch, ClientDied):
                     key = f"{result_batch.host}-{result_batch.pid}"
                     if result_batch.errored:
@@ -495,6 +497,22 @@ class Orchestrator:
                     else:
                         self._process_worker_message(hook,  result)
                 result_batch = self._result_q.get()
+            try:
+                result_batch = self._result_q.get_nowait()
+            except Empty:
+                result_batch = None
+            while result_batch:
+                if isinstance(result_batch, list):
+                    for result in result_batch:
+                        test_count += 1
+                        if isinstance(result, ResultException):
+                            hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
+                        else:
+                            self._process_worker_message(hook,  result)
+                try:
+                    result_batch = self._result_q.get_nowait()
+                except Empty:
+                    result_batch = None
         finally:
             self._result_q.close()
 

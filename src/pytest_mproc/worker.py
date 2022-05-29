@@ -191,12 +191,15 @@ class WorkerSession:
         :param executable: which executable to run under
         :return: Process created for new worker
         """
+        from pytest_mproc.fixtures import Node, Global
         import binascii
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
         env["AUTH_TOKEN_STDIN"] = "1"
         if user_output.verbose:
             env['PTMPROC_VERBOSE'] = '1'
+        env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
+        env['PTMPROC_GLOBAL_MGR_PORT'] = str(Global.Manager.PORT)
         stdout = sys.stdout
         stderr = sys.stderr
         executable = executable or sys.executable
@@ -293,12 +296,12 @@ def pytest_cmdline_main(config):
 
 def main():
     from pytest_mproc import plugin  # ensures auth_key is set
+    from pytest_mproc.fixtures import Node
     # noinspection PyUnresolvedReferences
     from pytest_mproc.worker import WorkerSession  # to make Python happy
     assert plugin  # to prevent flake8 unused import
     # from pytest_mproc.worker import WorkerSession
     from pytest_mproc.main import OrchestrationManager
-    from pytest_mproc.fixtures import Node
     host, port = sys.argv[1:3]
     port = int(port)
     mgr = OrchestrationManager(addr=(host, port))

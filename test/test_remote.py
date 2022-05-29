@@ -1,9 +1,11 @@
 import json
 import logging
+import multiprocessing
 import os
 import shutil
 import socket
 import sys
+import time
 from multiprocessing.process import current_process
 
 import pytest
@@ -12,17 +14,12 @@ from asyncio import Semaphore
 from pathlib import Path
 
 from pytest_mproc import find_free_port
-from pytest_mproc.main import RemoteExecutionThread
+from pytest_mproc.fixtures import Global
+from pytest_mproc.main import RemoteExecutionThread, OrchestrationManager
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 
-try:
-    from pytest_mproc.remote.bundle import Bundle
-    from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
-
-    have_shiv = True
-except ImportError:
-    # probably client and don't have shiv
-    have_shiv = False
+from pytest_mproc.remote.bundle import Bundle
+from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
 
 _base_dir = Path(__file__).parent.parent
 logging.basicConfig(level=logging.INFO)
@@ -46,32 +43,23 @@ def bundle(tmpdir_factory):
     with Bundle.create(
             root_dir=Path(str(tmpdir)),
             project_config=ProjectConfig(
-                src_paths=[_base_dir / "src", _base_dir / "testsrc"],
-                resource_paths=[],
-                requirements_paths=[],
-                pure_requirements_paths=[_base_dir / "requirements.txt"],
-                tests_path=_base_dir / "test",
-            )
+                project_root=Path(__file__).parent.parent,
+                src_paths=[Path("src"), Path("testsrc")],
+                test_files=[Path("test/*.py")],
+            ),
+        system_executable=sys.executable
     ) as bundle:
         bundle.add_file(_base_dir / "test" / "run_test.sh", "scripts/run_test.sh")
         yield bundle
 
 
-@pytest.mark.skipif(not have_shiv, reason="shiv not present for testing")
-def test_create_bundle(bundle):
-    proc = subprocess.run([bundle.shiv_path, "-m", "pytest", ".", "-k", "alg1"], cwd=Path(__file__).parent,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT)
-    assert proc.returncode == 0, proc.stdout
-
-
 @pytest.mark.skipif(not ssh_pswdless, reason="No permission to ssh to localhost without password input")
-@pytest.mark.skipif(not have_shiv, reason="shiv not present for testing")
 @pytest.mark.asyncio
 async def test_execute_bundle(bundle):
     lines = []
     try:
-        async for line in bundle.monitor_remote_execution("localhost", ".", "-k", "alg1", timeout=100):
+        async for line in bundle.monitor_remote_execution("localhost", ".", "-k", "alg1", timeout=100,
+                                                          env=dict(os.environ)):
             lines.append(line)
             print(line)
     except CommandExecutionFailure:
@@ -88,7 +76,12 @@ async def test_execute_remote_multi(bundle):
     ]
     sys.argv.extend(['--cores', '2'])
     sem = Semaphore(0)
-    procs = await bundle.execute_remote_multi(hosts, sem, ".", "-k", "alg3", deploy_timeout=100, timeout=200)
+    environ = {}
+    environ['PTMPROC_NODE_MGR_PORT'] = str(find_free_port())
+    environ['PTMPROC_GLOBAL_MGR_PORT'] = str(find_free_port())
+    procs = await bundle.execute_remote_multi(hosts, sem, ".", "-k", "alg3", "--cores", "2",
+                                              deploy_timeout=100, timeout=200,
+                                              env=environ, auth_key=multiprocessing.current_process().authkey)
     for host, proc in procs.items():
         assert host == "localhost"
         assert proc.returncode != 0  # alg3 delibrately coded to fail
@@ -124,66 +117,67 @@ def test_remote_execution_cli(tmp_path):
         sys.path.insert(0, str((Path(__file__).parent / "src").absolute()))
         env = os.environ.copy()
         env['PYTHONPATH'] = "./src"
-        completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=120000, env=env,
+        completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=120, env=env,
                                    cwd=str(tmp_path))
         assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from {str(Path(__file__).parent.absolute())}"
 
 
-def test_remote_execution_thread(tmp_path):
+def test_remote_execution_thread(tmp_path, chdir):
+    chdir.chdir(Path(__file__).parent.parent)
     root = Path(__file__).parent.parent
-    project_config = ProjectConfig(requirements_paths=[root / "test" / "resources" / "requirements1.txt"],
-                                   src_paths=[root / "src", root / "testsrc"],
-                                   tests_path=root / "test",
-                                   )
+    project_config = ProjectConfig(
+        src_paths=[Path("src"), Path("testsrc"), Path("resources") / "requirements.txt"],
+        test_files=[Path("test/*.py")],
+        project_root=root
+    )
     args = list(sys.argv)
-    for index, arg in enumerate(args):
-        if arg.endswith(".py"):
-            sys.argv.remove(arg)
-        elif arg == "-k" in arg:
-            sys.argv.remove(arg)
-            sys.argv.remove(args[index + 1])
-    sys.argv.extend(["test_mproc_runs.py", "-k", "alg2"])
+    sys.argv = ["test/test_mproc_runs.py", "-k", "alg2", "--cores", "4"]
     ipname = socket.gethostbyname(socket.gethostname())
+    port = find_free_port()
     command = [
-        shutil.which("python3"), "-m", "pytest", "--as-server", f"{ipname}:43210",
-        "--cores", "2", "-k", "alg2",
+        shutil.which("python3"), "-m", "pytest", "--as-server", f"{ipname}:{port}",
     ]
+    command.extend(sys.argv)
     env = os.environ.copy()
     import binascii
     env['AUTH_TOKEN_STDIN'] = '1'
-    main_proc = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr, cwd=str(Path(__file__).parent),
+    env['PYTHONPATH'] = "src"
+    env['PTMPROC_NODE_MGR_PORT'] = str(find_free_port())
+    env['PTMPROC_GLOBAL_MGR_PORT'] = str(Global.Manager.PORT)
+    main_proc = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr, cwd=str(Path(__file__).parent.parent),
                                  env=env, stdin=subprocess.PIPE)
     main_proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
     main_proc.stdin.close()
-    print(f">>>>>>>>>>>>> LAUNCHED {' '.join(command)} {main_proc.returncode}")
     client_hosts = [
         RemoteHostConfig(ipname),
         RemoteHostConfig(ipname),
         RemoteHostConfig(ipname),
     ]
-    tracker = {}
     thread = RemoteExecutionThread(project_config=project_config,
                                    remote_sys_executable=shutil.which("python3"),
                                    remote_hosts_config=client_hosts,
-                                   tracker=tracker
                                    )
     try:
         sem = Semaphore(0)
-        thread.star_workerst(
-            server=socket.gethostbyname(socket.gethostname()),
-            server_port=43210,
+        time.sleep(3)
+        mgr = OrchestrationManager((ipname, port))
+        mgr.connect()
+        results_q = mgr.get_results_queue()
+        thread.start_workers(
+            server=ipname,
+            server_port=port,
             auth_key=current_process().authkey,
             finish_sem=sem,
-            stderr=sys.stderr,
+            result_q=results_q,
         )
         sem.release()
         sem.release()
         sem.release()
         thread.join(timeout=3*240)
-        assert len(tracker[ipname]) == 3, f"Unexpected tracker values: {tracker}"
     finally:
+        sys.argv = args
         try:
-            assert main_proc.wait(timeout=10) == 0
+            assert main_proc.wait(timeout=5) == 0
         except (subprocess.TimeoutExpired, TimeoutError):
             main_proc.terminate()
             raise Exception("Main process failed to terminate")

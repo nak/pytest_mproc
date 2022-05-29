@@ -38,6 +38,7 @@ class TestGrouped:
 
     proc_id = None
 
+    @pytest.mark.skip(reason="not implemented yet")
     def test2(self):
         assert TestGrouped.proc_id == os.getpid()
 
@@ -46,8 +47,8 @@ class TestGrouped:
         TestGrouped.proc_id = os.getpid()
 
 
-def test_some_alg1():  # global_fix, queue_fixture):
-    # assert global_fix == 42
+def test_some_alg1(global_fix, queue_fixture):
+    assert global_fix == 42
     Something().some_alg1()
 
 

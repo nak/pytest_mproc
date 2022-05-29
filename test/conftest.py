@@ -1,5 +1,7 @@
 #import explicitly, as entrypoint not present during test  (only after setup.py and dist file created)
 import os
+from pathlib import Path
+
 import pytest_mproc.fixtures
 
 if os.path.exists("../src/pytest_mproc"):
@@ -67,3 +69,16 @@ def node_level_fixture(mp_tmp_dir_factory: TmpDirFactory):
 def pytest_sessionfinish(session):
     if _node_tmpdir and not hasattr(session.config.option, "mproc_worker"):
        assert not os.path.exists(_node_tmpdir), f"Failed to cleanup temp dirs"
+
+
+@pytest.fixture()
+def chdir():
+    cwd = os.getcwd()
+
+    class ChDir:
+
+        def chdir(self, path: Path):
+            os.chdir(path)
+
+    yield ChDir()
+    os.chdir(cwd)
