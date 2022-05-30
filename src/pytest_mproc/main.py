@@ -12,7 +12,7 @@ import time
 from contextlib import suppress
 # noinspection PyUnresolvedReferences
 from multiprocessing import current_process
-from asyncio import Semaphore
+from multiprocessing import Semaphore
 from pathlib import Path
 
 from multiprocessing import JoinableQueue, Process, Queue
@@ -161,8 +161,11 @@ class RemoteExecutionThread:
                     username=os.environ.get('SSH_USERNAME'),
                 )
                 procs = asyncio.get_event_loop().run_until_complete(task)
-                result_q.join()
-                result_q.put(AllClientsCompleted(list(procs.keys())))
+                with suppress(FileNotFoundError, ConnectionError):
+                    # normally, result_q is closed, unless there is an exception that prevents any tests from
+                    # running straight off
+                    result_q.join()
+                    result_q.put(AllClientsCompleted(list(procs.keys())))
         except Exception as e:
             import traceback
             msg = f"!!! Exception in creating or executing bundle {e}:\n {traceback.format_exc()}"
@@ -171,7 +174,6 @@ class RemoteExecutionThread:
             q.put(e)
 
     def join(self, timeout: Optional[float] = None):
-        self._finish_sem.release()
         result = self._proc.join(timeout=timeout)  # does not raise Exception on timeout
         if not self._q.empty():
             e = self._q.get()
@@ -301,6 +303,7 @@ class Orchestrator:
             )
         SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "get_nowait",
                                                                       "task_done", "join", "close"])
+        #SyncManager.register("Semaphore", exposed=["acquire", "release"])
         self._queue_manager = SyncManager(authkey=current_process().authkey)
         self._queue_manager.start()
         # noinspection PyUnresolvedReferences
@@ -606,6 +609,7 @@ class Orchestrator:
             sys.stdout.write("\r\n")
             self._output_summary(rusage.time_span, rusage.user_cpu, rusage.system_cpu, rusage.memory_consumed)
             # noinspection PyProtectedMember
+            self._finish_sem.release()
             for client in self._mp_manager._clients:
                 client.join()
             self._queue_manager.shutdown()
