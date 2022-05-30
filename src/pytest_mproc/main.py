@@ -4,12 +4,10 @@ import os
 from queue import Empty
 
 import resource
-import signal
 import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from contextlib import suppress
 # noinspection PyUnresolvedReferences
@@ -59,8 +57,11 @@ def _localhost():
     try:
         return socket.gethostbyname(socket.gethostname())
     except Exception:
-        print(">>> Cannot get ip address of host.  Return 127.0.0.1 (localhost)")
-        return "127.0.0.1"
+        try:
+            return socket.gethostname()
+        except Exception:
+            print(">>> Cannot get ip address of host.  Return 127.0.0.1 (localhost)")
+            return "127.0.0.1"
 
 
 # Create proxies for Queue types to be accessible from remote clients
@@ -80,7 +81,8 @@ class RemoteExecutionThread:
         self._project_config = project_config
         self._remote_hosts_config = remote_hosts_config
         self._remote_sys_executable = remote_sys_executable
-        self._q = Queue()
+        self._exc_manager = multiprocessing.Manager()
+        self._q = self._exc_manager.Queue()
 #       self._tracker = tracker
 
     # noinspection PyAttributeOutsideInit
@@ -93,13 +95,17 @@ class RemoteExecutionThread:
             deploy_timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
         ):
-        self._args = (server, server_port, finish_sem, timeout, deploy_timeout,
-                      auth_key, result_q, user_output.verbose)
-        self._proc = multiprocessing.Process(target=self._start, args=self._args)
+        args = (server, server_port, self._project_config, self._remote_hosts_config,
+                self._remote_sys_executable, self._q,
+                finish_sem, timeout, deploy_timeout,
+                auth_key, result_q, user_output.verbose
+        )
+        self._proc = multiprocessing.Process(target=RemoteExecutionThread._start, args=args)
         self._finish_sem = finish_sem
         self._proc.start()
 
-    def _determine_cli_args(self, server: str, server_port: int):
+    @staticmethod
+    def _determine_cli_args(server: str, server_port: int, remote_hosts_config: RemoteHostConfig):
         args = list(sys.argv[1:])  # copy of
         # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
         for arg in sys.argv[1:]:
@@ -108,7 +114,7 @@ class RemoteExecutionThread:
                 continue
             if arg == "--cores":
                 have_core_count = False
-                for cfg in self._remote_hosts_config:
+                for cfg in remote_hosts_config:
                     if "cores" in cfg.arguments:
                         have_core_count = True
                         break
@@ -132,19 +138,21 @@ class RemoteExecutionThread:
             args += ["--cores", "1"]
         return args
 
-    def _start(self, server: str, server_port: int,
+    @classmethod
+    def _start(cls, server: str, server_port: int, project_config: ProjectConfig, remote_hosts_config: RemoteHostConfig,
+               remote_sys_executable: str, q: Queue,
                finish_sem: Semaphore, timeout: Optional[float], deploy_timeout: Optional[float],
                auth_key: bytes, result_q: Queue, verbose: bool):
         user_output.set_verbose(verbose)
         try:
             with tempfile.TemporaryDirectory() as tmpdir,\
                     Bundle.create(root_dir=Path(tmpdir),
-                                  project_config=self._project_config,
-                                  system_executable=self._remote_sys_executable) as bundle:
-                args = self._determine_cli_args(server, server_port)
+                                  project_config=project_config,
+                                  system_executable=remote_sys_executable) as bundle:
+                args = cls._determine_cli_args(server, server_port, remote_hosts_config)
                 user_output.set_verbose(bool(os.environ.get('PTMPROC_VERBOSE')))
                 task = bundle.execute_remote_multi(
-                    self._remote_hosts_config,
+                    remote_hosts_config,
                     finish_sem,
                     *args,
                     auth_key=auth_key,
@@ -160,7 +168,7 @@ class RemoteExecutionThread:
             msg = f"!!! Exception in creating or executing bundle {e}:\n {traceback.format_exc()}"
             os.write(sys.stderr.fileno(), msg.encode('utf-8'))
             result_q.put(FatalError(msg))
-            self._q.put(e)
+            q.put(e)
 
     def join(self, timeout: Optional[float] = None):
         self._finish_sem.release()
@@ -286,39 +294,33 @@ class Orchestrator:
         self._exit_results: List[ResultExit] = []
         self._session_start_time = time.time()
         self._remote_processes: Dict[str, List[asyncio.subprocess.Process]] = {}
-        self._finish_sem = Semaphore(0)
         if remote_clients_config and project_config is None:
             raise pytest.UsageError(
                 "You must supply both a project configuration and a remotes client configuration together when "
                 f"requesting automated distributed test execution"
             )
+        SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "get_nowait",
+                                                                      "task_done", "join", "close"])
+        self._queue_manager = SyncManager(authkey=current_process().authkey)
+        self._queue_manager.start()
+        # noinspection PyUnresolvedReferences
+        self._test_q: JoinableQueue = self._queue_manager.JoinableQueue()
+        self._result_q: JoinableQueue = self._queue_manager.JoinableQueue()
+        # noinspection PyUnresolvedReferences
+        self._mp_manager = OrchestrationManager(addr=(host, port))
+        self._mp_manager.start(test_q=self._test_q, results_q=self._result_q)
+        self._finish_sem = self._queue_manager.Semaphore(0)
         if remote_clients_config:
             self._remote_exec_thread = RemoteExecutionThread(remote_hosts_config=remote_clients_config,
                                                              remote_sys_executable=remote_sys_executable,
                                                              project_config=project_config)
-            SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "get_nowait",
-                                                                          "task_done", "join", "close"])
-            self._queue_manager = SyncManager(authkey=current_process().authkey)
-            self._queue_manager.start()
-            self._test_q = JoinableQueue()
-            self._result_q = JoinableQueue()
             self._remote_exec_thread.start_workers(server=host, server_port=port, finish_sem=self._finish_sem,
                                                    deploy_timeout=deploy_timeout, auth_key=current_process().authkey,
-                                                   result_q=self._result_q) #####
+                                                   result_q=self._result_q)
         else:
-            SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "get_nowait",
-                                                                          "task_done", "join", "close"])
-            self._queue_manager = SyncManager(authkey=current_process().authkey)
-            self._queue_manager.start()
-            # noinspection PyUnresolvedReferences
-            self._test_q: JoinableQueue = self._queue_manager.JoinableQueue()
-            # noinspection PyUnresolvedReferences
-            self._result_q: JoinableQueue = self._queue_manager.JoinableQueue()
             self._remote_exec_thread = None
         self._reporter = BasicReporter()
         self._exit_q = JoinableQueue()
-        self._mp_manager = OrchestrationManager(addr=(host, port))
-        self._mp_manager.start(test_q=self._test_q, results_q=self._result_q)
         self._is_serving_remotes = remote_clients_config is not None
         self._pending: Dict[str, TestState] = {}
 

@@ -32,7 +32,7 @@ from pytest_mproc.user_output import debug_print, always_print
 from pytest_mproc.remote import env
 
 _root = os.path.dirname(__file__)
-FIVE_MINUTES = 5*60
+FIFTEEN_MINUTES = 15*60
 artifacts_root = os.environ.get('PTMPROC_HOST_ARTIFACTS_DIR', './artifacts')
 lock = RLock()
 
@@ -155,7 +155,7 @@ class Bundle:
         :return: created Bundle
         """
         try:
-            relative_run_dir = Path(os.getcwd()).relative_to(project_config.project_root)
+            relative_run_dir = Path(os.getcwd()).relative_to(project_config.project_root.absolute())
         except ValueError:
             raise ValueError("You must execute pytest in the directory containing the project config, "
                              f"{str(project_config.project_root)} or a subdirectory thereof")
@@ -237,15 +237,16 @@ class Bundle:
                 raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
             if self._requirements_path:
                 debug_print(f">>> Installing requirements on remote worker {ssh_client.host}...")
-                assert not (remote_root / "site-packages" / "dataclasses.py").exists()
                 await ssh_client.install(
                     remote_py_executable=self._remote_executable,
                     remote_root=remote_root,
                     site_packages='site-packages',
                     requirements_path=f'run{os.sep}requirements.txt',
-                    cwd=remote_root
+                    cwd=remote_root,
+                    stdout=stdout,
+                    stderr=sys.stderr
                 )
-            await ssh_client.mkdir(self._root_dir / "run" / self._relative_run_path, exists_ok=True)
+            await ssh_client.mkdir(remote_root / "run" / self._relative_run_path, exists_ok=True)
         except Exception as e:
             always_print(f"!!! Failed to deploy to {ssh_client.host}: {e}")
             raise
@@ -257,7 +258,7 @@ class Bundle:
             *args,
             username: Optional[str] = None,
             password: Optional[str] = None,
-            deploy_timeout: Optional[float] = FIVE_MINUTES,
+            deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
             timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
             env: Optional[Dict[str, str]] = None,
@@ -350,7 +351,7 @@ class Bundle:
                              env: Optional[Dict[str, str]] = None,
                              username: Optional[str] = None,
                              password: Optional[str] = None,
-                             deploy_timeout: Optional[float] = FIVE_MINUTES,
+                             deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
                              timeout: Optional[float] = None,
                              auth_key: Optional[bytes] = None,
                              worker_id: Optional[str] = None,
@@ -479,7 +480,7 @@ class Bundle:
     async def monitor_remote_execution(self, host: str, *args: str,
                                        username: Optional[str] = None,
                                        password: Optional[str] = None,
-                                       deploy_timeout: Optional[float] = FIVE_MINUTES,
+                                       deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
                                        timeout: Optional[float] = None,
                                        remote_root: Optional[Path] = None,
                                        env: Optional[Dict[str, str]] = None,

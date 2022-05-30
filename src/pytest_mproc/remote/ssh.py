@@ -96,7 +96,6 @@ class SSHClient:
             stdout=stdout,
             stderr=stderr,
             stdin=stdin,
-            cwd=cwd,
         )
 
     async def mkdir(self, remote_path: Path, exists_ok=True):
@@ -227,7 +226,9 @@ class SSHClient:
                       remote_root: Path,
                       requirements_path: str,
                       site_packages: Optional[str] = None,
-                      cwd: Optional[Path] = None):
+                      cwd: Optional[Path] = None,
+                      stdout: Optional[Union[int, TextIO]] = None,
+                      stderr: Optional[Union[int, TextIO]] = sys.stderr):
         """
         install Python requirements  on remote client
 
@@ -247,16 +248,15 @@ class SSHClient:
             cmd = f"{remote_py_executable} -m pip install -r {str(remote_root / requirements_path)}"
         proc = await self._remote_execute(
             cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stdout=stdout,
+            stderr=stderr,
             cwd=str(cwd) if cwd is not None else None
         )
         stdout, _ = await proc.communicate()
         assert proc.returncode is not None
         if proc.returncode != 0:
-            os.write(sys.stderr.fileno(), f"Failed to install on remote: {cmd} {stdout}".encode('utf-8'))
-            raise CommandExecutionFailure(f"{cmd} {stdout}",
-                                          proc.returncode)
+            os.write(sys.stderr.fileno(), f"Command {cmd} failed to install on remote".encode('utf-8'))
+            raise CommandExecutionFailure(cmd, proc.returncode)
 
     async def monitor_remote_execution(self, command, *args,
                                        timeout: Optional[float] = None,
@@ -275,6 +275,7 @@ class SSHClient:
         :param success_code: None if not to check return code, otherwise lambda taking return code an returning
            True is success or False otherwise (defaults to 0 being success code)
         :param stdin: stream to use for stdin (as in subprocess.Popen)
+        :param env: optional dict of environment vars to apply
 
         :return: AsyncIterator of string providing line-by-line output from command
         :raises: TimeoutError if command fails to finish in time
@@ -347,7 +348,6 @@ class SSHClient:
             raise SystemError(f"Failed to create tmp dir on remote client: {stdout}\n  {stderr}")
         # noinspection SpellCheckingInspection
         tmpdir = (await proc.stdout.read()).decode('utf-8').strip()
-
         yield Path(tmpdir)
 
         await self.rmdir(Path(tmpdir))
