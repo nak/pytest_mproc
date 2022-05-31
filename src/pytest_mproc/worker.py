@@ -20,19 +20,18 @@ import resource
 from pytest_mproc import resource_utilization, TestError, user_output, get_ip_addr
 from pytest_mproc.data import (
     ClientDied,
-    ResultException,
     ResultExit,
-    ResultTestStatus,
-    ResultType,
     ResourceUtilization,
     TestBatch,
     TestState,
     TestStateEnum,
 )
+from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
 from pytest_mproc.ptmproc_data import (
     PytestMprocConfig,
     PytestMprocWorkerRuntime,
 )
+from pytest_mproc.user_output import debug_print
 from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:
@@ -69,7 +68,7 @@ class WorkerSession:
         self._ip_addr = get_ip_addr()
         self._pid = os.getpid()
 
-    def _put(self, result: Union[TestStateEnum, ResultType], timeout=None):
+    def _put(self, result: Union[TestStateEnum, ResultType, ResultExit], timeout=None):
         """
         Append test result data to queue, flushing buffered results to queue at watermark level for efficiency
 
@@ -79,8 +78,11 @@ class WorkerSession:
         """
         if self._is_remote and isinstance(result, ResultTestStatus):
             os.write(sys.stderr.fileno(), b'.')
-        self._buffered_results.append(result)
-        if isinstance(result, TestStateEnum) \
+        if isinstance(result, ResultExit):
+            self._result_q.put(result)
+        else:
+            self._buffered_results.append(result)
+        if isinstance(result, (TestStateEnum, ResultExit)) \
                 or len(self._buffered_results) >= self._buffer_size \
                 or (time.time() - self._timestamp) > MAX_REPORTING_INTERVAL:
             self._flush(timeout)
@@ -158,6 +160,8 @@ class WorkerSession:
             self._resource_utilization = resource_utilization(time_span=time_span,
                                                               start_rusage=rusage,
                                                               end_rusage=end_usage)
+            with suppress(Exception):
+                self.session_finish()
 
     @pytest.mark.tryfirst
     def pytest_collection_finish(self, session):
@@ -184,14 +188,13 @@ class WorkerSession:
         return session.items
 
     @classmethod
-    def start(cls,  host: str, port: int, executable: str) -> subprocess.Popen:
+    def start(cls, uri: str, executable: str) -> subprocess.Popen:
         """
-        :param host: host of main server
-        :param port: port of main server
+        :param uri: uri of main server
         :param executable: which executable to run under
         :return: Process created for new worker
         """
-        from pytest_mproc.fixtures import Node, Global
+        from pytest_mproc.fixtures import Node
         import binascii
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
@@ -199,11 +202,11 @@ class WorkerSession:
         if user_output.verbose:
             env['PTMPROC_VERBOSE'] = '1'
         env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
-        env['PTMPROC_GLOBAL_MGR_PORT'] = str(Global.Manager.PORT)
         stdout = sys.stdout
         stderr = sys.stderr
         executable = executable or sys.executable
-        proc = subprocess.Popen([executable, '-m', __name__, host, str(port)] + sys.argv[1:],
+        debug_print(f">>> Starting worker with args {sys.argv[1:]}")
+        proc = subprocess.Popen([executable, '-m', __name__, uri] + sys.argv[1:],
                                 env=env,
                                 stdout=stdout, stderr=stderr, stdin=subprocess.PIPE)
         proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
@@ -213,14 +216,14 @@ class WorkerSession:
     @staticmethod
     def run(index: int, is_remote: bool, start_sem: Semaphore, fixture_sem: Semaphore,
             test_q: JoinableQueue, result_q: Queue, sync_sem: Semaphore()) -> None:
-        from pytest_mproc.main import OrchestrationManager
+        from pytest_mproc.orchestration import OrchestrationManager
         sync_sem.release()
         start_sem.acquire()
         worker = WorkerSession(index, is_remote, test_q, result_q)
         worker._fixture_sem = fixture_sem
         args = sys.argv[1:]
-        # remove coverage args, as pytest_cov handles multiprocessing already and will applyt coverage to worker
-        # as a proc that was launched from main thread which itsalef has coverage (otherwise it will attempt
+        # remove coverage args, as pytest_cov handles multiprocessing already and will apply coverage to worker
+        # as a proc that was launched from main thread which itself has coverage (otherwise it will attempt
         # duplicate coverage processing and file conflicts galore)
         args = [arg for arg in args if not arg.startswith("--cov=")]
         config = _prepareconfig(args, plugins=[])
@@ -230,8 +233,7 @@ class WorkerSession:
         # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
         config.pluginmanager.unregister(name="terminal")
         config.pluginmanager.register(worker, "mproc_worker")
-        worker._client = OrchestrationManager(addr=(config.option.ptmproc_config.server_host,
-                                                    config.option.ptmproc_config.server_port))
+        worker._client = OrchestrationManager.create(uri=config.option.ptmproc_config.server_uri, as_client=True)
         workerinput = {'slaveid': "worker-%d" % worker._index,
                        'workerid': "worker-%d" % worker._index,
                        'cov_master_host': socket.gethostname(),
@@ -262,19 +264,18 @@ class WorkerSession:
         self._put(ResultTestStatus(report))
 
     # noinspection PyUnusedLocal
-    @pytest.hookimpl(tryfirst=True)
-    def pysessionfinish(self, exitstatus):
+    def session_finish(self):
         """
         output failure information and final exit status back to coordinator
 
         :param exitstatus: exit status of the test suite run
         """
-        self._flush()
         self._put(ResultExit(self._index,
                              self._count,
                              0,
                              self._last_execution_time - self._session_start_time,
                              self._resource_utilization))
+        self._flush()
         self.set_singleton(None)
         return True
 
@@ -301,11 +302,9 @@ def main():
     from pytest_mproc.worker import WorkerSession  # to make Python happy
     assert plugin  # to prevent flake8 unused import
     # from pytest_mproc.worker import WorkerSession
-    from pytest_mproc.main import OrchestrationManager
-    host, port = sys.argv[1:3]
-    port = int(port)
-    mgr = OrchestrationManager(addr=(host, port))
-    mgr.connect()
+    from pytest_mproc.orchestration import OrchestrationManager
+    uri = sys.argv[1]
+    mgr = OrchestrationManager.create(uri=uri, as_client=True)
     # noinspection PyUnresolvedReferences
     mgr.register_worker((get_ip_addr(), os.getpid()))
     # noinspection PyUnresolvedReferences
@@ -314,7 +313,7 @@ def main():
     result_q = mgr.get_results_queue()
 
     worker = WorkerSession(index=os.getpid(),
-                           is_remote='--as-client' in sys.argv,
+                           is_remote='--as-worker' in sys.argv,
                            test_q=test_q,
                            result_q=result_q,
                            )
@@ -322,9 +321,12 @@ def main():
     errored = False
     msg = None
     assert WorkerSession.singleton() is not None
+    status = None
     # noinspection PyBroadException
     try:
-        pytest.main(sys.argv[3:])
+        status = pytest.main(sys.argv[3:])
+        if isinstance(status, pytest.ExitCode):
+            status = status.value
     except Exception as e:
         errored = True
         msg = f"Worker {get_ip_addr()}-{os.getpid()} died with exception {e}\n {traceback.format_exc()}"

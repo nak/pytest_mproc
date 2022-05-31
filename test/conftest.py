@@ -26,7 +26,7 @@ def get_ip_addr():
         return None
 
 
-@pytest_mproc.fixtures.global_fixture(host=get_ip_addr())
+@pytest_mproc.fixtures.global_fixture()
 def dummy():
     return [None]
 
@@ -49,7 +49,7 @@ class GlobalV:
     value = 41
 
 
-@pytest_mproc.fixtures.global_fixture(host=get_ip_addr())
+@pytest_mproc.fixtures.global_fixture()
 def global_fix(dummy):
     GlobalV.value += 1
     return GlobalV.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once

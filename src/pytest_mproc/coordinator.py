@@ -35,7 +35,7 @@ class CoordinatorFactory:
             self.sm.start()
         self._mgr = mgr
 
-    def launch(self, host: str, port: int) -> "Coordinator":
+    def launch(self, uri: str) -> "Coordinator":
         if not self._is_local:
             # noinspection PyUnresolvedReferences
             coordinator = self.sm.Coordinator(self._num_processes,
@@ -46,7 +46,7 @@ class CoordinatorFactory:
         # noinspection PyUnresolvedReferences
         self._mgr.register_client(coordinator)
         executable = os.environ.get('PTMPROC_EXECUTABLE', sys.executable)
-        coordinator.start(host, port, executable)
+        coordinator.start(uri, executable)
         return coordinator
 
 
@@ -71,7 +71,7 @@ class Coordinator:
     def is_local(self):
         return self._is_local
 
-    def start(self, host: str, port: int, executable: str) -> None:
+    def start(self, uri: str, executable: str) -> None:
         """
         Start all worker processes
 
@@ -79,7 +79,7 @@ class Coordinator:
         """
         from pytest_mproc.worker import WorkerSession
         for index in range(self._num_processes):
-            proc = WorkerSession.start(host, port, executable)
+            proc = WorkerSession.start(uri, executable)
             self._worker_procs.append(proc)
         time.sleep(3)
         failed = 0

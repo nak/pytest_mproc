@@ -334,23 +334,33 @@ Advanced: Testing on a Distributed Set of Machines
 
 The concept is that one node will act as the main node, collecting and reporting test status, while all others
 will act as clients -- executing tests and reporting status back the the main node.  To start the main node,
-use the "--as-server" command line argument, specifying the port the server will listen on:
+use the "--as-main" command line argument, specifying the port the server will listen on:
 
 .. code-block:: shell
 
-   % pytest --num_cores <N> --as-server <port> ...
+   % pytest --num_cores <N> --as-main <protocol><host>:<port> ...
 
-When *--as-server* argument is presnt, N may be zero, indicating
-the process will wait indefinitely for workers on other nodes to be created to do the testing.  In
-this case, not tests will be executed on the main node.  If N > 0, then test execution will start immediately
-on the main node following test setup;  as workers on other nodes come on line, they will pull tests from those
-remaining the queue and execute in parallel to the main.
+When *--as-main* argument is present, N represents the number of cores to use on each worker when
+automated distributed testing is invoked, unless overridden
+by remote-config data specific to a worker.  This sets up the node as main, responsible for orchestrating test
+execution across multiple workers.  If no other options are present, workers must be started manually.  See
+section on automated distributed testing below for a less manual option.
+
+The argument to as-main can take several forms (only one of which is useful for manual deployment of workers.  The
+*multiprocessing* package uses a server for handling remote procedure calls, and this option specifies how
+to start or connect to that server The possible options are:
+
+* *[local://]<host>:<port>* -- host should be an ip address associated with local host and port is an available port
+* *[remote://]<host>:<port>* -- the host is manually (possibly continually) running on a remote machine given by the host
+and port of that server
+* *[ssh://][user@]<host>:<port> -- start a host automatically via ssh on a remote machine specified by host and port (with
+optional user specification)
 
 To start the client nodes:
 
 .. code-block:: shell
 
-   % pytest --num_cores <N> --as-client <host>:<port> [--connection-timeout <integer seconds>]
+   % pytest --num_cores <N> --as-worker <host>:<port> [--connection-timeout <integer seconds>]
 
 Here, N must be greater than or equal to 1;  multiple workers can be invoked on a node, with possibly multiple client
 nodes. The client will attempt to connect to the main  node for a period of 30 seconds at which point it gives up and
@@ -370,29 +380,20 @@ Project definition consists of defining a set of properties in a config file in 
 .. code-block:: json
 
    {
-    "requirements_paths": ["/abs/path/tor/requirements1.txt", "./relative/path/to/requirements2.txt"],
-    "pure_requirements_paths": ["/abs/path/tor/pure_requirements1.txt", "./relative/path/to/pure_requirements2.txt"],
     "src_paths": ["./path/to/src1", "./path/to/src2"],
-    "resource_paths": [["/abs/path/to/resources1", "./relative/path/to/bundle/resources1"],
-                       ["./path/to/resources2", "./relative/path/to/bundle/resources2"]],
-    "tests_path": "./path/to/project_tests",
+    "test_files": "./path/to/project_tests/*.pattern",
    }
 
 These have the following meanings for creating the bundle to send to workers:
 
-* *requierments_paths* : list of paths where python requirements are located that list needed dependencies that
-  are to be installed post-deployment to worker (for depenencies that are not pure python, this is required;
-  it is recommended that only "impure" depdnencies be included)
-* *pure_requierments_paths* : list of paths where python requirements are located that list needed dependencies
-  that are only PURE python (no native C/C++ shared libraries in dependency)
 * *src_paths*: list of directories or evein site-package directories to include in the bundle
-* *resource_paths*: list of tuple pairs where the first is a directory containing resourcs to be bundle, and
-  the second the directory, which must be relative to the root where the bundle will be installed
-* *tests_path*: location of where test code is kept, to be bundled as as directory
+* *test_files*: location of where test code is kept, to be bundled as as directory;  this can specify any files
+and are copied to remote hosts using a path relative to the location of the project config file.  These files
+can include requirements.txt files, resources files and of course test code (but really any type of file)
 * *prepare_script*: an optional script that is run before pytest execution on a remote host, to prep the
-  test environment if needed
+  test environment if needed.  The recommendation is to make use of pytest fixtures, however.
 * *finalize_script*: an optional script that is run after pytest execution on a remote host, to tear down the
-  test environment if needed
+  test environment if needed.  The recommendation is to make use of pytest fixtures, however.
 
 Project configurations are specified in a file with the path to that file specified on the command line via
 the *--project_structure* command line option, or if not provided and *project.cfg" file exists in the current
@@ -400,7 +401,7 @@ working directory of test execution, that file will be used.  If you specify a r
 for automated distribute execution, the project conbifuration file is required to tell *pytest_mproc* how
 to bundle the necessary items to send to the remote hosts.
 
-The remote hosts configuration is specified on the command line through the *--remote-client* command line option.
+The remote hosts configuration is specified on the command line through the *--remote-worker* command line option.
 The value of this option can be
 
 * a fixed host specification in the form of "<host>[:<port>];optoin1=value1;...";  the option/value pair can be
@@ -435,7 +436,7 @@ Distributed parallel execution from the command line can then be done through a 
 
 .. code-block:: bash
 
-    % pytest --as-server", <server_host>:<server_port> --cores 1 -k alg2 --project_structure path/to/project.cfg --remote-client https://some.endpoint.com/reserver?count=5"
+    % pytest --as-main", <server_host>:<server_port> --cores 1 -k alg2 --project_structure path/to/project.cfg --remote-worker https://some.endpoint.com/reserver?count=5"
 
 Note that pytest options not specific to pytest_mproc itself are passed along to the client workers (in this case,
 the "-k ale2" is pass along).  The "--cores" option is also passed to the worker client and ignores from the

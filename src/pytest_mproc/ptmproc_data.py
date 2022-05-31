@@ -17,6 +17,7 @@ TEST_FILES = 'test_files'
 
 @dataclass
 class ProjectConfig:
+    project_name: str
     project_root: Path
     test_files: List[Path]
     src_paths: List[Path] = field(default_factory=list)
@@ -28,6 +29,10 @@ class ProjectConfig:
         with open(path, 'rb') as in_stream:
             try:
                 data = json.load(in_stream)
+                if 'project_name' not in data:
+                    raise pytest.UsageError(f"project config {str(path)} does not define 'project_name'")
+                if not data['project_name'].strip():
+                    raise pytest.UsageError(f"project_name in {str(path)} cannot be empty string")
                 if 'finalize_script' in data and (not Path(data['finalize_script']).exists or
                                                   not os.access(data['finalize_script'], os.X_OK)):
                     raise pytest.UsageError(
@@ -49,6 +54,7 @@ class ProjectConfig:
                         raise pytest.UsageError(f"source path '{p}' relative to project config "
                                                 f"{str(path)} is not a path")
                 return ProjectConfig(
+                    project_name=data['project_name'],
                     project_root=path.parent,
                     test_files=[Path(p) for p in data[TEST_FILES]],
                     src_paths=[Path(p) for p in data[SRC_PATHS]],
@@ -168,8 +174,7 @@ class RemoteHostConfig:
 @dataclass
 class PytestMprocConfig:
     num_cores: int = 1
-    server_port: Optional[int] = None
-    server_host: Optional[str] = None
+    server_uri: Optional[str] = 'localhot:None'
     client_connect: Optional[str] = None
     connection_timeout: int = 30
     remote_hosts: List[RemoteHostConfig] = field(default_factory=list)

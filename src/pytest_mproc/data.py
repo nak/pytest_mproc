@@ -1,12 +1,10 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import List, Any, Set, Dict, Union, Optional
+from typing import List, Union, Optional
 
+from pytest_mproc import DEFAULT_PRIORITY
 from _pytest._code.code import ReprExceptionInfo
 from _pytest.reports import TestReport
-
-
-DEFAULT_PRIORITY = 10
 
 
 class TestExecutionConstraint(Enum):
@@ -83,5 +81,6 @@ class GroupTag:
 
     def __hash__(self):
         return self.name.__hash__()
+
 
 ResultType = Union[TestState, ResultException, ResultExit, ResourceUtilization, ResultTestStatus]

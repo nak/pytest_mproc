@@ -1,11 +1,15 @@
 import inspect
+import os
+import secrets
 import socket
 import sys
 from contextlib import closing
+from multiprocessing.process import current_process
 from typing import Union
 
-from pytest_mproc.data import ResourceUtilization
-from pytest_mproc.data import GroupTag, DEFAULT_PRIORITY
+
+# to indicate if running as main (host) or not;  set in plugin.py
+is_main = '--as-main' in sys.argv
 
 
 class TestError(Exception):
@@ -32,11 +36,12 @@ def priority(level: int):
     return decorator_priority
 
 
-def group(tag: Union[GroupTag, str]):
+def group(tag: Union["GroupTag", str]):
     """
     Decorator for grouping tests or a class of tests
     :param tag: unique name for group of tests to be serialized under execution
     """
+    from pytest_mproc.data import GroupTag
     def decorator_group(object):
         if inspect.isclass(object):
             for method in [getattr(object, m) for m in dir(object) if inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
@@ -49,7 +54,8 @@ def group(tag: Union[GroupTag, str]):
     return decorator_group
 
 
-def resource_utilization(time_span: float, start_rusage, end_rusage) -> ResourceUtilization:
+def resource_utilization(time_span: float, start_rusage, end_rusage) -> "ResourceUtilization":
+    from pytest_mproc.data import ResourceUtilization
     if time_span <= 0.001:
         return -1, -1, -1, end_rusage.ru_maxrss
     if sys.platform.lower() == 'darwin':
@@ -85,3 +91,20 @@ def get_ip_addr():
         return socket.gethostbyname(hostname)
     except Exception:
         return None
+
+
+if "AUTH_TOKEN_STDIN" in os.environ:
+    import binascii
+    auth_key = sys.stdin.readline().strip()
+    current_process().authkey = binascii.a2b_hex(auth_key)
+else:
+    if current_process().authkey is None:
+        current_process().authkey = secrets.token_bytes(64)
+
+DEFAULT_PRIORITY = 10
+try:
+    from pytest_mproc.data import GroupTag
+except:
+    # for orchestrationmanager to be able to come up independently
+    # TODO: fix this
+    pass

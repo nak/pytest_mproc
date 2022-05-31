@@ -16,32 +16,29 @@ from multiprocessing import Semaphore
 from pathlib import Path
 
 from multiprocessing import JoinableQueue, Process, Queue
-from multiprocessing.managers import SyncManager
 from threading import RLock
-from typing import List, Any, Optional, Tuple, Union, Dict, AsyncIterator, AsyncGenerator
+from typing import List, Any, Optional, Union, Dict, AsyncIterator, AsyncGenerator
 
 import pytest
 from _pytest.reports import TestReport
 
-from pytest_mproc import resource_utilization, find_free_port, GroupTag, user_output
+from pytest_mproc import resource_utilization, find_free_port, user_output, DEFAULT_PRIORITY
 from pytest_mproc.data import (
     ClientDied,
-    DEFAULT_PRIORITY,
-    ResultException,
+    GroupTag,
     ResultExit,
-    ResultTestStatus,
-    ResultType,
     TestBatch,
     TestState,
     TestStateEnum, AllClientsCompleted,
 )
-from pytest_mproc.fixtures import FixtureManager
+from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
+from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteHostConfig
 from pytest_mproc.remote.bundle import Bundle
 from pytest_mproc.user_output import debug_print
 from pytest_mproc.utils import BasicReporter
 
-__all__ = ["Orchestrator"]
+__all__ = ["Orchestrator", "RemoteExecutionThread", "FatalError"]
 
 lock = RLock()
 
@@ -52,8 +49,8 @@ class FatalError(Exception):
     """
 
 
+# noinspection PyBroadException
 def _localhost():
-    # noinspection PyBroadException
     try:
         return socket.gethostbyname(socket.gethostname())
     except Exception:
@@ -94,18 +91,19 @@ class RemoteExecutionThread:
             timeout: Optional[float] = None,
             deploy_timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
-        ):
-        args = (server, server_port, self._project_config, self._remote_hosts_config,
-                self._remote_sys_executable, self._q,
-                finish_sem, timeout, deploy_timeout,
-                auth_key, result_q, user_output.verbose
+    ):
+        args = (
+            server, server_port, self._project_config, self._remote_hosts_config,
+            self._remote_sys_executable, self._q,
+            finish_sem, timeout, deploy_timeout,
+            auth_key, result_q, user_output.verbose,
         )
         self._proc = multiprocessing.Process(target=RemoteExecutionThread._start, args=args)
         self._finish_sem = finish_sem
         self._proc.start()
 
     @staticmethod
-    def _determine_cli_args(server: str, server_port: int, remote_hosts_config: RemoteHostConfig):
+    def _determine_cli_args(server: str, server_port: int, remote_hosts_config: List[RemoteHostConfig]):
         args = list(sys.argv[1:])  # copy of
         # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
         for arg in sys.argv[1:]:
@@ -133,13 +131,14 @@ class RemoteExecutionThread:
                 if index + 1 < len(args):
                     args.remove(args[index + 1])
                 args.remove(arg)
-        args += ["--as-client", f"{server}:{server_port}"]
+        args += ["--as-worker", f"{server}:{server_port}"]
         if "--cores" not in args:
             args += ["--cores", "1"]
         return args
 
     @classmethod
-    def _start(cls, server: str, server_port: int, project_config: ProjectConfig, remote_hosts_config: RemoteHostConfig,
+    def _start(cls, server: str, server_port: int, project_config: ProjectConfig,
+               remote_hosts_config: List[RemoteHostConfig],
                remote_sys_executable: str, q: Queue,
                finish_sem: Semaphore, timeout: Optional[float], deploy_timeout: Optional[float],
                auth_key: bytes, result_q: Queue, verbose: bool):
@@ -184,92 +183,6 @@ class RemoteExecutionThread:
         self._proc.terminate()
 
 
-class OrchestrationManager(FixtureManager):
-    _started = False
-
-    class Value:
-        def __init__(self, val):
-            self._val = val
-
-        def value(self):
-            return self._val
-
-    def __init__(self, addr: Optional[Tuple[str, int]], auth_key: Optional[bytes] = None):
-        auth_key = auth_key or current_process().authkey
-        super().__init__(addr=addr, auth_key=auth_key)
-        # server:
-        self._finalized = False
-        self._clients = []
-        self._workers = {}
-
-    # noinspection PyAttributeOutsideInit
-    def start(self, test_q: Queue, results_q: Queue):
-        if self._started is True:
-            raise Exception("Start called twice")
-        self._test_q = test_q
-        self._results_q = results_q
-        OrchestrationManager._started = True
-        OrchestrationManager.register("register_client", self._register_client)
-        OrchestrationManager.register("register_worker", self._register_worker)
-        OrchestrationManager.register("count", self._count)
-        OrchestrationManager.register("completed", self._completed)
-        OrchestrationManager.register("finalize", self._finalize)
-        OrchestrationManager.register("JoinableQueue", JoinableQueue,
-                                      exposed=["put", "get", "task_done", "join", "close", "get_nowait"])
-        OrchestrationManager.register("get_test_queue", self._get_test_queue)
-        OrchestrationManager.register("get_results_queue", self._get_results_queue)
-        super().start()
-
-    def connect(self):
-        # client
-        OrchestrationManager.register("register_client")
-        OrchestrationManager.register("register_worker")
-        OrchestrationManager.register("count")
-        OrchestrationManager.register("completed")
-        OrchestrationManager.register("finalize")
-        OrchestrationManager.register("JoinableQueue")
-        OrchestrationManager.register("get_test_queue")
-        OrchestrationManager.register("get_results_queue")
-        super().connect()
-
-    def join(self, timeout: Optional[float] = None):
-        for client in self._clients:
-            client.join(timeout=timeout)
-
-    def _get_test_queue(self):
-        return self._test_q
-
-    def _get_results_queue(self):
-        return self._results_q
-
-    # noinspection PyUnresolvedReferences
-    def _register_client(self, client: "pytest_mproc.coordinator.Coordinator"):
-        if self._finalized:
-            raise Exception("Client registered after disconnect")
-        self._clients.append(client)
-
-    def _register_worker(self, worker):
-        ip_addr, pid = worker
-        key = f"{ip_addr}-{pid}"
-        if key in self._workers:
-            raise Exception(f"Duplicate worker index: {worker} @  {key}")
-        if self._finalized:
-            raise Exception("Client registered after disconnect")
-        self._workers[key] = worker
-
-    def _count(self):
-        return self.Value(len(self._workers))
-
-    def _completed(self, host: str, index: int):
-        del self._workers[f"{host}-{index}"]
-
-    def _finalize(self):
-        self._finalized = True
-        for client in self._clients:
-            client.join()
-        self._clients = []
-
-
 class Orchestrator:
     """
     class that acts as Main point of orchestration
@@ -278,7 +191,7 @@ class Orchestrator:
     ptmproc_args: Dict[str, Any] = {}
 
     def __init__(self,
-                 host: str = _localhost(), port: int = find_free_port(),
+                 uri: str = f"{_localhost()}:{find_free_port()}",
                  deploy_timeout: Optional[int] = None,
                  remote_sys_executable: str = 'python{}.{}'.format(*sys.version_info),
                  project_config: Optional[ProjectConfig] = None,
@@ -289,10 +202,9 @@ class Orchestrator:
         :param port: local host port to use, or find random free port if unspecified
         :param remote_clients_config: configuration of remote clients on which to launch, or unspecified if none
         """
-        self._host = host
-        self._port = port
         self._tests: List[TestBatch] = []  # set later
         self._count = 0
+        self._server_uri = uri
         self._exit_results: List[ResultExit] = []
         self._session_start_time = time.time()
         self._remote_processes: Dict[str, List[asyncio.subprocess.Process]] = {}
@@ -301,18 +213,13 @@ class Orchestrator:
                 "You must supply both a project configuration and a remotes client configuration together when "
                 f"requesting automated distributed test execution"
             )
-        SyncManager.register("JoinableQueue", JoinableQueue, exposed=["put", "get", "get_nowait",
-                                                                      "task_done", "join", "close"])
-        #SyncManager.register("Semaphore", exposed=["acquire", "release"])
-        self._queue_manager = SyncManager(authkey=current_process().authkey)
-        self._queue_manager.start()
         # noinspection PyUnresolvedReferences
-        self._test_q: JoinableQueue = self._queue_manager.JoinableQueue()
-        self._result_q: JoinableQueue = self._queue_manager.JoinableQueue()
-        # noinspection PyUnresolvedReferences
-        self._mp_manager = OrchestrationManager(addr=(host, port))
-        self._mp_manager.start(test_q=self._test_q, results_q=self._result_q)
-        self._finish_sem = self._queue_manager.Semaphore(0)
+        self._mp_manager = OrchestrationManager.create(uri, as_client=False)
+        host = self._mp_manager.host
+        port = self._mp_manager.port
+        self._test_q = self._mp_manager.get_test_queue()
+        self._result_q = self._mp_manager.get_results_queue()
+        self._finish_sem = Semaphore(0)
         if remote_clients_config:
             self._remote_exec_thread = RemoteExecutionThread(remote_hosts_config=remote_clients_config,
                                                              remote_sys_executable=remote_sys_executable,
@@ -323,9 +230,16 @@ class Orchestrator:
         else:
             self._remote_exec_thread = None
         self._reporter = BasicReporter()
-        self._exit_q = JoinableQueue()
         self._is_serving_remotes = remote_clients_config is not None
         self._pending: Dict[str, TestState] = {}
+
+    @property
+    def host(self):
+        return self._mp_manager.host
+
+    @property
+    def port(self):
+        return self._mp_manager.port
 
     def __enter__(self):
         return self
@@ -335,7 +249,7 @@ class Orchestrator:
             if self._remote_exec_thread.join(timeout=5) is None:
                 with suppress(Exception):
                     self._remote_exec_thread.terminate()
-        self._mp_manager.join(5)
+        self._mp_manager.shutdown()
 
     @staticmethod
     def _write_sep(s, txt):
@@ -365,14 +279,14 @@ class Orchestrator:
                     f"{exit_result.test_count} tests in {exit_result.resource_utilization.time_span:.2f} " +
                     f"seconds; User CPU: {exit_result.resource_utilization.user_cpu:.2f}%, " +
                     f"Sys CPU: {exit_result.resource_utilization.system_cpu:.2f}%, " +
-                    f"Mem consumed: {exit_result.resource_utilization.memory_consumed/1000.0}M\n")
+                    f"Mem consumed (add'l from base): {exit_result.resource_utilization.memory_consumed/1000.0:.2f}M\n")
             else:
                 sys.stdout.write(f"Process Worker-{exit_result.worker_index} executed 0 tests\n")
         sys.stdout.write("\n")
         sys.stdout.write(
-            f"Process Coordinator executed in {time_span:.2f} seconds. " +
+            f"Process Orchestrator executed in {time_span:.2f} seconds. " +
             f"User CPU: {ucpu:.2f}%, Sys CPU: {scpu:.2f}%, " +
-            f"Mem consumed: {unshared_mem/1000.0}M\n"
+            f"Mem consumed: {unshared_mem/1000.0}M\n\n"
         )
         length = sum([len(batch.test_ids) for batch in self._tests])
         if self._count != length:
@@ -393,7 +307,7 @@ class Orchestrator:
             elif isinstance(result, ResultExit):
                 # process is complete, so close it and set to None
                 self._exit_results.append(result)
-                self._exit_q.put(result.worker_index)
+                raise Exception("HERE")
             elif isinstance(result, ResultException):
                 hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
             elif result is None:
@@ -475,11 +389,11 @@ class Orchestrator:
                         error_count += 1
                     else:
                         # noinspection PyUnresolvedReferences
-                        debug_print(f"\nWorker-{key} finished [{self._mp_manager.count().value()}]\n")
+                        debug_print(f"\nWorker-{key} finished [{self._mp_manager.count()}]\n")
                     # noinspection PyUnresolvedReferences
                     self._mp_manager.completed(result_batch.host, result_batch.pid)
                     # noinspection PyUnresolvedReferences
-                    if self._mp_manager.count().value() <= 0:
+                    if self._mp_manager.count() <= 0:
                         os.write(sys.stderr.fileno(), b"No more workers;  exiting results processing")
                         if error_count > 0:
                             raise ClientDied(-1, "distributed-hosts", errored=True)
@@ -495,6 +409,10 @@ class Orchestrator:
                             break
                     self._test_q.close()
                     raise result_batch
+                elif isinstance(result_batch, ResultExit):
+                    self._exit_results.append(result_batch)
+                    result_batch = self._result_q.get()
+                    continue
                 for result in result_batch:
                     test_count += 1
                     if isinstance(result, ResultException):
@@ -522,8 +440,7 @@ class Orchestrator:
             self._result_q.close()
 
     @staticmethod
-    def populate_test_queue(test_q: Queue, tests: List[TestBatch], exit_dict: Dict,
-                            host: str, port: int):
+    def populate_test_queue(test_q: Queue, tests: List[TestBatch], exit_dict: Dict, uri: str):
         # noinspection PyBroadException
         count = 0
         for test_batch in tests:
@@ -536,10 +453,9 @@ class Orchestrator:
                     test_q.join()
                 except EOFError:
                     os.write(sys.stderr.fileno(), b"\n>>> at least one worker disconnected or died unexpectedly\n")
-        client = OrchestrationManager(addr=(host, port))
-        client.connect()
+        client = OrchestrationManager.create(uri, as_client=True)
         # noinspection PyUnresolvedReferences
-        worker_count = client.count().value()
+        worker_count = client.count()
         assert worker_count > 0
         for index in range(worker_count):
             test_q.put(None)
@@ -585,7 +501,8 @@ class Orchestrator:
         start_rusage = resource.getrusage(resource.RUSAGE_SELF)
         start_time = time.time()
         # we are the root node, so populate the tests
-        populate_tests_process = Process(target=Orchestrator.populate_test_queue, args=(self._test_q, self._tests, exit_dict, self._host, self._port))
+        populate_tests_process = Process(target=Orchestrator.populate_test_queue,
+                                         args=(self._test_q, self._tests, exit_dict, self._server_uri))
         validate_clients = Process(target=Orchestrator.validate_clients, args=([], self._result_q))
         try:
             validate_clients.start()
@@ -612,12 +529,10 @@ class Orchestrator:
             self._finish_sem.release()
             for client in self._mp_manager._clients:
                 client.join()
-            self._queue_manager.shutdown()
             self._mp_manager.shutdown()
 
     # noinspection PyUnusedLocal
     def shutdown(self):
         self._reporter.write("Shutting down main...")
         self._mp_manager.shutdown()
-        self._queue_manager.shutdown()
         self._reporter.write("Shut down")

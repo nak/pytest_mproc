@@ -3,22 +3,11 @@ This file contains some standard pytest_* plugin hooks to implement multiprocess
 """
 import os
 import sys
-import secrets
-import time
 
 import _pytest.terminal
 
-from multiprocessing import current_process
-
 from pytest_mproc import worker, user_output
-
-if "AUTH_TOKEN_STDIN" in os.environ:
-    import binascii
-    auth_key = sys.stdin.readline().strip()
-    current_process().authkey = binascii.a2b_hex(auth_key)
-else:
-    if current_process().authkey is None:
-        current_process().authkey = secrets.token_bytes(64)
+from pytest_mproc.user_output import debug_print
 
 import getpass
 import inspect
@@ -86,7 +75,8 @@ def _add_option(group, name: str, dest: str, action: str,
     """
     internal add option function to allow us to keep track of pytest-specific options from command line
     """
-    from pytest_mproc.main import Orchestrator, OrchestrationManager
+    from pytest_mproc.main import Orchestrator
+    from pytest_mproc.orchestration import OrchestrationManager
     # noinspection PyProtectedMember
     if typ == bool:
         group._addoption(
@@ -136,11 +126,11 @@ def pytest_addoption(parser):
         typ=int,
         help_text="max # of connections allowed at one time to main process, to prevent deadlock from overload"
     )
-    if '--as-server' in sys.argv:
+    if '--as-main' in sys.argv:
         _add_option(
             group,
-            "--as-server",
-            dest="mproc_server_port",
+            "--as-main",
+            dest="mproc_server_uri",
             action="store",
             typ=str,
             help_text="port on which you wish to run server (for multi-host runs only)"
@@ -155,7 +145,7 @@ def pytest_addoption(parser):
         )
         _add_option(
             group,
-            "--remote-client",
+            "--remote-worker",
             dest="mproc_remote_clients",
             action="append",
             typ=str,
@@ -174,7 +164,7 @@ def pytest_addoption(parser):
     else:
         _add_option(
             group,
-            "--as-client",
+            "--as-worker",
             dest="mproc_client_connect",
             action="store",
             typ=str,
@@ -236,7 +226,7 @@ def pytest_cmdline_main(config):
         raise pytest.UsageError("max simultaneous connections must be greater than 0; preferably greater than 9")
     # validation
     if config.option.ptmproc_config.num_cores is None or is_degraded() or mproc_disabled:
-        if '--as-server' in sys.argv or '--as-client' in sys.argv:
+        if '--as-main' in sys.argv or '--as-worker' in sys.argv:
             raise pytest.UsageError(
                 "Refusing to execute on distributed system without also specifying the number of cores to use")
         reporter.write(
@@ -249,77 +239,38 @@ def pytest_cmdline_main(config):
         mproc_pytest_cmdline_main(config, reporter=reporter)
 
 
-def try_connect(mgr: "OrchestratorManager"):
-    chars = ['|', '\\', '-', '/', '|', '-']
-    tries_remaining = 120
-    while tries_remaining:
-        try:
-            mgr.connect()
-            break
-        except (ConnectionResetError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError):
-            ch = chars[tries_remaining % len(chars)]
-            seconds_left = int(tries_remaining / 4)
-            os.write(sys.stderr.fileno(), f"\r{ch} Connecting ... {seconds_left}        ".encode('utf-8'))
-            tries_remaining -= 1
-            if tries_remaining == 0:
-                os.write(sys.stderr.fileno(), b"\n")
-                raise Exception("Failed to connect to main manager")
-            time.sleep(0.25)
-        except TimeoutError:
-            tries_remaining -= 1
-            time.sleep(0.25)
-
-
 def mproc_pytest_cmdline_coordinator(config):
-    from pytest_mproc.main import OrchestrationManager
+    from pytest_mproc.orchestration import OrchestrationManager
     from pytest_mproc.coordinator import CoordinatorFactory
     config.option.no_summary = True
     config.option.no_header = True
     config.option.ptmproc_config = PytestMprocConfig(
         num_cores=config.option.ptmproc_config.num_cores,
-        server_port=None,
-        server_host=None,
+        server_uri=None,
         client_connect=getattr(config.option, "mproc_client_connect", None)
     )
     if config.option.ptmproc_config.num_cores < 1:
         raise pytest.UsageError("Number of cores must be 1 or more when running as client")
     if config.option.ptmproc_config.client_connect and not config.option.worker:
-        try:
-            host, port = config.option.ptmproc_config.client_connect.rsplit(':', maxsplit=1)
-        except Exception:
-            raise pytest.UsageError("--as-client must be specified in form '<host>:<port>' of the master node")
-        try:
-            port = int(port)
-        except ValueError:
-            raise pytest.UsageError("When specifying connection as client, port must be an integer value")
-        config.option.ptmproc_config.server_host = host
-        config.option.ptmproc_config.server_port = port
+        uri = config.option.ptmproc_config.client_connect
+        debug_print(f"Running coordinator connecting to {uri}")
+        config.option.ptmproc_config.server_uri = uri
         if not config.option.collectonly:
-            mgr = OrchestrationManager(addr=(config.option.ptmproc_config.server_host,
-                                             config.option.ptmproc_config.server_port))
-            try_connect(mgr)
+            mgr = OrchestrationManager.create(uri=uri, as_client=True)
             factory = CoordinatorFactory(
                 num_processes=config.option.ptmproc_config.num_cores,
                 mgr=mgr,
                 as_remote_client=True)
             config.ptmproc_runtime = PytestMprocRuntime(mproc_main=None,
-                                                        coordinator=factory.launch(host, port))
-            # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
+                                                        coordinator=factory.launch(uri))
 
 
 def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     from pytest_mproc.main import Orchestrator
     from pytest_mproc.coordinator import CoordinatorFactory
-    assert "--as-client" not in sys.argv
-    is_server = hasattr(config.option, 'mproc_server_port')
-    cli_value = getattr(config.option, 'mproc_server_port', '127.0.0.1:None')
-    try:
-        server_host, server_port = cli_value.split(':')
-        server_port = int(server_port if server_port != 'None' else find_free_port())
-    except ValueError:
-        raise pytest.UsageError(f"Invalid server:port on command line: {cli_value}")
-    config.option.ptmproc_config.server_port = server_port
-    config.option.ptmproc_config.server_host = server_host
+    assert "--as-worker" not in sys.argv
+    is_server = hasattr(config.option, 'mproc_server_uri')
+    config.option.ptmproc_config.server_uri = getattr(config.option, 'mproc_server_uri', f'127.0.0.1:{find_free_port()}')
     local_proj_file = Path("./ptmproc_project.cfg")
     project_config = getattr(config.option, "project_structure_path", None) or \
         (local_proj_file if local_proj_file.exists() else None)
@@ -337,34 +288,37 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
             if isinstance(remote_clients, Iterable)\
             else RemoteHostConfig.from_uri_string(remote_clients)
         config.option.ptmproc_config.remote_sys_executable = mproc_remote_sys_executable
-    if config.option.ptmproc_config.server_port is not None:
-        host, port = config.option.ptmproc_config.server_host, \
-            config.option.ptmproc_config.server_port  # running distributed
-    else:
-        if config.option.ptmproc_config.num_cores < 1:
-            raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
-        host, port = "127.0.0.1", find_free_port()  # running localhost only
+    #if config.option.ptmproc_config.server_uri is not None:
+    #    host, port = config.option.ptmproc_config.server_host, \
+    #        config.option.ptmproc_config.server_port  # running distributed
+    #else:
+    if config.option.ptmproc_config.num_cores < 1:
+        raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
+    #    host, port = "127.0.0.1", find_free_port()  # running localhost only
     # remove pytest_mproc specific args
-    port = port or find_free_port()
-    BasicReporter().write(f"Started on port {port}\n")
-    reporter.write(f"Running as main @ {host}:{port}\n", green=True)
-    default_proj_config = Path(os.getcwd()) / "project.cfg"
-    project_config = project_config if (project_config is not None or not default_proj_config.exists())\
-        else default_proj_config
-    config.ptmproc_runtime = PytestMprocRuntime(mproc_main=Orchestrator(
+    # port = port or find_free_port()
+    # BasicReporter().write(f"Started on server on {config.option.ptmproc_config.server_uri}\n")
+    reporter.write(f"Running as main @ {config.option.ptmproc_config.server_uri}\n", green=True)
+    default_proj_config = Path(os.getcwd()) / "ptmproc_project.cfg"
+    if is_server:
+        project_config = project_config if (project_config is not None or not default_proj_config.exists())\
+            else default_proj_config
+    else:
+        project_config = None
+    orchestrator = Orchestrator(
         deploy_timeout=DEPLOY_TIMEOUT,
         remote_sys_executable=config.option.ptmproc_config.remote_sys_executable,
         project_config=ProjectConfig.from_file(Path(project_config)) if project_config else None,
-        host=host, port=port, remote_clients_config=config.option.ptmproc_config.remote_hosts),
-        coordinator=None
-    )
+        uri=config.option.ptmproc_config.server_uri,
+        remote_clients_config=config.option.ptmproc_config.remote_hosts)
+    config.ptmproc_runtime = PytestMprocRuntime(mproc_main=orchestrator, coordinator=None)
     if not is_server:
         # noinspection PyProtectedMember
         factory = CoordinatorFactory(
             num_processes=config.option.ptmproc_config.num_cores,
             mgr=config.ptmproc_runtime.mproc_main._mp_manager,
             as_remote_client=False)
-        coordinator = factory.launch(host, port)
+        coordinator = factory.launch(config.option.ptmproc_config.server_uri)
         config.ptmproc_runtime.coordinator = coordinator
     config.option.dist = "no"
     val = config.getvalue
@@ -521,7 +475,7 @@ def pytest_runtestloop(session):
     else:
         from pytest_mproc.fixtures import Node, Global
         Node.Manager.shutdown()
-        Global.Manager.shutdown()
+        # Global.Manager.shutdown()
     return True
 
 
@@ -597,7 +551,7 @@ def pytest_sessionstart(session) -> None:
 def pytest_sessionfinish(session):
     from pytest_mproc.worker import WorkerSession
     verbose = session.config.option.verbose
-    fixtures.Global.Manager.shutdown()
+    # fixtures.Global.Manager.shutdown()
     fixtures.Node.Manager.shutdown()
     if session.config.option.worker:
         session.config.option.verbose = -2
@@ -615,8 +569,6 @@ def pytest_sessionfinish(session):
     if not session.config.option.worker and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.mproc_main is not None:
         session.config.ptmproc_runtime.mproc_main.shutdown()
-    if WorkerSession.singleton():
-        WorkerSession.singleton().pysessionfinish(session)
     yield
     session.config.option.verbose = verbose
 

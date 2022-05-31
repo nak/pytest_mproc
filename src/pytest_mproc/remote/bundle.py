@@ -43,6 +43,7 @@ class Bundle:
     CACHE_DIR = Path(os.path.expanduser('~')).absolute() / ".ptmproc"
 
     def __init__(self, root_dir: Path,
+                 project_name: str,
                  project_root: Path,
                  test_files: List[Path],
                  system_executable: str,
@@ -61,6 +62,7 @@ class Bundle:
         :param relative_run_dir: working directory, relative to root, where pytest should be executed; root dir if
            not specified
         """
+        self._project_name = project_name
         if not root_dir.exists():
             raise FileNotFoundError(f"'{root_dir}' does not exist")
         if relative_run_dir is not None and relative_run_dir.is_absolute():
@@ -160,6 +162,7 @@ class Bundle:
             raise ValueError("You must execute pytest in the directory containing the project config, "
                              f"{str(project_config.project_root)} or a subdirectory thereof")
         bundle = Bundle(root_dir=root_dir,
+                        project_name=project_config.project_name,
                         project_root=project_config.project_root,
                         test_files=project_config.test_files,
                         prepare_script=project_config.prepare_script,
@@ -190,30 +193,67 @@ class Bundle:
         return bundle
 
     @asynccontextmanager
-    async def remote_root_context(self, ssh_client: SSHClient, remote_root: Optional[Path]) -> Path:
+    async def remote_root_context(self, project_name: str, ssh_client: SSHClient, remote_root: Optional[Path]) -> \
+            Tuple[Path, Path]:
         """
         Provide a context representing a directory on the remote host from which to run.  If no explicit
         path is provided as a remote root, a temporary directory is created on remote host and removed
         when exiting this context.  (Otherwise context manager has no real effect)
 
+        :param project_name: name of project, used in createing a cache dir if available to remote system
         :param ssh_client: ssh client to use in creating a temp dir if necessary
         :param remote_root: an explicit location on the remote host (will not be remove on exit of context)
         :return: the remote root created (or reflects the remote root provided explicitly)
         """
+        allow_cache = os.environ.get('PTMPROC_DISABLE_CACHE', False) not in ('1', 'True', 'true', 'TRUE')
+        if allow_cache:
+            proc = await ssh_client.execute_remote_cmd('echo ${HOME}', stdout=asyncio.subprocess.PIPE)
+            stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
+            if proc.returncode != 0 or not stdout_text:
+                var_cache_path = Path('/var') / 'cache' / 'ptmproc'
+            else:
+                var_cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
+            # noinspection PyBroadException
+            try:
+                await ssh_client.mkdir(var_cache_path / project_name)
+                debug_print(f"Using {var_cache_path / project_name} to cache python venv")
+                venv_root = var_cache_path / project_name
+            except Exception:
+                venv_root = None
+        else:
+            venv_root = None
         if remote_root:
-            yield remote_root
+            yield remote_root, venv_root or remote_root
         else:
             async with ssh_client.mkdtemp() as root:
-                yield root
+                debug_print(f"Using temp dir {root} to set up python venv")
+                yield root, venv_root or root
 
-    async def deploy(self, ssh_client: SSHClient, remote_root: Path, timeout: Optional[float] = None) -> None:
+    async def deploy(self, ssh_client: SSHClient, remote_root: Path,
+                     remote_venv_root: Path, timeout: Optional[float] = None) -> Path:
         """
         Deploy this bundle to a remote ssh client
         :param ssh_client: where to deploy
         :param timeout: raise TimeoutError if deployment takes too long
         :param remote_root: remote path to where bundle is deployed
+        :param remote_venv_root: remote path to virtual environment on remote host
         """
         always_print("Deploying bundle to remote worker %s...", ssh_client.host)
+        remote_venv = remote_venv_root / 'venv'
+
+        async def setup_venv():
+            proc = await ssh_client.execute_remote_cmd(
+                'ls', '-d', str(remote_venv / 'bin' / 'python3'),
+            )
+            if proc.returncode != 0:
+                debug_print(f"Installing python virtual environment to {remote_venv}")
+                await ssh_client.execute_remote_cmd(
+                    self._remote_executable, '-m', 'venv', str(remote_venv),
+                    stdout=stdout,
+                    stderr=sys.stderr
+                )
+
+        task = asyncio.create_task(setup_venv())
         stdout = sys.stdout if user_output.verbose else asyncio.subprocess.DEVNULL
         try:
             await ssh_client.mkdir(self.remote_run_dir(remote_root), exists_ok=True)
@@ -235,18 +275,19 @@ class Bundle:
             if proc.returncode != 0:
                 text = ('\n' + (await proc.stdout.read()).decode('utf-8')) if proc.stdout else ""
                 raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
+            await task
             if self._requirements_path:
                 debug_print(f">>> Installing requirements on remote worker {ssh_client.host}...")
                 await ssh_client.install(
-                    remote_py_executable=self._remote_executable,
+                    venv=remote_venv,
                     remote_root=remote_root,
-                    site_packages='site-packages',
                     requirements_path=f'run{os.sep}requirements.txt',
                     cwd=remote_root,
                     stdout=stdout,
                     stderr=sys.stderr
                 )
             await ssh_client.mkdir(remote_root / "run" / self._relative_run_path, exists_ok=True)
+            return remote_venv
         except Exception as e:
             always_print(f"!!! Failed to deploy to {ssh_client.host}: {e}")
             raise
@@ -372,10 +413,12 @@ class Bundle:
         :return: asyncio.subprocess.Process instance
         """
         ssh_client = SSHClient(host, username, password)
-        async with self.remote_root_context(ssh_client, remote_root) as remote_root:
-            await self.deploy(ssh_client, remote_root=remote_root, timeout=deploy_timeout)
+        async with self.remote_root_context(self._project_name, ssh_client, remote_root) \
+                as (remote_root, remote_venv_root):
+            venv = await self.deploy(ssh_client, remote_root=remote_root, remote_venv_root=remote_venv_root,
+                                     timeout=deploy_timeout)
             remote_artifacts_dir = remote_root / "artifacts"
-            command = self._remote_executable
+            command = str(venv / 'bin' / 'python3')
             env.update(self._env)
             if auth_key:
                 env['AUTH_TOKEN_STDIN'] = "1"
@@ -388,7 +431,6 @@ class Bundle:
             if user_output.verbose:
                 env["PTMPROC_VERBOSE"] = '1'
             env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
-            env['PTMPROC_GLOBAL_MGR_PORT'] = str(Global.Manager.PORT)
             if "PTMPROC_BASE_PORT" in os.environ:
                 env["PTMPROC_BASE_PORT"] = os.environ["PTMPROC_BASE_PORT"]
             always_print(">>> Executing tests on remote worker %s...", ssh_client.host)
@@ -426,9 +468,8 @@ class Bundle:
                         raise SystemError(msg)
                 full_run_dir = run_dir / self._relative_run_path
                 always_print("Running pytest through worker client %s...", ssh_client.host)
-                debug_print(">>>> From %s running %s -m pytest %s | tee %s/artifacts/pytest_stdout.log\n\n %s",
-                            full_run_dir, command, ' '.join(args), remote_root, env)
                 cmd = f"{command} -m pytest {' '.join(args)} | tee {remote_root}/artifacts/pytest_stdout.log"
+                debug_print(">>> From %s running %s\n\n %s", full_run_dir, cmd, env)
                 await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
                 env["PTMPROC_WORKER_ARTIFACTS_DIR"] = str(remote_artifacts_dir)
                 proc = await ssh_client.execute_remote_cmd(
@@ -487,13 +528,14 @@ class Bundle:
                                        ) -> AsyncGenerator[str, str]:
         ssh_client = SSHClient(host, username, password)
         env = env or {}
-        async with self.remote_root_context(ssh_client, remote_root) as remote_root:
+        async with self.remote_root_context(ssh_client, remote_root) as (remote_root, remote_venv_root):
             if "PYTHONPATH" in env:
                 env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + env["PYTHONPATH"]
             else:
                 env["PYTHONPATH"] = str(remote_root / 'site-packages')
-            await self.deploy(ssh_client, remote_root=remote_root, timeout=deploy_timeout)
-            command = self._remote_executable
+            venv = await self.deploy(ssh_client, remote_root=remote_root, remote_venv_root=remote_venv_root,
+                                     timeout=deploy_timeout)
+            command = venv / 'bin' / 'python3'
             async for line in ssh_client.monitor_remote_execution(
                     command, '-m', 'pytest', *args, timeout=timeout, env=env,
                     cwd=self.remote_run_dir(remote_root) / self._relative_run_path,

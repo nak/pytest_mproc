@@ -22,7 +22,6 @@ from typing import (
 )
 
 from pytest_mproc import user_output
-from pytest_mproc.fixtures import Node, Global
 
 SUCCESS = 0
 
@@ -86,8 +85,6 @@ class SSHClient:
                 command = f"{key}=\"{value}\" {command}"
         if user_output.verbose:
             env["PTMPROC_VERBOSE"] = '1'
-        env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
-        env['PTMPROC_GLOBAL_MGR_PORT'] = str(Global.Manager.PORT)
         if cwd is not None:
             command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
         return await asyncio.subprocess.create_subprocess_exec(
@@ -171,7 +168,7 @@ class SSHClient:
         else:
             rc = await proc.wait()
         if rc != SUCCESS:
-            raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)}", rc)
+            raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)} [scp, {' '.join(args)}]", rc)
 
     async def pull(self, remote_path: Path, local_path: Path, recursive: bool = True, timeout: Optional[float] = None):
         """
@@ -222,10 +219,10 @@ class SSHClient:
             machine = machine.decode('utf-8')
         return system, machine
 
-    async def install(self, remote_py_executable: str,
+    async def install(self,
+                      venv: Path,
                       remote_root: Path,
                       requirements_path: str,
-                      site_packages: Optional[str] = None,
                       cwd: Optional[Path] = None,
                       stdout: Optional[Union[int, TextIO]] = None,
                       stderr: Optional[Union[int, TextIO]] = sys.stderr):
@@ -233,19 +230,15 @@ class SSHClient:
         install Python requirements  on remote client
 
         :param cwd: directory to run from on remote host
-        :param remote_py_executable: path to python executable to use on remote client
+        :param venv: path to python virtual environment on remote host
         :param remote_root: root directory on remote client
         :param requirements_path: path, relative to remote_root, where requirments file is to be found
-        :param site_packages: if specific, a target site packages directory relative to remote_root where required
-           packages are to be installed
+        :param stdout: as per subprocess.Popen
+        :param stderr: as per subprocess.Popen
         :raises: CommandExecutionFailure if install failes on remote client
         """
-        remote_py_executable = remote_py_executable or sys.executable
-        if site_packages:
-            cmd = f"{remote_py_executable} -m pip install -t {str(remote_root / site_packages)} "\
-                f"-r {str( remote_root / requirements_path)}"
-        else:
-            cmd = f"{remote_py_executable} -m pip install -r {str(remote_root / requirements_path)}"
+        remote_py_executable = venv / 'bin' / 'python3'
+        cmd = f"{str(remote_py_executable)} -m pip install --upgrade -r {str(remote_root / requirements_path)}"
         proc = await self._remote_execute(
             cmd,
             stdout=stdout,
@@ -337,7 +330,7 @@ class SSHClient:
         :return: temporary directory created on remote client
         """
         proc = await self._remote_execute(
-            f"mktemp -d",
+            f"mktemp -d --tmpdir ptmproc-tmp.XXXXXXXXXX",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
