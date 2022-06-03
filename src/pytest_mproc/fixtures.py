@@ -50,7 +50,7 @@ class FixtureManager(BaseManager):
         try:
             super().connect()
         except Exception as e:
-            always_print(f"!!! Exception connecting {self.__class__.__qualname__}: {e}")
+            always_print(f"!!! Exception connecting {self.__class__.__qualname__} at {self.address}: {e}")
             raise
         debug_print(f"Connected {self.__class__.__qualname__} server")
 
@@ -79,22 +79,17 @@ class Node:
         @classmethod
         def singleton(cls) -> "Node.Manager":
             if cls._singleton is None:
-                if "PYTEST_WORKER" in os.environ:
+                # noinspection PyBroadException
+                try:
                     cls._singleton = cls(as_main=False, port=cls.PORT)
                     cls._singleton.connect()
                     cls._singleton._is_serving = False
-                else:
-                    # noinspection PyBroadException
-                    try:
-                        cls._singleton = cls(as_main=False, port=cls.PORT)
-                        cls._singleton.connect()
-                        cls._singleton._is_serving = False
-                    except (OSError, EOFError):
-                        cls._singleton = cls(as_main=True, port=cls.PORT)
-                        cls._singleton.start()
-                        cls._singleton._is_serving = True
-                    except Exception:
-                        raise SystemError(f"FAILED TO START NODE MANAGER")
+                except (OSError, EOFError):
+                    cls._singleton = cls(as_main=True, port=cls.PORT)
+                    cls._singleton.start()
+                    cls._singleton._is_serving = True
+                except Exception:
+                    raise SystemError(f"FAILED TO START NODE MANAGER")
             return cls._singleton
 
         @classmethod

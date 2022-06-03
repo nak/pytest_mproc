@@ -3,8 +3,7 @@ from enum import Enum
 from typing import List, Union, Optional
 
 from pytest_mproc import DEFAULT_PRIORITY
-from _pytest._code.code import ReprExceptionInfo
-from _pytest.reports import TestReport
+from pytest import TestReport
 
 
 class TestExecutionConstraint(Enum):
@@ -29,7 +28,7 @@ class ResourceUtilization:
 
 @dataclass
 class ResultException(Exception):
-    excrepr: ReprExceptionInfo
+    excrepr: Exception
 
 
 @dataclass

@@ -164,10 +164,10 @@ class RemoteHostConfig:
         env_list: Dict[str, str] = {}
         for name, value in self.arguments.items():
             if name.upper() == name:
-                env_list[name] = value
+                env_list[name] = f"\"{str(value)}\""
             else:
                 arg_list.append(f"--{name}")
-                arg_list.append(str(value))
+                arg_list.append(f"\"{str(value)}\"")
         return arg_list, env_list
 
 

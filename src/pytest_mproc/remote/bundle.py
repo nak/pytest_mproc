@@ -25,11 +25,10 @@ from typing import (
 )
 
 from pytest_mproc import user_output
-from pytest_mproc.fixtures import Node, Global
+from pytest_mproc.fixtures import Node
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
 from pytest_mproc.user_output import debug_print, always_print
-from pytest_mproc.remote import env
 
 _root = os.path.dirname(__file__)
 FIFTEEN_MINUTES = 15*60
@@ -171,8 +170,8 @@ class Bundle:
                         system_executable=system_executable)
         bundle._sources.extend(project_config.src_paths)
         os.write(sys.stderr.fileno(), f"\n\n>>> Building bundle.  This may take a little while...\n\n".encode('utf-8'))
-        site_pkgs = env.set_up_local(project_config=project_config, cache_dir=cls.CACHE_DIR)
-        bundle._sources.append(site_pkgs)
+        # site_pkgs = env.set_up_local(project_config=project_config, cache_dir=cls.CACHE_DIR)
+        # bundle._sources.append(site_pkgs)
         always_print(">>> Zipping contents for remote worker...")
         with zipfile.ZipFile(bundle.zip_path, mode='w') as zfile:
             for path in bundle._test_files:
@@ -246,7 +245,7 @@ class Bundle:
                 'ls', '-d', str(remote_venv / 'bin' / 'python3'),
             )
             if proc.returncode != 0:
-                debug_print(f"Installing python virtual environment to {remote_venv}")
+                always_print(f"Installing python virtual environment to {remote_venv}")
                 await ssh_client.execute_remote_cmd(
                     self._remote_executable, '-m', 'venv', str(remote_venv),
                     stdout=stdout,
@@ -277,7 +276,7 @@ class Bundle:
                 raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
             await task
             if self._requirements_path:
-                debug_print(f">>> Installing requirements on remote worker {ssh_client.host}...")
+                always_print(f"Installing requirements on remote worker {ssh_client.host}...")
                 await ssh_client.install(
                     venv=remote_venv,
                     remote_root=remote_root,
@@ -286,6 +285,12 @@ class Bundle:
                     stdout=stdout,
                     stderr=sys.stderr
                 )
+            await ssh_client.install_packages(
+                'pytest', 'pytest_mproc',
+                venv=remote_venv,
+                cwd=remote_root,
+                stdout=stdout,
+                stderr=sys.stderr)
             await ssh_client.mkdir(remote_root / "run" / self._relative_run_path, exists_ok=True)
             return remote_venv
         except Exception as e:
@@ -433,7 +438,7 @@ class Bundle:
             env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
             if "PTMPROC_BASE_PORT" in os.environ:
                 env["PTMPROC_BASE_PORT"] = os.environ["PTMPROC_BASE_PORT"]
-            always_print(">>> Executing tests on remote worker %s...", ssh_client.host)
+            always_print("Executing tests on remote worker %s...", ssh_client.host)
             run_dir = self.remote_run_dir(remote_root)
             try:
                 rel_path = Path(os.getcwd()).relative_to(self._root_dir)
@@ -468,10 +473,11 @@ class Bundle:
                         raise SystemError(msg)
                 full_run_dir = run_dir / self._relative_run_path
                 always_print("Running pytest through worker client %s...", ssh_client.host)
-                cmd = f"{command} -m pytest {' '.join(args)} | tee {remote_root}/artifacts/pytest_stdout.log"
-                debug_print(">>> From %s running %s\n\n %s", full_run_dir, cmd, env)
+                cmd = f"{command} -m pytest {' '.join(args)} -s | tee {remote_root}/artifacts/pytest_stdout.log"
+                always_print(">>> From %s running %s\n\n %s", full_run_dir, cmd, env)
                 await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
                 env["PTMPROC_WORKER_ARTIFACTS_DIR"] = str(remote_artifacts_dir)
+                env["PTMPROC_VERBOSE"] = '1'
                 proc = await ssh_client.execute_remote_cmd(
                     cmd,
                     timeout=timeout,
@@ -479,7 +485,7 @@ class Bundle:
                     prefix_cmd=f"set -o pipefail; ",
                     cwd=full_run_dir,
                     auth_key=auth_key,
-                    stdout=stdout,
+                    stdout=sys.stdout,
                     stderr=sys.stderr,
                     stdin=None if auth_key is None else asyncio.subprocess.PIPE)
                 pid = proc.pid

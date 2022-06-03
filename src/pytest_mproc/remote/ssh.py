@@ -22,6 +22,7 @@ from typing import (
 )
 
 from pytest_mproc import user_output
+from pytest_mproc.user_output import always_print, debug_print
 
 SUCCESS = 0
 
@@ -87,6 +88,7 @@ class SSHClient:
             env["PTMPROC_VERBOSE"] = '1'
         if cwd is not None:
             command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
+        debug_print(f"Executing command 'ssh {self.destination} {command}")
         return await asyncio.subprocess.create_subprocess_exec(
             "ssh", self.destination, *self._global_options,
             command,
@@ -158,6 +160,7 @@ class SSHClient:
         else:
             args = list(self._global_options) +\
                 ['-p', str(local_path), f"{self.destination}:{str(remote_path)}"]
+        always_print(f"Executing command 'scp {self.destination} {' '.join(args)}")
         proc = await asyncio.create_subprocess_exec(
             "scp", *args,
             stdout=asyncio.subprocess.DEVNULL,
@@ -218,6 +221,26 @@ class SSHClient:
             system = system.decode('utf-8')
             machine = machine.decode('utf-8')
         return system, machine
+
+    async def install_packages(
+            self,  *pkgs,
+            venv: Path,
+            cwd: Optional[Path] = None,
+            stdout: Optional[Union[int, TextIO]] = None,
+            stderr: Optional[Union[int, TextIO]] = sys.stderr):
+        remote_py_executable = venv / 'bin' / 'python3'
+        cmd = f"{str(remote_py_executable)} -m pip install --upgrade {' '.join(pkgs)}"
+        proc = await self._remote_execute(
+            cmd,
+            stdout=stdout,
+            stderr=stderr,
+            cwd=str(cwd) if cwd is not None else None
+        )
+        stdout, _ = await proc.communicate()
+        assert proc.returncode is not None
+        if proc.returncode != 0:
+            os.write(sys.stderr.fileno(), f"Command {cmd} failed to install on remote".encode('utf-8'))
+            raise CommandExecutionFailure(cmd, proc.returncode)
 
     async def install(self,
                       venv: Path,

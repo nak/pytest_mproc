@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import multiprocessing
 import os
+import signal
 import sys
 import time
 from contextlib import suppress
@@ -9,9 +10,10 @@ from enum import Enum
 from glob import glob
 from multiprocessing import Semaphore
 from multiprocessing import JoinableQueue
+from multiprocessing.managers import SyncManager
 from multiprocessing.process import current_process
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
 from pytest_mproc import user_output
 from pytest_mproc.fixtures import Global
@@ -41,11 +43,11 @@ class OrchestrationManager:
         self._results_q: Dict[str, JoinableQueue] = {}
         self._global_mgr = None
         # only for SSH protocol:
-        self._remote_proc: Optional[asyncio.subprocess.Process] = None
         self._clients: Dict[str, List[Any]] = {}
         self._workers: Dict[str, Dict[str, Any]] = {}
         self._is_server = False
-        self._mproc: Optional[multiprocessing.Process] = None
+        self._mproc_pid: Optional[int] = None
+        self._remote_pid: Optional[int] = None
 
     @staticmethod
     def key() -> str:
@@ -98,7 +100,7 @@ class OrchestrationManager:
             mgr.connect()
         elif protocol == Protocol.SSH:
             mgr = OrchestrationManager(host, port)
-            mgr.launch()
+            mgr._mproc_pid, mgr._remote_pid = mgr.launch(mgr.host, mgr.port)
             # wait for server to start listening
             time.sleep(3)
             mgr.connect()
@@ -117,8 +119,9 @@ class OrchestrationManager:
         Global.Manager.register("JoinableQueue")
         Global.Manager.register("get_test_queue")
         Global.Manager.register("get_results_queue")
-        always_print(f"Connecting on {self._host} at {self._port} as client")
-        self._global_mgr = Global.Manager.singleton(address=(self._host, self._port), as_client=True)
+        host = self._host.split('@', maxsplit=1)[-1]
+        always_print(f"Connecting on {host} at {self._port} as client")
+        self._global_mgr = Global.Manager.singleton(address=(host, self._port), as_client=True)
 
     def start(self, serve_forever: bool = False):
         """
@@ -183,16 +186,16 @@ class OrchestrationManager:
         return self._global_mgr.get_results_queue(self.key())
 
     def shutdown(self):
-        if self._remote_proc is not None:
+        if self._remote_pid is not None:
             with suppress(Exception):
-                self._remote_proc.terminate()
+                os.kill(self._remote_pid, signal.SIGINT)
             with suppress(Exception):
-                self._remote_proc.kill()
-        if self._mproc is not None:
+                os.kill(self._remote_pid, signal.SIGKILL)
+        if self._mproc_pid is not None:
             with suppress(Exception):
-                self._mproc.terminate()
+                os.kill(self._mproc_pid, signal.SIGINT)
             with suppress(Exception):
-                self._mproc.kill()
+                os.kill(self._mproc_pid, signal.SIGKILL)
         if self._is_server:
             self._global_mgr.shutdown()
 
@@ -228,65 +231,82 @@ class OrchestrationManager:
             if not self._workers[key]:
                 del self._workers[key]
 
-    def launch(self) -> None:
-        host = self._host.split('@')[-1]
-        port = self._port
+    @staticmethod
+    def launch(host: str, port: int) -> Tuple[int, int]:
+        destination = host
+        host = destination.split('@')[-1]
         try:
-            user, _ = self._host.split('@', maxsplit=1)
+            user, _ = destination.split('@', maxsplit=1)
         except ValueError:
             user = None
         sem = multiprocessing.Semaphore(0)
+        mpmgr = SyncManager()
+        mpmgr.start()
+        try:
+            returns = mpmgr.dict()
+            mproc = multiprocessing.Process(target=OrchestrationManager._main,
+                                            args=(sem, host, port, user, returns))
+            mproc.start()
+            sem.acquire()
+            mproc_pid = mproc.pid
+            remote_proc_pid = returns.get('remote_proc_pid')
+        finally:
+            mpmgr.shutdown()
+        del sem
+        return mproc_pid, remote_proc_pid
 
-        async def main_server(sem: multiprocessing.Semaphore):
-            try:
-                ssh = SSHClient(host=host, username=user)
-                root = Path(__file__).parent.parent
-                files = glob(str(root / '**' / '*.py'), recursive=True)
-                async with ssh.mkdtemp() as tmpdir:
-                    remote_sys_executable = 'python{}.{}'.format(*sys.version_info)
-                    await ssh.execute_remote_cmd(remote_sys_executable, '-m', 'venv', 'venv',
-                                                 cwd=tmpdir)
-                    python = f"{str(tmpdir)}{os.sep}venv{os.sep}bin{os.sep}python3"
-                    await ssh.execute_remote_cmd(python, '-m', 'pip', 'install', 'pytest')
-                    env = os.environ.copy()
-                    env['PYTHONPATH'] = f"{str(tmpdir)}:."
-                    env['AUTH_TOKEN_STDIN'] = '1'
-                    await ssh.mkdir(tmpdir / 'pytest_mproc')
-                    await ssh.mkdir(tmpdir / 'pytest_mproc' / 'remote')
-                    for f in files:
-                        assert Path(f).exists()
-                        await ssh.push(Path(f), tmpdir / Path(f).relative_to(root))
-                    always_print(
-                        f"Launching global manager: {python} {str(Path('pytest_mproc') / Path(__file__).name)} "
-                        f"{host} {port}")
-                    proc = await ssh.launch_remote_command(
-                        python, str(tmpdir / Path('pytest_mproc') / Path(__file__).name),
-                        host, str(port),
-                        cwd=tmpdir,
-                        env=env,
-                        stderr=asyncio.subprocess.PIPE,
-                        stdout=sys.stderr,
-                        stdin=asyncio.subprocess.PIPE,
-                        auth_key=current_process().authkey
-                    )
-                    import binascii
-                    proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
-                    proc.stdin.close()
-                    self._remote_proc = proc
-                    sem.release()
-                    await proc.wait()
-            except:
-                if self._remote_proc:
-                    self._remote_proc.terminate()
+    @staticmethod
+    def _main(sem: multiprocessing.Semaphore, host: str, port: int, user: str, returns: Dict[str, int]):
+        asyncio.get_event_loop().run_until_complete(OrchestrationManager._main_server(
+            sem, host, port, user, returns))
+
+    @staticmethod
+    async def _main_server(sem: multiprocessing.Semaphore, host: str, port: int,
+                           user: str, returns: Dict[str, int]):
+        remote_proc = None
+        try:
+            ssh = SSHClient(host=host, username=user)
+            root = Path(__file__).parent.parent
+            files = glob(str(root / 'pytest_mproc' / '**' / '*.py'), recursive=True)
+            async with ssh.mkdtemp() as tmpdir:
+                remote_sys_executable = 'python{}.{}'.format(*sys.version_info)
+                await ssh.execute_remote_cmd(remote_sys_executable, '-m', 'venv', 'venv',
+                                             cwd=tmpdir)
+                python = f"{str(tmpdir)}{os.sep}venv{os.sep}bin{os.sep}python3"
+                await ssh.execute_remote_cmd(python, '-m', 'pip', 'install', 'pytest')
+                env = os.environ.copy()
+                env['PYTHONPATH'] = f"{str(tmpdir)}:."
+                env['AUTH_TOKEN_STDIN'] = '1'
+                await ssh.mkdir(tmpdir / 'pytest_mproc')
+                await ssh.mkdir(tmpdir / 'pytest_mproc' / 'remote')
+                for f in files:
+                    assert Path(f).exists()
+                    await ssh.push(Path(f), tmpdir / Path(f).relative_to(root))
+                always_print(
+                    f"Launching global manager: {python} {str(Path('pytest_mproc') / Path(__file__).name)} "
+                    f"{host} {port}")
+                remote_proc = await ssh.launch_remote_command(
+                    python, str(tmpdir / Path('pytest_mproc') / Path(__file__).name),
+                    host, str(port),
+                    cwd=tmpdir,
+                    env=env,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdout=sys.stderr,
+                    stdin=asyncio.subprocess.PIPE,
+                    auth_key=current_process().authkey
+                )
+                import binascii
+                remote_proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
+                remote_proc.stdin.close()
                 sem.release()
-                raise
-
-        def main(sem: multiprocessing.Semaphore()):
-            asyncio.get_event_loop().run_until_complete(main_server(sem))
-
-        self._mproc = multiprocessing.Process(target=main, args=(sem, ))
-        self._mproc.start()
-        sem.acquire()
+                returns.update({'remote_proc_id': remote_proc.pid})
+                await remote_proc.wait()
+        except:
+            if remote_proc:
+                remote_proc.terminate()
+            sem.release()
+            returns.update({'remote_proc_id': -1})
+            raise
 
 
 if __name__ == "__main__":

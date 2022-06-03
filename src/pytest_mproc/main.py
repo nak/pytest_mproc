@@ -96,18 +96,19 @@ class RemoteExecutionThread:
             server, server_port, self._project_config, self._remote_hosts_config,
             self._remote_sys_executable, self._q,
             finish_sem, timeout, deploy_timeout,
-            auth_key, result_q, user_output.verbose,
+            auth_key, result_q, user_output.verbose, Orchestrator.ptmproc_args
         )
         self._proc = multiprocessing.Process(target=RemoteExecutionThread._start, args=args)
         self._finish_sem = finish_sem
         self._proc.start()
 
     @staticmethod
-    def _determine_cli_args(server: str, server_port: int, remote_hosts_config: List[RemoteHostConfig]):
+    def _determine_cli_args(server: str, server_port: int, remote_hosts_config: List[RemoteHostConfig],
+                            ptmproc_args: Dict[str, Any]):
         args = list(sys.argv[1:])  # copy of
         # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
         for arg in sys.argv[1:]:
-            typ = Orchestrator.ptmproc_args.get(arg)
+            typ = ptmproc_args.get(arg)
             if not typ:
                 continue
             if arg == "--cores":
@@ -141,14 +142,15 @@ class RemoteExecutionThread:
                remote_hosts_config: List[RemoteHostConfig],
                remote_sys_executable: str, q: Queue,
                finish_sem: Semaphore, timeout: Optional[float], deploy_timeout: Optional[float],
-               auth_key: bytes, result_q: Queue, verbose: bool):
+               auth_key: bytes, result_q: Queue, verbose: bool,
+               ptmproc_args: Dict[str, Any]):
         user_output.set_verbose(verbose)
         try:
             with tempfile.TemporaryDirectory() as tmpdir,\
                     Bundle.create(root_dir=Path(tmpdir),
                                   project_config=project_config,
                                   system_executable=remote_sys_executable) as bundle:
-                args = cls._determine_cli_args(server, server_port, remote_hosts_config)
+                args = cls._determine_cli_args(server, server_port, remote_hosts_config, ptmproc_args)
                 user_output.set_verbose(bool(os.environ.get('PTMPROC_VERBOSE')))
                 task = bundle.execute_remote_multi(
                     remote_hosts_config,
@@ -309,7 +311,7 @@ class Orchestrator:
                 self._exit_results.append(result)
                 raise Exception("HERE")
             elif isinstance(result, ResultException):
-                hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
+                raise Exception("Internal ERROR") from result
             elif result is None:
                 pass
             elif isinstance(result, TestState):
@@ -416,7 +418,7 @@ class Orchestrator:
                 for result in result_batch:
                     test_count += 1
                     if isinstance(result, ResultException):
-                        hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
+                        raise Exception("Internal ERROR") from result
                     else:
                         self._process_worker_message(hook,  result)
                 result_batch = self._result_q.get()
@@ -429,7 +431,7 @@ class Orchestrator:
                     for result in result_batch:
                         test_count += 1
                         if isinstance(result, ResultException):
-                            hook.pytest_internalerror(excrepr=result.excrepr, excinfo=None)
+                            raise Exception("Internal ERROR") from result
                         else:
                             self._process_worker_message(hook,  result)
                 try:

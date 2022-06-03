@@ -251,7 +251,7 @@ class WorkerSession:
             worker._reporter.write(f"\nWorker-{index} finished\n")
 
     def pytest_internalerror(self, excrepr):
-        self._put(ResultException(excrepr))
+        self._put(ResultException(SystemError("Internal pytest error")))
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_logreport(self, report):
@@ -324,7 +324,7 @@ def main():
     status = None
     # noinspection PyBroadException
     try:
-        status = pytest.main(sys.argv[3:])
+        status = pytest.main(sys.argv[2:])
         if isinstance(status, pytest.ExitCode):
             status = status.value
     except Exception as e:
@@ -332,7 +332,8 @@ def main():
         msg = f"Worker {get_ip_addr()}-{os.getpid()} died with exception {e}\n {traceback.format_exc()}"
         os.write(sys.stderr.fileno(), msg.encode('utf-8'))
     finally:
-        result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
+        with suppress(Exception):  # result q is probably closed by now, but for good measure...
+            result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
         with suppress(Exception):
             Node.Manager.singleton().shutdown()
 
