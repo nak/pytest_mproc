@@ -17,7 +17,7 @@ from typing import Optional, Dict, List, Any, Tuple
 
 from pytest_mproc import user_output
 from pytest_mproc.fixtures import Global
-from pytest_mproc.remote.ssh import SSHClient
+from pytest_mproc.remote.ssh import SSHClient, remote_root_context
 from pytest_mproc.user_output import always_print
 
 
@@ -62,7 +62,8 @@ class OrchestrationManager:
         return self._port
 
     @staticmethod
-    def create(uri: str, as_client: bool, serve_forever: bool = False) -> "OrchestrationManager":
+    def create(uri: str, as_client: bool, project_name: Optional[str] = None,
+               serve_forever: bool = False) -> "OrchestrationManager":
         """
         create an orchestration manager to manage test & results q's as well as clients/workers
         one of three protocols can be used in uri: local for running a server local,
@@ -99,8 +100,9 @@ class OrchestrationManager:
             mgr = OrchestrationManager(host, port)
             mgr.connect()
         elif protocol == Protocol.SSH:
+            assert project_name is not None
             mgr = OrchestrationManager(host, port)
-            mgr._mproc_pid, mgr._remote_pid = mgr.launch(mgr.host, mgr.port)
+            mgr._mproc_pid, mgr._remote_pid = mgr.launch(mgr.host, mgr.port, project_name)
             # wait for server to start listening
             time.sleep(3)
             mgr.connect()
@@ -232,7 +234,7 @@ class OrchestrationManager:
                 del self._workers[key]
 
     @staticmethod
-    def launch(host: str, port: int) -> Tuple[int, int]:
+    def launch(host: str, port: int, project_name: str) -> Tuple[int, int]:
         destination = host
         host = destination.split('@')[-1]
         try:
@@ -245,7 +247,7 @@ class OrchestrationManager:
         try:
             returns = mpmgr.dict()
             mproc = multiprocessing.Process(target=OrchestrationManager._main,
-                                            args=(sem, host, port, user, returns))
+                                            args=(sem, host, port, user, returns, project_name))
             mproc.start()
             sem.acquire()
             mproc_pid = mproc.pid
@@ -256,23 +258,24 @@ class OrchestrationManager:
         return mproc_pid, remote_proc_pid
 
     @staticmethod
-    def _main(sem: multiprocessing.Semaphore, host: str, port: int, user: str, returns: Dict[str, int]):
+    def _main(sem: multiprocessing.Semaphore, host: str, port: int, user: str, returns: Dict[str, int],
+              project_name: str):
         asyncio.get_event_loop().run_until_complete(OrchestrationManager._main_server(
-            sem, host, port, user, returns))
+            sem, host, port, user, returns, project_name))
 
     @staticmethod
     async def _main_server(sem: multiprocessing.Semaphore, host: str, port: int,
-                           user: str, returns: Dict[str, int]):
+                           user: str, returns: Dict[str, int], project_name: str):
         remote_proc = None
         try:
             ssh = SSHClient(host=host, username=user)
             root = Path(__file__).parent.parent
             files = glob(str(root / 'pytest_mproc' / '**' / '*.py'), recursive=True)
-            async with ssh.mkdtemp() as tmpdir:
+            async with remote_root_context(project_name=project_name, ssh_client=ssh, remote_root=None) as (tmpdir, venv_dir):
                 remote_sys_executable = 'python{}.{}'.format(*sys.version_info)
                 await ssh.execute_remote_cmd(remote_sys_executable, '-m', 'venv', 'venv',
-                                             cwd=tmpdir)
-                python = f"{str(tmpdir)}{os.sep}venv{os.sep}bin{os.sep}python3"
+                                             cwd=venv_dir)
+                python = f"{str(venv_dir)}{os.sep}venv{os.sep}bin{os.sep}python3"
                 await ssh.execute_remote_cmd(python, '-m', 'pip', 'install', 'pytest')
                 env = os.environ.copy()
                 env['PYTHONPATH'] = f"{str(tmpdir)}:."
@@ -287,7 +290,7 @@ class OrchestrationManager:
                     f"{host} {port}")
                 remote_proc = await ssh.launch_remote_command(
                     python, str(tmpdir / Path('pytest_mproc') / Path(__file__).name),
-                    host, str(port),
+                    host, str(port), project_name,
                     cwd=tmpdir,
                     env=env,
                     stderr=asyncio.subprocess.PIPE,
@@ -312,6 +315,8 @@ class OrchestrationManager:
 if __name__ == "__main__":
     host = sys.argv[1]
     port = int(sys.argv[2])
+    project_name = sys.argv[3]
     user_output.set_verbose(True)
     always_print(f"Serving orchestration manager on {host}:{port} forever...")
-    mgr = OrchestrationManager.create(uri=f"{host}:{port}", as_client=False, serve_forever=True)
+    mgr = OrchestrationManager.create(uri=f"{host}:{port}", project_name=project_name,
+                                      as_client=False, serve_forever=True)

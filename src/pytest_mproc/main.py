@@ -92,7 +92,6 @@ class RemoteExecutionThread:
             deploy_timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
     ):
-        assert Orchestrator.ptmproc_args
         args = (
             server, server_port, self._project_config, self._remote_hosts_config,
             self._remote_sys_executable, self._q,
@@ -136,8 +135,6 @@ class RemoteExecutionThread:
         args += ["--as-worker", f"{server}:{server_port}"]
         if "--cores" not in args:
             args += ["--cores", "1"]
-
-        assert "--as-main" not in args, f"Didn't remove {Orchestrator.ptmproc_args}"
         return args
 
     @classmethod
@@ -219,7 +216,7 @@ class Orchestrator:
                 f"requesting automated distributed test execution"
             )
         # noinspection PyUnresolvedReferences
-        self._mp_manager = OrchestrationManager.create(uri, as_client=False)
+        self._mp_manager = OrchestrationManager.create(uri, project_name=project_config.project_name, as_client=False)
         host = self._mp_manager.host
         port = self._mp_manager.port
         self._test_q = self._mp_manager.get_test_queue()
