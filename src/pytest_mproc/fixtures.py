@@ -79,6 +79,11 @@ class Node:
         @classmethod
         def singleton(cls) -> "Node.Manager":
             if cls._singleton is None:
+                #if "PYTEST_WORKER" in os.environ:
+                ##    cls._singleton = cls(as_main=False, port=cls.PORT)
+                #    cls._singleton.connect()
+                #    cls._singleton._is_serving = False
+                #else:
                 # noinspection PyBroadException
                 try:
                     cls._singleton = cls(as_main=False, port=cls.PORT)

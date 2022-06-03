@@ -22,7 +22,7 @@ from typing import (
 )
 
 from pytest_mproc import user_output
-from pytest_mproc.user_output import always_print, debug_print
+from pytest_mproc.user_output import always_print
 
 SUCCESS = 0
 
@@ -88,7 +88,7 @@ class SSHClient:
             env["PTMPROC_VERBOSE"] = '1'
         if cwd is not None:
             command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
-        debug_print(f"Executing command 'ssh {self.destination} {command}")
+        always_print(f"Executing command 'ssh {self.destination} {command}")
         return await asyncio.subprocess.create_subprocess_exec(
             "ssh", self.destination, *self._global_options,
             command,

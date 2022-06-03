@@ -92,6 +92,7 @@ class RemoteExecutionThread:
             deploy_timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
     ):
+        assert Orchestrator.ptmproc_args
         args = (
             server, server_port, self._project_config, self._remote_hosts_config,
             self._remote_sys_executable, self._q,
@@ -135,6 +136,8 @@ class RemoteExecutionThread:
         args += ["--as-worker", f"{server}:{server_port}"]
         if "--cores" not in args:
             args += ["--cores", "1"]
+
+        assert "--as-main" not in args, f"Didn't remove {Orchestrator.ptmproc_args}"
         return args
 
     @classmethod

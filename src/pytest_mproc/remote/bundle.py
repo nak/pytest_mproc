@@ -25,10 +25,11 @@ from typing import (
 )
 
 from pytest_mproc import user_output
-from pytest_mproc.fixtures import Node
+from pytest_mproc.fixtures import Node, Global
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
 from pytest_mproc.user_output import debug_print, always_print
+from pytest_mproc.remote import env
 
 _root = os.path.dirname(__file__)
 FIFTEEN_MINUTES = 15*60
@@ -438,7 +439,7 @@ class Bundle:
             env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
             if "PTMPROC_BASE_PORT" in os.environ:
                 env["PTMPROC_BASE_PORT"] = os.environ["PTMPROC_BASE_PORT"]
-            always_print("Executing tests on remote worker %s...", ssh_client.host)
+            always_print(">>> Executing tests on remote worker %s...", ssh_client.host)
             run_dir = self.remote_run_dir(remote_root)
             try:
                 rel_path = Path(os.getcwd()).relative_to(self._root_dir)
@@ -478,6 +479,8 @@ class Bundle:
                 await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
                 env["PTMPROC_WORKER_ARTIFACTS_DIR"] = str(remote_artifacts_dir)
                 env["PTMPROC_VERBOSE"] = '1'
+                import time
+                time.sleep(10000)
                 proc = await ssh_client.execute_remote_cmd(
                     cmd,
                     timeout=timeout,
