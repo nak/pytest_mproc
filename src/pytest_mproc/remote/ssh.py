@@ -18,11 +18,11 @@ from typing import (
     Optional,
     TextIO,
     Tuple,
-    Union,
+    Union, AsyncContextManager,
 )
 
 from pytest_mproc import user_output
-from pytest_mproc.user_output import always_print, debug_print
+from pytest_mproc.user_output import debug_print
 
 SUCCESS = 0
 
@@ -161,7 +161,7 @@ class SSHClient:
         else:
             args = list(self._global_options) +\
                 ['-p', str(local_path), f"{self.destination}:{str(remote_path)}"]
-        always_print(f"Executing command 'scp {self.destination} {' '.join(args)}")
+        debug_print(f"Executing command 'scp {self.destination} {' '.join(args)}")
         proc = await asyncio.create_subprocess_exec(
             "scp", *args,
             stdout=asyncio.subprocess.DEVNULL,
@@ -172,7 +172,8 @@ class SSHClient:
         else:
             rc = await proc.wait()
         if rc != SUCCESS:
-            raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)} [scp, {' '.join(args)}]", rc)
+            raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)} [scp, {' '.join(args)}]",
+                                          rc)
 
     async def pull(self, remote_path: Path, local_path: Path, recursive: bool = True, timeout: Optional[float] = None):
         """
@@ -388,6 +389,7 @@ class SSHClient:
         :param stdout: stream to use for stdout (as in subprocess.Popen)
         :param stderr: stream to use for stderr (as in subprocess.Popen)
         :param env: optional dictionary of environment variables for command
+        :param auth_key: authentication key for multiprocessing
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
@@ -426,6 +428,7 @@ class SSHClient:
         :param stdout: stream to use for stdout (as in subprocess.Popen)
         :param stderr: stream to use for stderr (as in subprocess.Popen)
         :param env: optional dictionary of environment variables for command
+        :param auth_key: authentication key for multiprocessing
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
@@ -448,7 +451,7 @@ class SSHClient:
 
 @asynccontextmanager
 async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_root: Optional[Path]) -> \
-        Tuple[Path, Path]:
+        AsyncContextManager[Tuple[Path, Path]]:
     """
     Provide a context representing a directory on the remote host from which to run.  If no explicit
     path is provided as a remote root, a temporary directory is created on remote host and removed

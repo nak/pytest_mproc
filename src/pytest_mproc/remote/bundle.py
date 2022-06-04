@@ -1,14 +1,15 @@
 import asyncio
 import logging
+import multiprocessing
 import os
 import platform
 from glob import glob
+from multiprocessing import Queue
 
 import pytest
 import sys
 import tempfile
 import zipfile
-from asyncio import Semaphore
 from contextlib import suppress
 from pathlib import Path
 from threading import RLock
@@ -16,7 +17,6 @@ from typing import (
     Any,
     AsyncGenerator,
     Dict,
-    Iterable,
     List,
     Optional,
     Tuple,
@@ -43,6 +43,7 @@ class Bundle:
     def __init__(self, root_dir: Path,
                  project_name: str,
                  project_root: Path,
+                 artifacts_path: Path,
                  test_files: List[Path],
                  system_executable: str,
                  prepare_script: Optional[Path] = None,
@@ -61,6 +62,7 @@ class Bundle:
            not specified
         """
         self._project_name = project_name
+        self._artifacts_path = artifacts_path
         if not root_dir.exists():
             raise FileNotFoundError(f"'{root_dir}' does not exist")
         if relative_run_dir is not None and relative_run_dir.is_absolute():
@@ -161,6 +163,7 @@ class Bundle:
                              f"{str(project_config.project_root)} or a subdirectory thereof")
         bundle = Bundle(root_dir=root_dir,
                         project_name=project_config.project_name,
+                        artifacts_path=project_config.artifcats_path,
                         project_root=project_config.project_root,
                         test_files=project_config.test_files,
                         prepare_script=project_config.prepare_script,
@@ -204,7 +207,7 @@ class Bundle:
 
         async def setup_venv():
             proc = await ssh_client.execute_remote_cmd(
-                'ls', '-d', str(remote_venv / 'bin' / 'python3'),
+                'ls', '-d', str(remote_venv / 'bin' / 'python3'), stdout=asyncio.subprocess.DEVNULL,
             )
             if proc.returncode != 0:
                 always_print(f"Installing python virtual environment to {remote_venv}")
@@ -261,16 +264,17 @@ class Bundle:
 
     async def execute_remote_multi(
             self,
-            remote_hosts_config: Union[List[RemoteHostConfig], AsyncGenerator[RemoteHostConfig, RemoteHostConfig]],
-            finish_sem: Semaphore,
             *args,
+            server_info: Tuple[str, int],
             username: Optional[str] = None,
             password: Optional[str] = None,
             deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
             timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
             env: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, asyncio.subprocess.Process]:
+            delegation_port: Optional[int] = None,
+            hosts_q: Queue,
+    ) -> Tuple[Dict[str, asyncio.subprocess.Process], str]:
         """
         deploy and execute to/on multiple host targets concurrently (async)
 
@@ -281,210 +285,220 @@ class Bundle:
         :param password: optional password for login-based ssh
         :param auth_key: auth token to use in multiprocessing authentication
         :param deploy_timeout: optional timeout if deployment takes too long
+        :param env: dict of environment variables to use on execution
         :param timeout: optional overall timeout for execution to complete on all hosts
         :return: Dict of host, proc where host is host process executed on and proc is the completed process
         """
-        sem = Semaphore(0)
         tasks: List[asyncio.Task] = []
-        if isinstance(remote_hosts_config, Iterable):
-            for index, worker_config in enumerate(remote_hosts_config):
+        deployments = {}
+        contexts = []
+        delegation_proc: Optional[multiprocessing.Process] = None
+        delegation_host: Optional[str] = None
+
+        async def execute_one(*args: str, ssh_client: SSHClient, remote_root: Path, index: int,
+                              environ: Dict[str, str]):
+            if ssh_client.host not in deployments:
+                context = remote_root_context(self._project_name, ssh_client, remote_root)
+                remote_root, remote_venv_root = await context.__aenter__()
+                venv = await self.deploy(ssh_client=ssh_client,
+                                         remote_root=remote_root,
+                                         remote_venv_root=remote_venv_root,
+                                         timeout=deploy_timeout)
+                deployments[ssh_client.host] = (remote_root, venv)
+                contexts.append(context)
+
+            return await self.execute_remote(
+                *args,
+                worker_id=f"Worker-{index}",
+                env=environ,
+                ssh_client=ssh_client,
+                timeout=timeout,
+                remote_root=deployments[ssh_client.host][0],
+                auth_key=auth_key,
+                remote_venv=deployments[ssh_client.host][1]
+            )
+
+        sem = multiprocessing.Semaphore(0)
+        try:
+            env = env.copy() if env else {}
+            index = 0
+            worker_config: RemoteHostConfig = hosts_q.get()
+            server_host, server_port = server_info
+            while worker_config is not None:
+                if index == 0 and delegation_port is not None:
+                    import pytest_mproc.orchestration as orchestration
+                    delegation_host = worker_config.remote_host
+                    server_host = delegation_host
+                    server_port = delegation_port
+                    delegation_proc = multiprocessing.Process(
+                        target=orchestration.main, args=(delegation_host, delegation_port, self._project_name, sem))
+                    delegation_proc.start()
+                index += 1
                 cli_args, cli_env = worker_config.argument_env_list()
-                cli_env.update(env or {})
+                env.update(cli_env)
                 task = asyncio.get_event_loop().create_task(
-                    self.execute_remote(worker_config.remote_host,
-                                        *(list(args) + list(cli_args)),
-                                        worker_id=f"Worker-{index}",
-                                        env=cli_env,
-                                        username=username,
-                                        password=password,
-                                        deploy_timeout=deploy_timeout,
-                                        timeout=timeout,
-                                        remote_root=worker_config.remote_root,
-                                        auth_key=auth_key,
-                                        )
+                    execute_one(
+                        *(list(args) + list(cli_args)) + ["--as-worker", f"{server_host}:{server_port}"],
+                        index=index,
+                        environ=env,
+                        ssh_client=SSHClient(worker_config.remote_host, username=username, password=password),
+                        remote_root=worker_config.remote_root,
+                    )
                 )
                 tasks.append(task)
-        else:
-            async def lazy_distribution():
-                index = 0
-                async for worker_config in remote_hosts_config:
-                    sem.release()
-                    cli_args, cli_env = worker_config.argument_env_list()
-                    task = asyncio.get_event_loop().create_task(
-                        self.execute_remote(worker_config.remote_host,
-                                            *(list(args) + list(cli_args)),
-                                            worker_id=f"Worker-{index}",
-                                            auth_key=auth_key,
-                                            env=cli_env,
-                                            username=username,
-                                            password=password,
-                                            deploy_timeout=deploy_timeout,
-                                            timeout=timeout,
-                                            remote_root=worker_config.remote_root))
-                    index += 1
-                    tasks.append(task)
-                    if not finish_sem.locked():
-                        break
+                worker_config = hosts_q.get()
+            results, _ = await asyncio.wait(tasks, timeout=timeout,
+                                            return_when=asyncio.ALL_COMPLETED)
+            results = [r.result() for r in results]
+            with open(self._artifacts_path / "worker_info.txt", 'w') as out_stream:
+                for index, r in enumerate(results):
+                    if not isinstance(r, Exception):
+                        host, proc = r
+                        out_stream.write(f"Worker-{index}: host={host}, pid={proc.pid}")
+                    else:
+                        out_stream.write(f"Worker-{index}: <<see exception for this worker>>")
+            procs = {host: proc for host, proc in results if not isinstance(proc, Exception)}
+            exceptions = [e for e in results if isinstance(e, Exception)]
+            if exceptions:
+                for e in exceptions:
+                    logging.exception(e, msg=f"Error execution on remote host")
+                if not procs:
+                    raise Exception(f"Exception(s) during remote execution on all remote hosts : {exceptions}")
+            for proc in procs.values():
+                if proc.returncode is None:
+                    with suppress(OSError):
+                        proc.kill()
+            return procs, delegation_host
+        finally:
+            for context in contexts:
+                await context.__aexit__(None, None, None)
+            sem.release()
+            delegation_proc.join(timeout=5)
+            with suppress(Exception):
+                delegation_proc.kill()
 
-            async def timeout():
-                # if we cannot find a single client in time:
-                await asyncio.wait_for(sem.acquire(), timeout=deploy_timeout)
-
-            await asyncio.wait_for([lazy_distribution(), timeout()], timeout=None)
-        results, _ = await asyncio.wait(tasks, timeout=timeout,
-                                        return_when=asyncio.ALL_COMPLETED)
-        results = [r.result() for r in results]
-        with open(Path("./artifacts") / "worker_info.txt", 'w') as out_stream:
-            for index, r in enumerate(results):
-                if not isinstance(r, Exception):
-                    host, proc = r
-                    out_stream.write(f"Worker-{index}: host={host}, pid={proc.pid}")
-                else:
-                    out_stream.write(f"Worker-{index}: <<see exception for this worker>>")
-        procs = {host: proc for host, proc in results if not isinstance(proc, Exception)}
-        exceptions = [e for e in results if isinstance(e, Exception)]
-        if exceptions:
-            for e in exceptions:
-                logging.exception(e, msg=f"Error execution on remote host")
-            if not procs:
-                raise Exception(f"Exception(s) during remote execution on all remote hosts : {exceptions}")
-        for proc in procs.values():
-            if proc.returncode is None:
-                with suppress(OSError):
-                    proc.kill()
-        return procs
-
-    async def execute_remote(self, host: str, *args,
+    async def execute_remote(self, *args,
                              remote_root: Path,
+                             remote_venv: Path,
                              env: Optional[Dict[str, str]] = None,
-                             username: Optional[str] = None,
-                             password: Optional[str] = None,
-                             deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
+                             ssh_client: SSHClient,
                              timeout: Optional[float] = None,
                              auth_key: Optional[bytes] = None,
                              worker_id: Optional[str] = None,
                              ) -> Tuple[str, asyncio.subprocess.Process]:
         """
         Execute tests on remote host
-        :param host: which host
+        :param ssh_client: ssh client to use to execute remotely
         :param args: args to pass on cmd line
         :param env: additional environment variables to set (key/value pairs)
-        :param username: credentials if needed
-        :param password: credentials if needed
         :param auth_key: token to use for multiprocessing authentication
-        :param deploy_timeout: optional timeout on deploy
         :param timeout: optional timeout if execution takes too long; if None return proc instance immediately
             with no waiting
         :param remote_root: where on remote host to deploy bundle
+        :param remote_venv: location of virtual Python environment to use on host (possibly from cache)
         :param worker_id: Optional identifier to assign to worker
         :return: asyncio.subprocess.Process instance
         """
-        ssh_client = SSHClient(host, username, password)
-        async with remote_root_context(self._project_name, ssh_client, remote_root) \
-                as (remote_root, remote_venv_root):
-            venv = await self.deploy(ssh_client, remote_root=remote_root, remote_venv_root=remote_venv_root,
-                                     timeout=deploy_timeout)
-            remote_artifacts_dir = remote_root / "artifacts"
-            command = str(venv / 'bin' / 'python3')
-            env.update(self._env)
-            if auth_key:
-                env['AUTH_TOKEN_STDIN'] = "1"
-            # noinspection SpellCheckingInspection
-            env['PTMPROC_EXECUTABLE'] = command.split()[0]
-            if "PYTHONPATH" in env:
-                env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + env["PYTHONPATH"]
-            else:
-                env["PYTHONPATH"] = str(remote_root / 'site-packages')
-            if user_output.verbose:
-                env["PTMPROC_VERBOSE"] = '1'
-            env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
-            if "PTMPROC_BASE_PORT" in os.environ:
-                env["PTMPROC_BASE_PORT"] = os.environ["PTMPROC_BASE_PORT"]
-            always_print("Executing tests on remote worker %s...", ssh_client.host)
-            run_dir = self.remote_run_dir(remote_root)
-            try:
-                rel_path = Path(os.getcwd()).relative_to(self._root_dir)
-                if len(rel_path.parts) > 1:
-                    raise pytest.UsageError("You must run from the location of your project tests path "
-                                            "(as defined in your project config file), or one level above that")
-                if str(rel_path) != '.':
-                    run_dir = run_dir / rel_path
-            except ValueError:
-                pass
-            await ssh_client.mkdir(remote_root / "artifacts", exists_ok=True)
-            pid = None
-            proc = None
-            stdout = sys.stdout if user_output.verbose else asyncio.subprocess.DEVNULL
-            try:
-                if self.prepare_script:
-                    always_print("Preparing environment through prepare script...")
+        remote_artifacts_dir = remote_root / self._artifacts_path
+        command = str(remote_venv / 'bin' / 'python3')
+        env.update(self._env)
+        if auth_key:
+            env['AUTH_TOKEN_STDIN'] = "1"
+        # noinspection SpellCheckingInspection
+        env['PTMPROC_EXECUTABLE'] = command.split()[0]
+        if "PYTHONPATH" in env:
+            env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + env["PYTHONPATH"]
+        else:
+            env["PYTHONPATH"] = str(remote_root / 'site-packages')
+        if user_output.verbose:
+            env["PTMPROC_VERBOSE"] = '1'
+        env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
+        if "PTMPROC_BASE_PORT" in os.environ:
+            env["PTMPROC_BASE_PORT"] = os.environ["PTMPROC_BASE_PORT"]
+        always_print("Executing tests on remote worker %s...", ssh_client.host)
+        run_dir = self.remote_run_dir(remote_root)
+        try:
+            rel_path = Path(os.getcwd()).relative_to(self._root_dir)
+            if len(rel_path.parts) > 1:
+                raise pytest.UsageError("You must run from the location of your project tests path "
+                                        "(as defined in your project config file), or one level above that")
+            if str(rel_path) != '.':
+                run_dir = run_dir / rel_path
+        except ValueError:
+            pass
+        await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
+        pid = None
+        proc = None
+        stdout = sys.stdout if user_output.verbose else asyncio.subprocess.DEVNULL
+        try:
+            if self.prepare_script:
+                always_print("Preparing environment through prepare script...")
+                # noinspection SpellCheckingInspection
+                proc = await ssh_client.execute_remote_cmd(
+                    f"./prepare | tee \"{self._artifacts_path}{os.sep}{self._prepare_script.stem}.log\"",
+                    prefix_cmd=f"set -o pipefail; ",
+                    cwd=remote_root,
+                    env=env,
+                    timeout=timeout,
+                    stdout=stdout,
+                    stderr=sys.stderr,
+                )
+                if proc.returncode != 0:
+                    msg = f"!!! Failed to execute prepare script on host [{proc.returncode}]; " \
+                          f"see log in artifacts. worker-{worker_id}{os.sep}{self._prepare_script.stem}.log"
+                    debug_print(msg)
+                    raise SystemError(msg)
+            full_run_dir = run_dir / self._relative_run_path
+            cmd = f"{command} -m pytest {' '.join(args)} -s | "\
+                  f"tee {remote_root}{os.sep}artifacts{os.sep}pytest_stdout.log"
+            debug_print(">>> From %s running %s\n\n %s", full_run_dir, cmd, env)
+            await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
+            env["PTMPROC_WORKER_ARTIFACTS_DIR"] = str(remote_artifacts_dir)
+            env["PTMPROC_VERBOSE"] = '1'
+            proc = await ssh_client.execute_remote_cmd(
+                cmd,
+                timeout=timeout,
+                env=env,
+                prefix_cmd=f"set -o pipefail; ",
+                cwd=full_run_dir,
+                auth_key=auth_key,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                stdin=None if auth_key is None else asyncio.subprocess.PIPE)
+            pid = proc.pid
+        finally:
+            if proc and self._finalize_script:
+                always_print("Finalizing worker through finalize script on client %s...", ssh_client.host)
+                with suppress(Exception):
                     # noinspection SpellCheckingInspection
-                    proc = await ssh_client.execute_remote_cmd(
-                        f"./prepare | tee \"{remote_root}/artifacts/{self._prepare_script.stem}.log\"",
-                        prefix_cmd=f"set -o pipefail; ",
+                    finalize_proc = await ssh_client.execute_remote_cmd(
+                        f"./finalize  | tee \"{remote_artifacts_dir}{os.sep}]{self._finalize_script.stem}.log\"",
                         cwd=remote_root,
+                        prefix_cmd=f"set -o pipefail; ",
                         env=env,
                         timeout=timeout,
                         stdout=stdout,
                         stderr=sys.stderr,
                     )
-                    if proc.returncode != 0:
-                        msg = f"!!! Failed to execute prepare script on host [{proc.returncode}]; " \
-                              f"see log in artifacts. worker-{worker_id}/{self._prepare_script.stem}.log"
-                        debug_print(msg)
-                        raise SystemError(msg)
-                full_run_dir = run_dir / self._relative_run_path
-                always_print("Running pytest through worker client %s...", ssh_client.host)
-                cmd = f"{command} -m pytest {' '.join(args)} -s | tee {remote_root}/artifacts/pytest_stdout.log"
-                always_print(">>> From %s running %s\n\n %s", full_run_dir, cmd, env)
-                await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
-                env["PTMPROC_WORKER_ARTIFACTS_DIR"] = str(remote_artifacts_dir)
-                env["PTMPROC_VERBOSE"] = '1'
-                proc = await ssh_client.execute_remote_cmd(
-                    cmd,
-                    timeout=timeout,
-                    env=env,
-                    prefix_cmd=f"set -o pipefail; ",
-                    cwd=full_run_dir,
-                    auth_key=auth_key,
-                    stdout=sys.stdout,
-                    stderr=sys.stderr,
-                    stdin=None if auth_key is None else asyncio.subprocess.PIPE)
-                pid = proc.pid
-            finally:
-                if proc and self._finalize_script:
-                    always_print("Finalizing worker through finalize script on client %s...", ssh_client.host)
-                    with suppress(Exception):
-                        # noinspection SpellCheckingInspection
-                        finalize_proc = await ssh_client.execute_remote_cmd(
-                            f"./finalize  | tee \"{remote_root}/artifacts/{self._finalize_script.stem}.log\"",
-                            cwd=remote_root,
-                            prefix_cmd=f"set -o pipefail; ",
-                            env=env,
-                            timeout=timeout,
-                            stdout=stdout,
-                            stderr=sys.stderr,
-                        )
-                        if finalize_proc.returncode:
-                            debug_print(f"!!! WARNING: finalize script failed! ")
-                try:
-                    if proc:
-                        worker_id = worker_id or (f"{host}-{pid}" if pid else host)
-                        destination_dir = (Path(artifacts_root) / worker_id).absolute()
-                        destination_dir.mkdir(exist_ok=True, parents=True)
-                        await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
-                        await ssh_client.execute_remote_cmd(cwd=remote_artifacts_dir,
-                                                            command=f"zip -r {str(remote_root / 'artifacts.zip')} *",
-                                                            stdout=stdout,
-                                                            stderr=sys.stderr)
-                        await ssh_client.pull(remote_root / "artifacts.zip", destination_dir / "artifacts.zip",
-                                              recursive=False)
-                except CommandExecutionFailure as e:
-                    os.write(sys.stderr.fileno(),
-                             f"\n\n!!! Failed to pull {str(remote_artifacts_dir)} to {destination_dir}:\n"
-                             f"    {e}\n\n".encode('utf-8'))
-            always_print("Execution on client %s completed", ssh_client.host)
-            return host, proc
+                    if finalize_proc.returncode:
+                        debug_print(f"!!! WARNING: finalize script failed! ")
+            worker_id = worker_id or (f"{ssh_client.host}-{pid}" if pid else ssh_client.host)
+            destination_dir = (self._artifacts_path / worker_id).absolute()
+            try:
+                if proc:
+                    destination_dir.mkdir(exist_ok=True, parents=True)
+                    await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
+                    await ssh_client.execute_remote_cmd(cwd=remote_artifacts_dir,
+                                                        command=f"zip -r {str(remote_root / 'artifacts.zip')} *",
+                                                        stdout=stdout,
+                                                        stderr=sys.stderr)
+                    await ssh_client.pull(remote_root / "artifacts.zip", destination_dir / "artifacts.zip",
+                                          recursive=False)
+            except CommandExecutionFailure as e:
+                os.write(sys.stderr.fileno(),
+                         f"\n\n!!! Failed to pull {str(remote_artifacts_dir)} to {destination_dir}:\n"
+                         f"    {e}\n\n".encode('utf-8'))
+        return ssh_client.host, proc
 
     async def monitor_remote_execution(self, host: str, *args: str,
                                        username: Optional[str] = None,

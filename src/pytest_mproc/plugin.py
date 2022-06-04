@@ -288,16 +288,8 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
             if isinstance(remote_clients, Iterable)\
             else RemoteHostConfig.from_uri_string(remote_clients)
         config.option.ptmproc_config.remote_sys_executable = mproc_remote_sys_executable
-    #if config.option.ptmproc_config.server_uri is not None:
-    #    host, port = config.option.ptmproc_config.server_host, \
-    #        config.option.ptmproc_config.server_port  # running distributed
-    #else:
     if config.option.ptmproc_config.num_cores < 1:
         raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
-    #    host, port = "127.0.0.1", find_free_port()  # running localhost only
-    # remove pytest_mproc specific args
-    # port = port or find_free_port()
-    # BasicReporter().write(f"Started on server on {config.option.ptmproc_config.server_uri}\n")
     reporter.write(f"Running as main @ {config.option.ptmproc_config.server_uri}\n", green=True)
     default_proj_config = Path(os.getcwd()) / "ptmproc_project.cfg"
     if is_server:
@@ -445,20 +437,6 @@ def pytest_runtestloop(session):
             and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.mproc_main:
         orchestrator = session.config.ptmproc_runtime.mproc_main
-        for item in session.items:
-            if hasattr(item, "_request"):
-                for name in item._fixtureinfo.argnames:
-                    try:
-                        fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
-                        if not fixturedef or fixturedef.scope != 'global':
-                            continue
-                        if orchestrator and name not in session.config.option.fixtures:
-                            process_fixturedef(item, orchestrator, fixturedef, item._request, session.config, 'global')
-                    except Exception as e:
-                        session.shouldfail = \
-                            f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}' {format_exc()}"
-                        reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
-                        break
         try:
             with orchestrator:
                 orchestrator.set_items(session.items)
@@ -467,15 +445,10 @@ def pytest_runtestloop(session):
             reporter.write(format_exc() + "\n", red=True)
             reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
             return False
-
     if session.config.option.worker:
         session.config.option.worker.test_loop(session)
     elif session.config.ptmproc_runtime.coordinator:
         session.config.ptmproc_runtime.coordinator.join()
-    else:
-        from pytest_mproc.fixtures import Node, Global
-        Node.Manager.shutdown()
-        # Global.Manager.shutdown()
     return True
 
 
@@ -549,26 +522,23 @@ def pytest_sessionstart(session) -> None:
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_sessionfinish(session):
-    from pytest_mproc.worker import WorkerSession
     verbose = session.config.option.verbose
-    # fixtures.Global.Manager.shutdown()
-    fixtures.Node.Manager.shutdown()
+    with suppress(Exception):
+        fixtures.Node.Manager.shutdown()
+    with suppress(Exception):
+        fixtures.Global.Manager.shutdown()
     if session.config.option.worker:
         session.config.option.verbose = -2
     if session.config.ptmproc_runtime and not session.config.ptmproc_runtime.mproc_main:
         session.config.option.verbose = -2
-    if session.config.ptmproc_runtime and session.config.ptmproc_runtime.mproc_main:
-        with session.config.ptmproc_runtime.mproc_main:
-            pass
-    if session.config.option.collectonly:
-        return
     if not session.config.option.worker and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.coordinator is not None:
         with suppress(Exception):
             session.config.ptmproc_runtime.coordinator.kill()
     if not session.config.option.worker and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.mproc_main is not None:
-        session.config.ptmproc_runtime.mproc_main.shutdown()
+        with suppress(Exception):
+            session.config.ptmproc_runtime.mproc_main.shutdown()
     yield
     session.config.option.verbose = verbose
 

@@ -10,14 +10,13 @@ from multiprocessing import (
     Queue,
     Semaphore,
 )
-from multiprocessing.process import current_process
 from typing import Iterator, Union
 import pytest
 # noinspection PyProtectedMember
 from _pytest.config import _prepareconfig
 import resource
 
-from pytest_mproc import resource_utilization, TestError, user_output, get_ip_addr
+from pytest_mproc import resource_utilization, TestError, user_output, get_ip_addr, get_auth_key
 from pytest_mproc.data import (
     ClientDied,
     ResultExit,
@@ -199,8 +198,11 @@ class WorkerSession:
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
         env["AUTH_TOKEN_STDIN"] = "1"
+        assert not user_output.verbose
         if user_output.verbose:
             env['PTMPROC_VERBOSE'] = '1'
+        else:
+            env['PTMPROC_VERBOSE'] = '0'
         env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
         stdout = sys.stdout
         stderr = sys.stderr
@@ -209,7 +211,7 @@ class WorkerSession:
         proc = subprocess.Popen([executable, '-m', __name__, uri] + sys.argv[1:],
                                 env=env,
                                 stdout=stdout, stderr=stderr, stdin=subprocess.PIPE)
-        proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
+        proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.flush()
         return proc
 
@@ -250,7 +252,7 @@ class WorkerSession:
             config._ensure_unconfigure()
             worker._reporter.write(f"\nWorker-{index} finished\n")
 
-    def pytest_internalerror(self, excrepr):
+    def pytest_internalerror(self, __excrepr):
         self._put(ResultException(SystemError("Internal pytest error")))
 
     @pytest.hookimpl(tryfirst=True)
@@ -267,8 +269,6 @@ class WorkerSession:
     def session_finish(self):
         """
         output failure information and final exit status back to coordinator
-
-        :param exitstatus: exit status of the test suite run
         """
         self._put(ResultExit(self._index,
                              self._count,
@@ -335,8 +335,9 @@ def main():
         with suppress(Exception):  # result q is probably closed by now, but for good measure...
             result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
         with suppress(Exception):
-            Node.Manager.singleton().shutdown()
+            Node.Manager.shutdown()
+    return status
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

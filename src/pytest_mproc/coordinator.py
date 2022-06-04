@@ -6,11 +6,10 @@ import sys
 import time
 from contextlib import suppress
 
-from multiprocessing import current_process
 from multiprocessing.managers import SyncManager
 from subprocess import TimeoutExpired
 from typing import Optional
-from pytest_mproc import find_free_port, get_ip_addr
+from pytest_mproc import find_free_port, get_ip_addr, get_auth_key
 from pytest_mproc.main import FatalError
 from pytest_mproc.utils import BasicReporter
 
@@ -31,7 +30,7 @@ class CoordinatorFactory:
         self._num_processes = num_processes
         self._is_local = not as_remote_client
         if self.sm is None and not self._is_local:
-            self.sm = SyncManager(authkey=current_process().authkey, address=(get_ip_addr(), find_free_port()))
+            self.sm = SyncManager(authkey=get_auth_key(), address=(get_ip_addr(), find_free_port()))
             self.sm.start()
         self._mgr = mgr
 

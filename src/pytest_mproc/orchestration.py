@@ -11,20 +11,20 @@ from glob import glob
 from multiprocessing import Semaphore
 from multiprocessing import JoinableQueue
 from multiprocessing.managers import SyncManager
-from multiprocessing.process import current_process
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 
-from pytest_mproc import user_output
+from pytest_mproc import get_auth_key
 from pytest_mproc.fixtures import Global
 from pytest_mproc.remote.ssh import SSHClient, remote_root_context
-from pytest_mproc.user_output import always_print
+from pytest_mproc.user_output import always_print, debug_print
 
 
 class Protocol(Enum):
     LOCAL = 'local'
     REMOTE = 'remote'
     SSH = 'ssh'
+    DELEGATED = 'delegated'
 
 
 class OrchestrationManager:
@@ -37,6 +37,7 @@ class OrchestrationManager:
             return self._val
 
     def __init__(self, host: str, port: int):
+        Global.Manager.register("Queue", multiprocessing.Queue, exposed=["get", "put"])
         self._port = port
         self._host = host
         self._test_q: Dict[str, JoinableQueue] = {}
@@ -51,7 +52,7 @@ class OrchestrationManager:
 
     @staticmethod
     def key() -> str:
-        return hashlib.sha256(current_process().authkey).hexdigest()
+        return hashlib.sha256(get_auth_key()).hexdigest()
 
     @property
     def host(self):
@@ -62,8 +63,7 @@ class OrchestrationManager:
         return self._port
 
     @staticmethod
-    def create(uri: str, as_client: bool, project_name: Optional[str] = None,
-               serve_forever: bool = False) -> "OrchestrationManager":
+    def create(uri: str, as_client: bool, project_name: Optional[str] = None) -> "OrchestrationManager":
         """
         create an orchestration manager to manage test & results q's as well as clients/workers
         one of three protocols can be used in uri: local for running a server local,
@@ -79,13 +79,17 @@ class OrchestrationManager:
         """
         parts = uri.split('://', maxsplit=1)
         try:
-            if len(parts) == 1:
+            if uri.startswith('delegated://'):
+                host = None
+                port_text = uri.rsplit('://', maxsplit=1)[-1]
+                protocol = Protocol.DELEGATED
+            elif len(parts) == 1:
                 host, port_text = parts[0].split(':', maxsplit=1)
                 protocol = Protocol.LOCAL
             else:
                 protocol_text = parts[0]
                 host, port_text = parts[1].split(':', maxsplit=1)
-                protocol = Protocol(protocol_text)
+                protocol = Protocol.LOCAL if as_client else Protocol(protocol_text)
             port = int(port_text)
         except ValueError:
             raise ValueError(f"URI {uri}: unknown protocol or invalid port specification")
@@ -94,7 +98,7 @@ class OrchestrationManager:
             if as_client:
                 mgr.connect()
             else:
-                mgr.start(serve_forever=serve_forever)
+                mgr.start()
         elif protocol == Protocol.REMOTE:
             # always instantiate as client as there is an external server
             mgr = OrchestrationManager(host, port)
@@ -106,14 +110,30 @@ class OrchestrationManager:
             # wait for server to start listening
             time.sleep(3)
             mgr.connect()
+        elif protocol == Protocol.DELEGATED:
+            mgr = OrchestrationManager(host, port)
+            # will connect later as server is delegated to one of the workers and must wait for that to come up
         else:
             raise SystemError("Invalid protocol to process")
         return mgr
 
-    def connect(self) -> None:
+    def Queue(self, size: Optional[int] = None):
+        if size:
+            return self._global_mgr.Queue(size)
+        return self._global_mgr.Queue()
+
+    def connect(self, host: Optional[str]=None) -> None:
         """
         Connect as a client to an existing server
+
+        :param host: if host assignment defered, use this
         """
+        if self._host is not None and host is not None:
+            raise ValueError("Cannot specify host on connect when one already assigned on construction")
+        elif self._host is None and host is None:
+            raise ValueError(f"No host set")
+        elif self._host is None:
+            self._host = host
         Global.Manager.register("register_client")
         Global.Manager.register("register_worker")
         Global.Manager.register("count")
@@ -122,13 +142,14 @@ class OrchestrationManager:
         Global.Manager.register("get_test_queue")
         Global.Manager.register("get_results_queue")
         host = self._host.split('@', maxsplit=1)[-1]
-        always_print(f"Connecting on {host} at {self._port} as client")
+        debug_print(f"Connecting on {host} at {self._port} as client")
         self._global_mgr = Global.Manager.singleton(address=(host, self._port), as_client=True)
 
-    def start(self, serve_forever: bool = False):
+    def start(self):
         """
         Start this instance as the main server
         """
+        assert self._global_mgr is None
         Global.Manager.register("register_client", self._register_client)
         Global.Manager.register("register_worker", self._register_worker)
         Global.Manager.register("count", self._count)
@@ -141,7 +162,7 @@ class OrchestrationManager:
         # we only need these as dicts when running a standalone remote server handling multiple
         # pytest sessions/users
         self._global_mgr = Global.Manager.singleton(address=(self._host, self._port),
-                                                    as_client=False, serve_forever=serve_forever)
+                                                    as_client=False)
         self._is_server = True
 
     def _join(self, key: str,  timeout: Optional[float] = None) -> None:
@@ -198,8 +219,8 @@ class OrchestrationManager:
                 os.kill(self._mproc_pid, signal.SIGINT)
             with suppress(Exception):
                 os.kill(self._mproc_pid, signal.SIGKILL)
-        if self._is_server:
-            self._global_mgr.shutdown()
+        #if self._is_server:
+        #    self._global_mgr.shutdown()
 
     # server interface mapped to multiprocessing functions without the underscore in Global.Manager carried by this
     # instance
@@ -242,7 +263,7 @@ class OrchestrationManager:
         except ValueError:
             user = None
         sem = multiprocessing.Semaphore(0)
-        mpmgr = SyncManager()
+        mpmgr = SyncManager(authkey=get_auth_key())
         mpmgr.start()
         try:
             returns = mpmgr.dict()
@@ -285,7 +306,7 @@ class OrchestrationManager:
                 for f in files:
                     assert Path(f).exists()
                     await ssh.push(Path(f), tmpdir / Path(f).relative_to(root))
-                always_print(
+                debug_print(
                     f"Launching global manager: {python} {str(Path('pytest_mproc') / Path(__file__).name)} "
                     f"{host} {port}")
                 remote_proc = await ssh.launch_remote_command(
@@ -296,10 +317,10 @@ class OrchestrationManager:
                     stderr=asyncio.subprocess.PIPE,
                     stdout=sys.stderr,
                     stdin=asyncio.subprocess.PIPE,
-                    auth_key=current_process().authkey
+                    auth_key=get_auth_key()
                 )
                 import binascii
-                remote_proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
+                remote_proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
                 remote_proc.stdin.close()
                 sem.release()
                 returns.update({'remote_proc_id': remote_proc.pid})
@@ -312,11 +333,17 @@ class OrchestrationManager:
             raise
 
 
+def main(host: str, port: int, project_name: str, sem: multiprocessing.Semaphore):
+    always_print(f"Serving orchestration manager on {host}:{port} forever...")
+    mgr = OrchestrationManager.create(uri=f"{host}:{port}", project_name=project_name,
+                                      as_client=False)
+    sem.acquire()
+    mgr.shutdown()
+    return mgr
+
+
 if __name__ == "__main__":
     host = sys.argv[1]
     port = int(sys.argv[2])
     project_name = sys.argv[3]
-    user_output.set_verbose(True)
-    always_print(f"Serving orchestration manager on {host}:{port} forever...")
-    mgr = OrchestrationManager.create(uri=f"{host}:{port}", project_name=project_name,
-                                      as_client=False, serve_forever=True)
+    main(host, port, project_name, True)

@@ -20,6 +20,7 @@ class ProjectConfig:
     project_name: str
     project_root: Path
     test_files: List[Path]
+    artifcats_path: Optional[Path] = Path('./artifacts')
     src_paths: List[Path] = field(default_factory=list)
     prepare_script: Optional[Path] = None
     finalize_script: Optional[Path] = None
@@ -29,6 +30,10 @@ class ProjectConfig:
         with open(path, 'rb') as in_stream:
             try:
                 data = json.load(in_stream)
+                if 'artifacts_path' in data:
+                    if Path(data['artifacts_path']).is_absolute():
+                        raise pytest.UsageError(
+                            f"'artifacts_dir' in project config '{str(path)}' must be a relative path")
                 if 'project_name' not in data:
                     raise pytest.UsageError(f"project config {str(path)} does not define 'project_name'")
                 if not data['project_name'].strip():
@@ -59,6 +64,7 @@ class ProjectConfig:
                     test_files=[Path(p) for p in data[TEST_FILES]],
                     src_paths=[Path(p) for p in data[SRC_PATHS]],
                     prepare_script=data.get('prepare_script'),
+                    artifcats_path=data.get('artifacts_path', Path("./artifacts")),
                     finalize_script=data.get('finalize_script'),
                 )
             except json.JSONDecodeError:

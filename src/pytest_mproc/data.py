@@ -7,6 +7,7 @@ from pytest import TestReport
 
 
 class TestExecutionConstraint(Enum):
+    __test__ = False  # tell pytest not to treat as test class
     SINGLE_PROCESS ="SINGLE_PROCESS"
     SINGLE_NODE = "SINGLE_NODE"
 
@@ -41,7 +42,7 @@ class ClientDied(Exception):
 
 @dataclass
 class AllClientsCompleted:
-    hosts: List[str]
+    pass
 
 
 @dataclass

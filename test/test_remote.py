@@ -14,7 +14,6 @@ from asyncio import Semaphore
 from pathlib import Path
 
 from pytest_mproc import find_free_port
-from pytest_mproc.fixtures import Global
 from pytest_mproc.main import RemoteExecutionThread
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
@@ -89,7 +88,6 @@ async def test_execute_remote_multi(bundle):
 
 def test_remote_execution_cli(tmp_path):
     root = Path(__file__).parent.parent
-    ipname = socket.gethostbyname(socket.gethostname())
     project_config = ProjectConfig(src_paths=[Path("src"), Path("testsrc")],
                                    test_files=[Path("test") / "*.py", Path("requirements.txt")],
                                    project_root=root,
@@ -105,13 +103,15 @@ def test_remote_execution_cli(tmp_path):
                      'project_name': project_config.project_name}
         out.write(json.dumps(converted))
         out.flush()
-        # remote_host = 'ssh://pi@10.220.45.119'
-        remote_host = '127.0.0.1'
-        client_connect = remote_host.split("://")[-1]
+        # remote_host = 'fssh://pi@10.220.45.119:{find_free_port()}'
+        remote_host = f'127.0.0.1:{find_free_port()}'
+        client_connect = remote_host.split(":")[0]
+        remote_server = f'delegated://{find_free_port()}'
+        # remote_server = remote_host
         args = [
             'pytest', '-s', 'test/test_mproc_runs.py', '-k', 'alg2',
             '--cores', '3',
-            '--as-main', f"{remote_host}:{find_free_port()}",
+            '--as-main', f"{remote_server}",
             '--project-structure', str(project_config_path),
             '--remote-worker', client_connect,
             '--remote-worker', client_connect,
@@ -122,6 +122,7 @@ def test_remote_execution_cli(tmp_path):
         sys.path.insert(0, str((Path(__file__).parent / "src").absolute()))
         env = os.environ.copy()
         env['PYTHONPATH'] = "./src"
+        print(f">>>>>>>>  RUNNING {' '.join(args)}")
         completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=1200, env=env,
                                    cwd=str(tmp_path))
         assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from " \
@@ -165,7 +166,7 @@ def test_remote_execution_thread(tmp_path, chdir):
     try:
         sem = Semaphore(0)
         time.sleep(3)
-        mgr = OrchestrationManager((ipname, port))
+        mgr = OrchestrationManager(host=ipname, port=port)
         # noinspection PyUnresolvedReferences
         results_q = mgr.get_results_queue()
         thread.start_workers(

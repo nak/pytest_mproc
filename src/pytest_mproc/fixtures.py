@@ -3,11 +3,11 @@ import functools
 import logging
 import os
 import sys
-from multiprocessing import current_process
+import time
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
-from pytest_mproc.user_output import debug_print, always_print
-from pytest_mproc import find_free_port
+from pytest_mproc.user_output import debug_print
+from pytest_mproc import find_free_port, get_auth_key_hex, get_auth_key
 
 # assert plugin  # import takes care of some things on import, but not used otherwise; here to make flake8 happy
 
@@ -30,29 +30,33 @@ class FixtureManager(BaseManager):
         def value(self) -> Any:
             return self._val
 
-    def __init__(self, addr: Tuple[str, int], auth_key: Optional[bytes] = None):
-        super().__init__(address=addr, authkey=auth_key or current_process().authkey)
+    def __init__(self, addr: Tuple[str, int]):
+        super().__init__(address=addr, authkey=get_auth_key())
 
     # noinspection PyAttributeOutsideInit
     def start(self, *args, **kwargs):
-        always_print(f"Starting {self.__class__.__qualname__} server {self.address}...")
+        debug_print(f"Starting {self.__class__.__qualname__} server {self.address}...")
         # server:
         self._fixtures: Dict[str, Any] = {}
         self.__class__.register("get_fixture", self._get_fixture)
         self.__class__.register("put_fixture", self._put_fixture)
         super().start(*args, **kwargs)
-        always_print(f"Started {self.__class__.__qualname__} server")
+        debug_print(f"Started {self.__class__.__qualname__} server.")
 
-    def connect(self):
-        debug_print(f"Connecting {self.__class__.__qualname__} server {self.address}...")
+    def connect(self, tries: int = 3):
         self.__class__.register("get_fixture")
         self.__class__.register("put_fixture")
-        try:
-            super().connect()
-        except Exception as e:
-            always_print(f"!!! Exception connecting {self.__class__.__qualname__} at {self.address}: {e}")
-            raise
-        debug_print(f"Connected {self.__class__.__qualname__} server")
+        debug_print(f"Connecting {self.__class__.__qualname__} server {self.address}...")
+        while tries:
+            try:
+                super().connect()
+                break
+            except:
+                time.sleep(1)
+                tries -= 1
+                if tries <= 0:
+                    raise
+        debug_print(f"Connected {self.__class__.__qualname__} server.")
 
     def _put_fixture(self, name: str, value: Any) -> None:
         self._fixtures[name] = value
@@ -82,14 +86,15 @@ class Node:
                 # noinspection PyBroadException
                 try:
                     cls._singleton = cls(as_main=False, port=cls.PORT)
-                    cls._singleton.connect()
+                    cls._singleton.connect(tries=3)
                     cls._singleton._is_serving = False
                 except (OSError, EOFError):
+                    debug_print(f"Looks like no node manager already running, starting ...")
                     cls._singleton = cls(as_main=True, port=cls.PORT)
                     cls._singleton.start()
                     cls._singleton._is_serving = True
-                except Exception:
-                    raise SystemError(f"FAILED TO START NODE MANAGER")
+                except Exception as e:
+                    raise SystemError(f"FAILED TO START NODE MANAGER") from e
             return cls._singleton
 
         @classmethod
@@ -110,8 +115,7 @@ class Global:
             super().__init__((host, port))
 
         @classmethod
-        def singleton(cls, address: Optional[Tuple[str, int]] = None, as_client: bool = False,
-                      serve_forever: bool = False) -> "Global.Manager":
+        def singleton(cls, address: Optional[Tuple[str, int]] = None, as_client: bool = False) -> "Global.Manager":
             if cls._singleton:
                 return cls._singleton
             elif address is None:
@@ -131,11 +135,7 @@ class Global:
             else:
                 host, port = address
                 cls._singleton = cls(host=host, port=port)
-                if serve_forever:
-                    always_print("Serving remote global manager ...")
-                    cls._singleton.get_server().serve_forever()
-                else:
-                    cls._singleton.start()
+                cls._singleton.start()
                 cls._singleton._is_serving = True
             return cls._singleton
 
@@ -169,7 +169,7 @@ def global_fixture(**kwargs):
             # when serving potentially multiple full pytest session in a standalone server,
             # we distinguish sessions via the auth token
             # noinspection PyUnresolvedReferences
-            key = f"{current_process().authkey} {func.__name__}"
+            key = f"{get_auth_key_hex()} {func.__name__}"
             value = value or global_mgr.get_fixture(key).value()
             if type(value) == FixtureManager.NoneValue:
                 v = func(*args, **kwargs)
@@ -195,7 +195,6 @@ def node_fixture(**kwargs):
         raise pytest.UsageError("Cannot specify scope for 'glboal' fixtures; they are always mapped to 'session'")
     if "--cores" not in sys.argv:
         return pytest.fixture(scope='session', **kwargs)
-    node_mgr = Node.Manager.singleton()
 
     def _decorator(func):
         value = None
@@ -204,6 +203,7 @@ def node_fixture(**kwargs):
         @functools.wraps(func)
         def _wrapper(*args, **kwargs):
             nonlocal value
+            node_mgr = Node.Manager.singleton()
             func_name = func.__name__
             # noinspection PyUnresolvedReferences
             value = value or node_mgr.get_fixture(func_name).value()

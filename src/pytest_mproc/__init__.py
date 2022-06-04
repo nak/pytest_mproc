@@ -1,15 +1,39 @@
+from multiprocessing.process import current_process
+
+import binascii
 import inspect
 import os
 import secrets
 import socket
 import sys
 from contextlib import closing
-from multiprocessing.process import current_process
-from typing import Union
-
+from typing import Union, Callable, Optional
 
 # to indicate if running as main (host) or not;  set in plugin.py
 is_main = '--as-main' in sys.argv
+is_worker = '--as-worker' in sys.argv
+
+_auth_key = None
+_user_defined_auth: Optional[Callable[[], bytes]] = None
+
+
+def get_auth_key() -> bytes:
+    global _auth_key
+    if _auth_key is not None:
+        return _auth_key
+    elif _user_defined_auth:
+        _auth_key = _user_defined_auth()
+    elif 'AUTH_TOKEN_STDIN' in os.environ:
+        auth_key = sys.stdin.readline().strip()
+        _auth_key = binascii.a2b_hex(auth_key)
+    else:
+        _auth_key = secrets.token_bytes(64)
+    current_process().authkey = _auth_key
+    return _auth_key
+
+
+def get_auth_key_hex():
+    return binascii.b2a_hex(get_auth_key()).decode('utf-8')
 
 
 class TestError(Exception):
@@ -42,6 +66,7 @@ def group(tag: Union["GroupTag", str]):
     :param tag: unique name for group of tests to be serialized under execution
     """
     from pytest_mproc.data import GroupTag
+
     def decorator_group(object):
         if inspect.isclass(object):
             for method in [getattr(object, m) for m in dir(object) if inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
@@ -93,13 +118,6 @@ def get_ip_addr():
         return None
 
 
-if "AUTH_TOKEN_STDIN" in os.environ:
-    import binascii
-    auth_key = sys.stdin.readline().strip()
-    current_process().authkey = binascii.a2b_hex(auth_key)
-else:
-    if current_process().authkey is None:
-        current_process().authkey = secrets.token_bytes(64)
 
 DEFAULT_PRIORITY = 10
 try:
