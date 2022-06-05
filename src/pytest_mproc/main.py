@@ -1,6 +1,7 @@
 import asyncio
 import multiprocessing
 import os
+import signal
 from multiprocessing.managers import SyncManager
 from queue import Empty
 
@@ -22,7 +23,7 @@ from typing import List, Any, Optional, Union, Dict, AsyncIterator, AsyncGenerat
 import pytest
 from _pytest.reports import TestReport
 
-from pytest_mproc import resource_utilization, find_free_port, user_output, DEFAULT_PRIORITY, get_auth_key
+from pytest_mproc import resource_utilization, find_free_port, user_output, DEFAULT_PRIORITY, get_auth_key, FatalError
 from pytest_mproc.data import (
     ClientDied,
     GroupTag,
@@ -38,15 +39,9 @@ from pytest_mproc.remote.bundle import Bundle
 from pytest_mproc.user_output import debug_print, always_print
 from pytest_mproc.utils import BasicReporter
 
-__all__ = ["Orchestrator", "RemoteExecutionThread", "FatalError"]
+__all__ = ["Orchestrator", "RemoteExecutionThread"]
 
 lock = RLock()
-
-
-class FatalError(Exception):
-    """
-    raised to exit pytest immediately
-    """
 
 
 # noinspection PyBroadException
@@ -84,16 +79,21 @@ class RemoteExecutionThread:
         self._exc_manager.start()
         self._q = self._exc_manager.Queue()
         if uri and uri.startswith('delegated://'):
-            port_text = uri.rsplit('://', maxsplit=1)[-1]
+            destination_text = uri.rsplit('://', maxsplit=1)[-1]
+            if '@' in destination_text:
+                self._username, port_text = destination_text.split('@', maxsplit=1)
+            else:
+                self._username = os.environ.get('SSH_USERNAME')
+                port_text = destination_text
             self._delegation_port = int(port_text) if port_text else find_free_port()
         else:
             self._delegation_port = None
 
-    # noinspection PyAttributeOutsideInit
     def start_workers(
             self,
             server: str, server_port: int,
             hosts_q: Queue,
+            port_q: Queue,
             timeout: Optional[float] = None,
             deploy_timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
@@ -101,11 +101,12 @@ class RemoteExecutionThread:
         args = (
             server, server_port, self._project_config, self._remote_hosts_config,
             self._remote_sys_executable, self._q, timeout, deploy_timeout,
-            auth_key, hosts_q, user_output.verbose, Orchestrator.ptmproc_args,
-            self._delegation_port
+            auth_key, hosts_q, port_q, user_output.verbose, Orchestrator.ptmproc_args,
+            self._delegation_port, self._username
         )
         self._proc = multiprocessing.Process(target=RemoteExecutionThread._start, args=args)
         self._proc.start()
+        return self._proc
 
     @staticmethod
     def _determine_cli_args(remote_hosts_config: List[RemoteHostConfig],
@@ -149,12 +150,15 @@ class RemoteExecutionThread:
                timeout: Optional[float], deploy_timeout: Optional[float],
                auth_key: bytes,
                hosts_q: Queue,
+               port_q: Queue,
                verbose: bool,
                ptmproc_args: Dict[str, Any],
                delegation_port: Optional[int] = None,
+               username: Optional[str] = None
                ):
+        finish_sem = None
         user_output.set_verbose(verbose)
-        finish_sem = multiprocessing.Semaphore(0)
+        delegation_proc = None
         try:
             with tempfile.TemporaryDirectory() as tmpdir,\
                     Bundle.create(root_dir=Path(tmpdir),
@@ -166,17 +170,21 @@ class RemoteExecutionThread:
                     auth_key=auth_key,
                     timeout=timeout,
                     deploy_timeout=deploy_timeout,
-                    username=os.environ.get('SSH_USERNAME'),
+                    username=username,
                     server_info=(server, server_port),
                     delegation_port=delegation_port,
                     hosts_q=hosts_q,
-                    finish_sem=finish_sem
+                    port_q=port_q
                 )
-                procs, delegation_host = asyncio.get_event_loop().run_until_complete(task)
+                procs, delegation_host, delegation_proc = asyncio.get_event_loop().run_until_complete(task)
                 server = delegation_host or server
+                if delegation_port is not None:
+                    server_port = port_q.get()
+                    port_q.put(server_port)
                 mgr = OrchestrationManager(host=server, port=server_port)
                 mgr.connect()
                 result_q = mgr.get_results_queue()
+                finish_sem = mgr.get_finalize_sem()
                 with suppress(FileNotFoundError, ConnectionError):
                     # normally, result_q is closed, unless there is an exception that prevents any tests from
                     # running straight off
@@ -184,13 +192,20 @@ class RemoteExecutionThread:
                     result_q.put(AllClientsCompleted())
         except Exception as e:
             import traceback
-            msg = f"!!! Exception in creating or executing bundle {e}:\n {traceback.format_exc()}"
+            msg = f"!!! Exception in creating or executing bundle {e}:\n\n   {traceback.format_exc()}\n"
             os.write(sys.stderr.fileno(), msg.encode('utf-8'))
             with suppress(Exception):
                 result_q.put(FatalError(msg))
             q.put(e)
         finally:
-            finish_sem.release()
+            if finish_sem:
+                finish_sem.release()
+            try:
+                if delegation_proc:
+                    asyncio.get_event_loop().run_until_complete(asyncio.wait_for(delegation_proc, timeout=5))
+            except asyncio.TimeoutError:
+                with suppress(Exception):
+                    os.kill(delegation_proc.pid, signal.SIGTERM)
 
     def join(self, timeout: Optional[float] = None):
         try:
@@ -282,31 +297,36 @@ class Orchestrator:
         host = self._mp_manager.host
         port = self._mp_manager.port
         self._finish_sem = Semaphore(0)
+        port_q = multiprocessing.Queue(2)
         if remote_clients_config:
             self._sm = SyncManager(authkey=get_auth_key())
             self._sm.start()
-            queue = self._sm.Queue(100)
+            self._hosts_q = self._sm.Queue(100)
             delegate_q = self._sm.Queue()
             self._populate_proc = multiprocessing.Process(
                 target=Orchestrator.populate_worker_queue,
-                args=(queue, remote_clients_config, deploy_timeout, self._finish_sem, delegate_q),)
+                args=(self._hosts_q, remote_clients_config, deploy_timeout, self._finish_sem, delegate_q),)
             self._populate_proc.start()
             self._remote_exec_thread = RemoteExecutionThread(remote_hosts_config=remote_clients_config,
                                                              remote_sys_executable=remote_sys_executable,
                                                              project_config=project_config,
                                                              uri=uri
                                                              )
-            self._remote_exec_thread.start_workers(
+            self._workers_proc = self._remote_exec_thread.start_workers(
                 server=host, server_port=port,
                 deploy_timeout=deploy_timeout, auth_key=get_auth_key(),
-                hosts_q=queue,
+                hosts_q=self._hosts_q, port_q=port_q
             )
             if uri.startswith('delegated://'):
                 delegated_host = delegate_q.get(timeout=deploy_timeout)
+                port = port_q.get(timeout=deploy_timeout)
+                self._mp_manager._port = port
                 self._server_uri = f"{delegated_host}:{self._mp_manager.port}"
                 tries = 30
                 while tries:
                     try:
+                        if self._workers_proc.join(timeout=0):
+                            raise SystemError("workers processes died unexpectedly")
                         self._mp_manager.connect(delegated_host)
                         break
                     except:
@@ -314,7 +334,7 @@ class Orchestrator:
                         delegated_host = None
                         tries -= 1
                         if tries <= 0:
-                            raise
+                            raise SystemError(f"Failed to start delegate manager on {delegated_host}:{self._mp_manager.port}")
                         time.sleep(1)
         else:
             self._remote_exec_thread = None
@@ -323,6 +343,7 @@ class Orchestrator:
         self._reporter = BasicReporter()
         self._is_serving_remotes = remote_clients_config is not None
         self._pending: Dict[str, TestState] = {}
+        self._workers_proc = None
 
     @property
     def host(self):
@@ -336,6 +357,11 @@ class Orchestrator:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        with suppress(Exception):
+            self._hosts_q.put(None)  # may already be closed, but in case of error path, etc
+        if self._workers_proc is not None:
+            with suppress(Exception):
+                self._workers_proc.terminate()
         if self._remote_exec_thread is not None:
             if self._remote_exec_thread.join(timeout=5) is None:
                 with suppress(Exception):
@@ -343,6 +369,7 @@ class Orchestrator:
         self._mp_manager.shutdown()
         if self._populate_proc is not None:
             self._populate_proc.terminate()
+
 
     @staticmethod
     def _write_sep(s, txt):
@@ -609,6 +636,8 @@ class Orchestrator:
             populate_tests_process.terminate()
             raise session.Failed(True)
         finally:
+            finish_sem = self._mp_manager.get_finalize_sem()
+            finish_sem.release()
             if self._sm is not None:
                 self._sm.shutdown()
             populate_tests_process.join(timeout=1)  # should never time out since workers are done
@@ -622,8 +651,7 @@ class Orchestrator:
             sys.stdout.write("\r\n")
             self._output_summary(rusage.time_span, rusage.user_cpu, rusage.system_cpu, rusage.memory_consumed)
             # noinspection PyProtectedMember
-            for client in self._mp_manager._clients:
-                client.join()
+            self._mp_manager.join()
 
     def shutdown(self):
         self._finish_sem.release()

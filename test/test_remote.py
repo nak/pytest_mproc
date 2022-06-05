@@ -106,7 +106,8 @@ def test_remote_execution_cli(tmp_path):
         # remote_host = 'fssh://pi@10.220.45.119:{find_free_port()}'
         remote_host = f'127.0.0.1:{find_free_port()}'
         client_connect = remote_host.split(":")[0]
-        remote_server = f'delegated://{find_free_port()}'
+        remote_server = f'delegated://pi@'
+        client_connect = '10.220.45.110'
         # remote_server = remote_host
         args = [
             'pytest', '-s', 'test/test_mproc_runs.py', '-k', 'alg2',

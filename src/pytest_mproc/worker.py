@@ -198,7 +198,6 @@ class WorkerSession:
         env = os.environ.copy()
         env["PYTEST_WORKER"] = "1"
         env["AUTH_TOKEN_STDIN"] = "1"
-        assert not user_output.verbose
         if user_output.verbose:
             env['PTMPROC_VERBOSE'] = '1'
         else:
@@ -207,7 +206,6 @@ class WorkerSession:
         stdout = sys.stdout
         stderr = sys.stderr
         executable = executable or sys.executable
-        debug_print(f">>> Starting worker with args {sys.argv[1:]}")
         proc = subprocess.Popen([executable, '-m', __name__, uri] + sys.argv[1:],
                                 env=env,
                                 stdout=stdout, stderr=stderr, stdin=subprocess.PIPE)

@@ -137,3 +137,9 @@ except:
     # for orchestrationmanager to be able to come up independently
     # TODO: fix this
     pass
+
+
+class FatalError(Exception):
+    """
+    raised to exit pytest immediately
+    """

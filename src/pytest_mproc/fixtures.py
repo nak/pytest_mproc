@@ -6,7 +6,7 @@ import sys
 import time
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
-from pytest_mproc.user_output import debug_print
+from pytest_mproc.user_output import debug_print, always_print
 from pytest_mproc import find_free_port, get_auth_key_hex, get_auth_key
 
 # assert plugin  # import takes care of some things on import, but not used otherwise; here to make flake8 happy
@@ -43,19 +43,11 @@ class FixtureManager(BaseManager):
         super().start(*args, **kwargs)
         debug_print(f"Started {self.__class__.__qualname__} server.")
 
-    def connect(self, tries: int = 3):
+    def connect(self):
         self.__class__.register("get_fixture")
         self.__class__.register("put_fixture")
         debug_print(f"Connecting {self.__class__.__qualname__} server {self.address}...")
-        while tries:
-            try:
-                super().connect()
-                break
-            except:
-                time.sleep(1)
-                tries -= 1
-                if tries <= 0:
-                    raise
+        super().connect()
         debug_print(f"Connected {self.__class__.__qualname__} server.")
 
     def _put_fixture(self, name: str, value: Any) -> None:
@@ -86,7 +78,7 @@ class Node:
                 # noinspection PyBroadException
                 try:
                     cls._singleton = cls(as_main=False, port=cls.PORT)
-                    cls._singleton.connect(tries=3)
+                    cls._singleton.connect()
                     cls._singleton._is_serving = False
                 except (OSError, EOFError):
                     debug_print(f"Looks like no node manager already running, starting ...")
@@ -109,14 +101,14 @@ class Global:
 
     class Manager(FixtureManager):
 
-        _singleton = None
+        _singleton: Optional["Global.Maager"] = None
 
         def __init__(self, host: str, port: int):
             super().__init__((host, port))
 
         @classmethod
         def singleton(cls, address: Optional[Tuple[str, int]] = None, as_client: bool = False) -> "Global.Manager":
-            if cls._singleton:
+            if cls._singleton and cls._singleton.address[0] is not None:
                 return cls._singleton
             elif address is None:
                 raise SystemError("Attempt to get Global manager before start or connect")
@@ -126,17 +118,21 @@ class Global:
                 assert host is not None and port is not None, \
                     "Internal error: host and port not provided for global manager"
                 try:
-                    cls._singleton = cls(host=host, port=port)
-                    cls._singleton.connect()
-                    cls._singleton._is_serving = False
+                    singleton = cls(host=host, port=port)
+                    singleton.connect()
+                    singleton._is_serving = False
                 except Exception as e:
-                    import traceback
-                    raise SystemError(f"Caught exception connecting to global server at {host}:{port}: {e} \n{traceback.format_exc()}")
+                    raise
             else:
                 host, port = address
-                cls._singleton = cls(host=host, port=port)
-                cls._singleton.start()
-                cls._singleton._is_serving = True
+                host = host.split('@', maxsplit=1)[-1]
+                singleton = cls(host=host, port=port)
+                try:
+                    singleton.start()
+                    singleton._is_serving = True
+                except:
+                    raise
+            cls._singleton = singleton
             return cls._singleton
 
         @classmethod

@@ -9,8 +9,7 @@ from contextlib import suppress
 from multiprocessing.managers import SyncManager
 from subprocess import TimeoutExpired
 from typing import Optional
-from pytest_mproc import find_free_port, get_ip_addr, get_auth_key
-from pytest_mproc.main import FatalError
+from pytest_mproc import find_free_port, get_ip_addr, get_auth_key, FatalError
 from pytest_mproc.utils import BasicReporter
 
 

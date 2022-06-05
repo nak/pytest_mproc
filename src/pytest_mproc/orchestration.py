@@ -16,7 +16,8 @@ from typing import Optional, Dict, List, Any, Tuple
 
 import pytest
 
-from pytest_mproc import get_auth_key, find_free_port
+from pytest_mproc import get_auth_key, find_free_port, get_ip_addr
+from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.fixtures import Global
 from pytest_mproc.remote.ssh import SSHClient, remote_root_context
 from pytest_mproc.user_output import always_print, debug_print
@@ -46,11 +47,12 @@ class OrchestrationManager:
         self._results_q: Dict[str, JoinableQueue] = {}
         self._global_mgr = None
         # only for SSH protocol:
-        self._clients: Dict[str, List[Any]] = {}
+        self._clients: Dict[str, List[Coordinator]] = {}
         self._workers: Dict[str, Dict[str, Any]] = {}
         self._is_server = False
         self._mproc_pid: Optional[int] = None
         self._remote_pid: Optional[int] = None
+        self._finalize_sem : Dict[str, multiprocessing.Semaphore] = {}
 
     @staticmethod
     def key() -> str:
@@ -84,6 +86,8 @@ class OrchestrationManager:
             if uri.startswith('delegated://'):
                 host = None
                 port_text = uri.rsplit('://', maxsplit=1)[-1]
+                if '@' in port_text:
+                    username, port_text = port_text.split('@', maxsplit=1)
                 protocol = Protocol.DELEGATED
             elif len(parts) == 1:
                 host, port_text = parts[0].split(':', maxsplit=1)
@@ -93,8 +97,6 @@ class OrchestrationManager:
                 host, port_text = parts[1].split(':', maxsplit=1)
                 protocol = Protocol.LOCAL if as_client else Protocol(protocol_text)
             port = int(port_text) if port_text else (find_free_port() if protocol != Protocol.DELEGATED else -1)
-            if port < 0:
-                raise pytest.UsageError("You must specify an explicit port when using 'delegated://' protocol")
         except ValueError:
             raise ValueError(f"URI {uri}: unknown protocol or invalid port specification")
         if protocol == Protocol.LOCAL:
@@ -138,6 +140,8 @@ class OrchestrationManager:
             raise ValueError(f"No host set")
         elif self._host is None:
             self._host = host
+        Global.Manager.register("join")
+        Global.Manager.register("get_finalize_sem")
         Global.Manager.register("register_client")
         Global.Manager.register("register_worker")
         Global.Manager.register("count")
@@ -147,7 +151,7 @@ class OrchestrationManager:
         Global.Manager.register("get_test_queue")
         Global.Manager.register("get_results_queue")
         host = self._host.split('@', maxsplit=1)[-1]
-        debug_print(f"Connecting on {host} at {self._port} as client")
+        debug_print(f"Connecting global mgr on {host} at {self._port} as client")
         self._global_mgr = Global.Manager.singleton(address=(host, self._port), as_client=True)
 
     def start(self):
@@ -155,6 +159,8 @@ class OrchestrationManager:
         Start this instance as the main server
         """
         assert self._global_mgr is None
+        Global.Manager.register("join", self._join)
+        Global.Manager.register("get_finalize_sem", self._get_finalize_sem)
         Global.Manager.register("register_client", self._register_client)
         Global.Manager.register("register_worker", self._register_worker)
         Global.Manager.register("count", self._count)
@@ -170,6 +176,10 @@ class OrchestrationManager:
                                                     as_client=False)
         self._is_server = True
 
+    def join(self, timeout: Optional[float] = None) -> None:
+        with suppress(EOFError, ConnectionResetError, ConnectionRefusedError):
+            self._global_mgr.join(self.key(), timeout)
+
     def _join(self, key: str,  timeout: Optional[float] = None) -> None:
         """
         For server, join all existing clients, presumably when expecting client to complete soon
@@ -179,7 +189,8 @@ class OrchestrationManager:
         :raises: TimeoutError if timeout is specified and reached before join completes
         """
         for client in self._clients[key]:  # empty if client
-            client.join(timeout=timeout)
+            with suppress(ConnectionRefusedError):
+                client.join(timeout=timeout)
 
     def register_client(self, client):
         """
@@ -196,6 +207,9 @@ class OrchestrationManager:
         """
         # noinspection PyUnresolvedReferences
         self._global_mgr.register_worker(worker, self.key())
+
+    def get_finalize_sem(self):
+        return self._global_mgr.get_finalize_sem(self.key())
 
     def count(self):
         # noinspection PyUnresolvedReferences
@@ -257,6 +271,10 @@ class OrchestrationManager:
             if not self._workers[key]:
                 del self._workers[key]
 
+    def _get_finalize_sem(self, key: str):
+        self._finalize_sem.setdefault(key, multiprocessing.Semaphore(0))
+        return self._finalize_sem[key]
+
     @staticmethod
     def launch(host: str, port: int, project_name: str) -> Tuple[int, int]:
         destination = host
@@ -300,7 +318,7 @@ class OrchestrationManager:
                 await ssh.execute_remote_cmd(remote_sys_executable, '-m', 'venv', 'venv',
                                              cwd=venv_dir)
                 python = f"{str(venv_dir)}{os.sep}venv{os.sep}bin{os.sep}python3"
-                await ssh.execute_remote_cmd(python, '-m', 'pip', 'install', 'pytest')
+                # await ssh.execute_remote_cmd(python, '-m', 'pip', 'install', 'pytest')
                 env = os.environ.copy()
                 env['PYTHONPATH'] = f"{str(tmpdir)}:."
                 env['AUTH_TOKEN_STDIN'] = '1'
@@ -336,14 +354,20 @@ class OrchestrationManager:
             raise
 
 
-def main(host: str, port: int, project_name: str, sem: multiprocessing.Semaphore = None):
-    always_print(f"Serving orchestration manager on {host}:{port} forever...")
+def main(host: str, port: int, project_name: str):
+    if port == -1:
+        port = find_free_port()
+    sys.stdout.write(str(port) + '\n')
+    sys.stdout.flush()
+    always_print(f"Serving orchestration manager on {get_ip_addr()} {host}:{port} forever...")
     mgr = OrchestrationManager.create(uri=f"{host}:{port}", project_name=project_name,
                                       as_client=False)
-    if sem:
+    try:
+        sem = mgr.get_finalize_sem()
         sem.acquire()
-    always_print("Shutting down delegated manager")
-    mgr.shutdown()
+    finally:
+        always_print("Shutting down delegated manager")
+        mgr.shutdown()
     return mgr
 
 
@@ -351,4 +375,4 @@ if __name__ == "__main__":
     host = sys.argv[1]
     port = int(sys.argv[2])
     project_name = sys.argv[3]
-    main(host, port, project_name, True)
+    main(host, port, project_name)
