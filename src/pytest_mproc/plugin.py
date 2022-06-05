@@ -537,8 +537,8 @@ def pytest_sessionfinish(session):
             session.config.ptmproc_runtime.coordinator.kill()
     if not session.config.option.worker and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.mproc_main is not None:
-        with suppress(Exception):
-            session.config.ptmproc_runtime.mproc_main.shutdown()
+        orchestrator = session.config.ptmproc_runtime.mproc_main
+        orchestrator.shutdown()
     yield
     session.config.option.verbose = verbose
 

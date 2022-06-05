@@ -14,7 +14,9 @@ from multiprocessing.managers import SyncManager
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 
-from pytest_mproc import get_auth_key
+import pytest
+
+from pytest_mproc import get_auth_key, find_free_port
 from pytest_mproc.fixtures import Global
 from pytest_mproc.remote.ssh import SSHClient, remote_root_context
 from pytest_mproc.user_output import always_print, debug_print
@@ -90,7 +92,9 @@ class OrchestrationManager:
                 protocol_text = parts[0]
                 host, port_text = parts[1].split(':', maxsplit=1)
                 protocol = Protocol.LOCAL if as_client else Protocol(protocol_text)
-            port = int(port_text)
+            port = int(port_text) if port_text else (find_free_port() if protocol != Protocol.DELEGATED else -1)
+            if port < 0:
+                raise pytest.UsageError("You must specify an explicit port when using 'delegated://' protocol")
         except ValueError:
             raise ValueError(f"URI {uri}: unknown protocol or invalid port specification")
         if protocol == Protocol.LOCAL:
@@ -139,6 +143,7 @@ class OrchestrationManager:
         Global.Manager.register("count")
         Global.Manager.register("completed")
         Global.Manager.register("JoinableQueue")
+        Global.Manager.register("get_test_queue")
         Global.Manager.register("get_test_queue")
         Global.Manager.register("get_results_queue")
         host = self._host.split('@', maxsplit=1)[-1]
@@ -219,8 +224,6 @@ class OrchestrationManager:
                 os.kill(self._mproc_pid, signal.SIGINT)
             with suppress(Exception):
                 os.kill(self._mproc_pid, signal.SIGKILL)
-        #if self._is_server:
-        #    self._global_mgr.shutdown()
 
     # server interface mapped to multiprocessing functions without the underscore in Global.Manager carried by this
     # instance
@@ -333,11 +336,13 @@ class OrchestrationManager:
             raise
 
 
-def main(host: str, port: int, project_name: str, sem: multiprocessing.Semaphore):
+def main(host: str, port: int, project_name: str, sem: multiprocessing.Semaphore = None):
     always_print(f"Serving orchestration manager on {host}:{port} forever...")
     mgr = OrchestrationManager.create(uri=f"{host}:{port}", project_name=project_name,
                                       as_client=False)
-    sem.acquire()
+    if sem:
+        sem.acquire()
+    always_print("Shutting down delegated manager")
     mgr.shutdown()
     return mgr
 

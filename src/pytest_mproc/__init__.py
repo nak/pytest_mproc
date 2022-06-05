@@ -14,7 +14,16 @@ is_main = '--as-main' in sys.argv
 is_worker = '--as-worker' in sys.argv
 
 _auth_key = None
+_user_defined_port_alloc: Optional[Callable[[], int]] = None
 _user_defined_auth: Optional[Callable[[], bytes]] = None
+
+
+def set_user_defined_auth_tokn(func: Callable[[], bytes]):
+    _user_defined_auth = func
+
+
+def set_user_defined_port_alloc(func: Callable[[], int]):
+    _user_defined_port_alloc = func
 
 
 def get_auth_key() -> bytes:
@@ -98,6 +107,8 @@ def resource_utilization(time_span: float, start_rusage, end_rusage) -> "Resourc
 
 
 def find_free_port():
+    if _user_defined_port_alloc:
+        return _user_defined_port_alloc()
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
         s.bind(('', 0))
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

@@ -273,13 +273,12 @@ class Bundle:
             auth_key: Optional[bytes] = None,
             env: Optional[Dict[str, str]] = None,
             delegation_port: Optional[int] = None,
+            finish_sem: multiprocessing.Semaphore,
             hosts_q: Queue,
     ) -> Tuple[Dict[str, asyncio.subprocess.Process], str]:
         """
         deploy and execute to/on multiple host targets concurrently (async)
 
-        :param remote_hosts_config: dictionary of hosts and arguments to pass to that specific host
-        :param finish_sem: semaphore to signal termination eminent
         :param args: common args to pass to host when executing pytest
         :param username: optional username for login-based ssh
         :param password: optional password for login-based ssh
@@ -318,7 +317,6 @@ class Bundle:
                 remote_venv=deployments[ssh_client.host][1]
             )
 
-        sem = multiprocessing.Semaphore(0)
         try:
             env = env.copy() if env else {}
             index = 0
@@ -331,7 +329,8 @@ class Bundle:
                     server_host = delegation_host
                     server_port = delegation_port
                     delegation_proc = multiprocessing.Process(
-                        target=orchestration.main, args=(delegation_host, delegation_port, self._project_name, sem))
+                        target=orchestration.main, args=(delegation_host, delegation_port, self._project_name,
+                                                         finish_sem))
                     delegation_proc.start()
                 index += 1
                 cli_args, cli_env = worker_config.argument_env_list()
@@ -372,7 +371,7 @@ class Bundle:
         finally:
             for context in contexts:
                 await context.__aexit__(None, None, None)
-            sem.release()
+            finish_sem.release()
             delegation_proc.join(timeout=5)
             with suppress(Exception):
                 delegation_proc.kill()

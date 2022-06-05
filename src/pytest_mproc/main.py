@@ -80,10 +80,12 @@ class RemoteExecutionThread:
         self._remote_hosts_config = remote_hosts_config
         self._remote_sys_executable = remote_sys_executable
         self._exc_manager = multiprocessing.managers.SyncManager(authkey=get_auth_key())
+        self._exc_manager.register("Queue", multiprocessing.Queue, exposed=["get", "put", "empty"])
         self._exc_manager.start()
         self._q = self._exc_manager.Queue()
         if uri and uri.startswith('delegated://'):
-            self._delegation_port = int(uri.rsplit('://', maxsplit=1)[-1])
+            port_text = uri.rsplit('://', maxsplit=1)[-1]
+            self._delegation_port = int(port_text) if port_text else find_free_port()
         else:
             self._delegation_port = None
 
@@ -95,12 +97,12 @@ class RemoteExecutionThread:
             timeout: Optional[float] = None,
             deploy_timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
-
     ):
         args = (
             server, server_port, self._project_config, self._remote_hosts_config,
             self._remote_sys_executable, self._q, timeout, deploy_timeout,
-            auth_key, hosts_q, user_output.verbose, Orchestrator.ptmproc_args, self._delegation_port
+            auth_key, hosts_q, user_output.verbose, Orchestrator.ptmproc_args,
+            self._delegation_port
         )
         self._proc = multiprocessing.Process(target=RemoteExecutionThread._start, args=args)
         self._proc.start()
@@ -149,8 +151,10 @@ class RemoteExecutionThread:
                hosts_q: Queue,
                verbose: bool,
                ptmproc_args: Dict[str, Any],
-               delegation_port: Optional[int] = None):
+               delegation_port: Optional[int] = None,
+               ):
         user_output.set_verbose(verbose)
+        finish_sem = multiprocessing.Semaphore(0)
         try:
             with tempfile.TemporaryDirectory() as tmpdir,\
                     Bundle.create(root_dir=Path(tmpdir),
@@ -166,6 +170,7 @@ class RemoteExecutionThread:
                     server_info=(server, server_port),
                     delegation_port=delegation_port,
                     hosts_q=hosts_q,
+                    finish_sem=finish_sem
                 )
                 procs, delegation_host = asyncio.get_event_loop().run_until_complete(task)
                 server = delegation_host or server
@@ -184,6 +189,8 @@ class RemoteExecutionThread:
             with suppress(Exception):
                 result_q.put(FatalError(msg))
             q.put(e)
+        finally:
+            finish_sem.release()
 
     def join(self, timeout: Optional[float] = None):
         try:
@@ -280,8 +287,9 @@ class Orchestrator:
             self._sm.start()
             queue = self._sm.Queue(100)
             delegate_q = self._sm.Queue()
-            self._populate_proc = multiprocessing.Process(target=Orchestrator.populate_worker_queue,
-                                    args=(queue, remote_clients_config, deploy_timeout, self._finish_sem, delegate_q),)
+            self._populate_proc = multiprocessing.Process(
+                target=Orchestrator.populate_worker_queue,
+                args=(queue, remote_clients_config, deploy_timeout, self._finish_sem, delegate_q),)
             self._populate_proc.start()
             self._remote_exec_thread = RemoteExecutionThread(remote_hosts_config=remote_clients_config,
                                                              remote_sys_executable=remote_sys_executable,
@@ -614,6 +622,8 @@ class Orchestrator:
             sys.stdout.write("\r\n")
             self._output_summary(rusage.time_span, rusage.user_cpu, rusage.system_cpu, rusage.memory_consumed)
             # noinspection PyProtectedMember
-            self._finish_sem.release()
             for client in self._mp_manager._clients:
                 client.join()
+
+    def shutdown(self):
+        self._finish_sem.release()
