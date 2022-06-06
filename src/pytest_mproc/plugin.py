@@ -271,8 +271,9 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     from pytest_mproc.main import Orchestrator
     from pytest_mproc.coordinator import CoordinatorFactory
     assert "--as-worker" not in sys.argv
-    is_server = hasattr(config.option, 'mproc_server_uri')
-    config.option.ptmproc_config.server_uri = getattr(config.option, 'mproc_server_uri', f'127.0.0.1:{find_free_port()}')
+    is_server = hasattr(config.option, 'mproc_server_uri') and config.option.mproc_server_uri is not None
+    config.option.ptmproc_config.server_uri = getattr(config.option, 'mproc_server_uri') or \
+                                              f'127.0.0.1:{find_free_port()}'
     local_proj_file = Path("./ptmproc_project.cfg")
     project_config = getattr(config.option, "project_structure_path", None) or \
         (local_proj_file if local_proj_file.exists() else None)

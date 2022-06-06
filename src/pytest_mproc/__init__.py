@@ -1,3 +1,4 @@
+import multiprocessing
 from multiprocessing.process import current_process
 
 import binascii
@@ -28,7 +29,9 @@ def set_user_defined_port_alloc(func: Callable[[], int]):
 
 def get_auth_key() -> bytes:
     global _auth_key
-    if _auth_key is not None:
+    if hasattr(multiprocessing, 'parent_process') and multiprocessing.parent_process() is not None:
+        _auth_key = current_process().authkey
+    elif _auth_key is not None:
         return _auth_key
     elif _user_defined_auth:
         _auth_key = _user_defined_auth()
