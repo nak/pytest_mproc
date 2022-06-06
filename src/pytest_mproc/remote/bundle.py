@@ -295,6 +295,7 @@ class Bundle:
 
     async def execute_remote_multi(
             self,
+            ptmproc_args: Dict[str, Any],
             server_info: Tuple[str, int],
             hosts_q: Queue,
             port_q: Queue,
@@ -367,7 +368,7 @@ class Bundle:
                     if deployment_tasks[host]:
                         await deployment_tasks[host]
                         deployment_tasks[host] = False
-                    args = _determine_cli_args(worker_config)
+                    args = _determine_cli_args(worker_config, ptmproc_args)
                     return await self.execute_remote(
                         *(list(args) + list(cli_args)) + ["--as-worker", f"{server_host}:{server_port}"],
                         worker_id=f"Worker-{index}",
@@ -565,11 +566,11 @@ class Bundle:
                 yield line
 
 
-def _determine_cli_args(worker_config: RemoteHostConfig):
+def _determine_cli_args(worker_config: RemoteHostConfig, ptmproc_args: Dict[str, Any]):
     args = list(sys.argv[1:])  # copy of
     # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
     for arg in sys.argv[1:]:
-        typ = Constants.ptmproc_args.get(arg)
+        typ = ptmproc_args.get(arg)
         if not typ:
             continue
         if arg == "--cores":

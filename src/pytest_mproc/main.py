@@ -23,7 +23,8 @@ from typing import List, Any, Optional, Union, Dict, AsyncIterator, AsyncGenerat
 import pytest
 from _pytest.reports import TestReport
 
-from pytest_mproc import resource_utilization, find_free_port, user_output, DEFAULT_PRIORITY, get_auth_key, FatalError
+from pytest_mproc import resource_utilization, find_free_port, user_output, DEFAULT_PRIORITY, get_auth_key, FatalError, \
+    Constants
 from pytest_mproc.data import (
     ClientDied,
     GroupTag,
@@ -101,7 +102,7 @@ class RemoteExecutionThread:
         args = (
             server, server_port, self._project_config, self._remote_hosts_config,
             self._remote_sys_executable, self._q, timeout, deploy_timeout,
-            auth_key, hosts_q, port_q, user_output.verbose, Orchestrator.ptmproc_args,
+            auth_key, hosts_q, port_q, user_output.verbose, Constants.ptmproc_args,
             self._delegation_port, self._username
         )
         self._proc = multiprocessing.Process(target=RemoteExecutionThread._start, args=args)
@@ -139,7 +140,8 @@ class RemoteExecutionThread:
                     server_info=(server, server_port),
                     delegation_port=delegation_port,
                     hosts_q=hosts_q,
-                    port_q=port_q
+                    port_q=port_q,
+                    ptmproc_args=ptmproc_args
                 )
                 procs, delegation_host, delegation_proc = asyncio.get_event_loop().run_until_complete(task)
                 server = delegation_host or server
@@ -190,8 +192,6 @@ class Orchestrator:
     """
     class that acts as Main point of orchestration
     """
-
-    ptmproc_args: Dict[str, Any] = {}
 
     @staticmethod
     def populate_worker_queue(q: Queue, remote_hosts_config, deploy_timeout: float, finish_sem: Semaphore,
