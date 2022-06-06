@@ -108,39 +108,6 @@ class RemoteExecutionThread:
         self._proc.start()
         return self._proc
 
-    @staticmethod
-    def _determine_cli_args(remote_hosts_config: List[RemoteHostConfig],
-                            ptmproc_args: Dict[str, Any]):
-        args = list(sys.argv[1:])  # copy of
-        # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
-        for arg in sys.argv[1:]:
-            typ = ptmproc_args.get(arg)
-            if not typ:
-                continue
-            if arg == "--cores":
-                have_core_count = False
-                for cfg in remote_hosts_config:
-                    if "cores" in cfg.arguments:
-                        have_core_count = True
-                        break
-                if have_core_count:
-                    index = args.index("--cores")
-                    args.remove("--cores")
-                    if index >= 0 and index + 1 < len(args):
-                        args.remove(args[index + 1])
-                    elif index >= len(args):
-                        raise pytest.UsageError(f"--cores specified without a value")
-                continue
-            if typ in (bool,) and arg in args:
-                args.remove(arg)
-            elif arg in args:
-                index = args.index(arg)
-                if index + 1 < len(args):
-                    args.remove(args[index + 1])
-                args.remove(arg)
-        if "--cores" not in args:
-            args += ["--cores", "1"]
-        return args
 
     @classmethod
     def _start(cls, server: str, server_port: int, project_config: ProjectConfig,
@@ -164,9 +131,7 @@ class RemoteExecutionThread:
                     Bundle.create(root_dir=Path(tmpdir),
                                   project_config=project_config,
                                   system_executable=remote_sys_executable) as bundle:
-                args = cls._determine_cli_args(remote_hosts_config, ptmproc_args)
                 task = bundle.execute_remote_multi(
-                    *args,
                     auth_key=auth_key,
                     timeout=timeout,
                     deploy_timeout=deploy_timeout,

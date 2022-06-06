@@ -8,7 +8,7 @@ import secrets
 import socket
 import sys
 from contextlib import closing
-from typing import Union, Callable, Optional
+from typing import Union, Callable, Optional, Any, Dict
 
 # to indicate if running as main (host) or not;  set in plugin.py
 is_main = '--as-main' in sys.argv
@@ -146,3 +146,15 @@ class FatalError(Exception):
     """
     raised to exit pytest immediately
     """
+
+
+class Constants:
+    """
+    For storing global "constants"
+    """
+    ptmproc_args: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def set(cls, name: str, typ: Any):
+        cls.ptmproc_args = cls.ptmproc_args or {}
+        cls.ptmproc_args[name] = typ

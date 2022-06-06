@@ -6,7 +6,7 @@ import sys
 
 import _pytest.terminal
 
-from pytest_mproc import worker, user_output
+from pytest_mproc import worker, user_output, Constants
 from pytest_mproc.user_output import debug_print
 
 import getpass
@@ -93,7 +93,7 @@ def _add_option(group, name: str, dest: str, action: str,
             type=typ,
             help=help_text,
         )
-    Orchestrator.ptmproc_args[name] = typ
+    Constants.set(name, typ)
 
 
 @pytest.mark.tryfirst

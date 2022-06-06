@@ -1,13 +1,11 @@
 import asyncio
 import logging
-import multiprocessing
 import os
 import platform
 from glob import glob
 from multiprocessing import Queue
 
 import binascii
-import pytest
 import sys
 import tempfile
 import zipfile
@@ -24,7 +22,7 @@ from typing import (
     Union,
 )
 
-from pytest_mproc import user_output, get_auth_key
+from pytest_mproc import user_output, get_auth_key, Constants
 from pytest_mproc.fixtures import Node
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure, remote_root_context
@@ -297,8 +295,9 @@ class Bundle:
 
     async def execute_remote_multi(
             self,
-            *args,
             server_info: Tuple[str, int],
+            hosts_q: Queue,
+            port_q: Queue,
             username: Optional[str] = None,
             password: Optional[str] = None,
             deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
@@ -306,13 +305,10 @@ class Bundle:
             auth_key: Optional[bytes] = None,
             env: Optional[Dict[str, str]] = None,
             delegation_port: Optional[int] = None,
-            hosts_q: Queue,
-            port_q: Queue,
     ) -> Tuple[Dict[str, asyncio.subprocess.Process], str, asyncio.subprocess.Process]:
         """
         deploy and execute to/on multiple host targets concurrently (async)
 
-        :param args: common args to pass to host when executing pytest
         :param username: optional username for login-based ssh
         :param password: optional password for login-based ssh
         :param auth_key: auth token to use in multiprocessing authentication
@@ -364,12 +360,14 @@ class Bundle:
                         timeout=deploy_timeout
                     ))
 
-                async def execute(host: str):
+                async def execute(worker_config: RemoteHostConfig):
+                    host = worker_config.remote_host
                     # we must wait if deployment is not finished
                     # this setup parallelizes multiple host efficiently
                     if deployment_tasks[host]:
                         await deployment_tasks[host]
                         deployment_tasks[host] = False
+                    args = _determine_cli_args(worker_config)
                     return await self.execute_remote(
                         *(list(args) + list(cli_args)) + ["--as-worker", f"{server_host}:{server_port}"],
                         worker_id=f"Worker-{index}",
@@ -384,7 +382,7 @@ class Bundle:
                         deploy=False
                     )
 
-                task = asyncio.get_event_loop().create_task(execute(worker_config.remote_host))
+                task = asyncio.get_event_loop().create_task(execute(worker_config))
                 tasks.append(task)
                 if worker_config.remote_host not in deployments:
                     deployments[ssh_client.host] = (remote_root, remote_venv)
@@ -565,3 +563,29 @@ class Bundle:
                     cwd=self.remote_run_dir(remote_root) / self._relative_run_path,
             ):
                 yield line
+
+
+def _determine_cli_args(worker_config: RemoteHostConfig):
+    args = list(sys.argv[1:])  # copy of
+    # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
+    for arg in sys.argv[1:]:
+        typ = Constants.ptmproc_args.get(arg)
+        if not typ:
+            continue
+        if arg == "--cores":
+            if "cores" in worker_config.arguments:
+                try:
+                    index = args.index("--cores")
+                    args[index + 1] = str(worker_config.arguments['cores'])
+                except ValueError:
+                    args += ['--cores', str(worker_config.arguments['cores'])]
+        elif typ in (bool,) and arg in args:
+            args.remove(arg)
+        elif arg in args:
+            index = args.index(arg)
+            if index + 1 < len(args):
+                args.remove(args[index + 1])
+            args.remove(arg)
+    if "--cores" not in args:
+        args += ["--cores", "1"]
+    return args
