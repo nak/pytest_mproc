@@ -324,6 +324,7 @@ class Bundle:
         tasks: List[asyncio.Task] = []
         deployments = {}
         contexts = {}
+        deployment_tasks: Dict[str, asyncio.Task] = {}
         delegation_proc: Optional[asyncio.subprocess.Process] = None
         delegation_host: Optional[str] = None
         try:
@@ -355,15 +356,21 @@ class Bundle:
                 index += 1
                 cli_args, cli_env = worker_config.argument_env_list()
                 env.update(cli_env)
-                if worker_config.remote_host not in deployments:
-                    await self.deploy(
+                if worker_config.remote_host not in deployment_tasks:
+                    deployment_tasks[worker_config.remote_host] = asyncio.create_task(self.deploy(
                         ssh_client=ssh_client,
                         remote_root=remote_root,
                         remote_venv=remote_venv,
                         timeout=deploy_timeout
-                    )
-                task = asyncio.get_event_loop().create_task(
-                    self.execute_remote(
+                    ))
+
+                async def execute(host: str):
+                    # we must wait if deployment is not finished
+                    # this setup parallelizes multiple host efficiently
+                    if deployment_tasks[host]:
+                        await deployment_tasks[host]
+                        deployment_tasks[host] = False
+                    return await self.execute_remote(
                         *(list(args) + list(cli_args)) + ["--as-worker", f"{server_host}:{server_port}"],
                         worker_id=f"Worker-{index}",
                         env=env,
@@ -376,7 +383,8 @@ class Bundle:
                         remote_venv=remote_venv,
                         deploy=False
                     )
-                )
+
+                task = asyncio.get_event_loop().create_task(execute(worker_config.remote_host))
                 tasks.append(task)
                 if worker_config.remote_host not in deployments:
                     deployments[ssh_client.host] = (remote_root, remote_venv)
@@ -406,7 +414,7 @@ class Bundle:
             return procs, delegation_host, delegation_proc
         finally:
             for context in contexts.values():
-                pass ####!!! await context.__aexit__(None, None, None)
+                await context.__aexit__(None, None, None)
 
     async def execute_remote(self, *args,
                              cwd: Path,

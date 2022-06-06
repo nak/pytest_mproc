@@ -126,15 +126,25 @@ def pytest_addoption(parser):
         typ=int,
         help_text="max # of connections allowed at one time to main process, to prevent deadlock from overload"
     )
-    if '--as-main' in sys.argv:
-        _add_option(
-            group,
-            "--as-main",
-            dest="mproc_server_uri",
-            action="store",
-            typ=str,
-            help_text="port on which you wish to run server (for multi-host runs only)"
-        )
+    _add_option(
+        group,
+        "--as-main",
+        dest="mproc_server_uri",
+        action="store",
+        typ=str,
+        help_text="port on which you wish to run server (for multi-host runs only)"
+    )
+    _add_option(
+        group,
+        "--remote-worker",
+        dest="mproc_remote_clients",
+        action="append",
+        typ=str,
+        help_text="repeatable option to add remote client for execution. string is of "
+        "form '<host>[:port][;<key>=<value>]*, "
+        "where key, value pairs are translated into command line argument to the host in form '--<key> <value>'"
+    )
+    if '--as-main' in sys.argv or '--remote-worker' in sys.argv:
         _add_option(
             group,
             "--project-structure",
@@ -142,16 +152,6 @@ def pytest_addoption(parser):
             action="store",
             typ=str,
             help_text="path to project structure (if server)"
-        )
-        _add_option(
-            group,
-            "--remote-worker",
-            dest="mproc_remote_clients",
-            action="append",
-            typ=str,
-            help_text="repeatable option to add remote client for execution. string is of "
-            "form '<host>[:port][;<key>=<value>]*, "
-            "where key, value pairs are translated into command line argument to the host in form '--<key> <value>'"
         )
         _add_option(
             group,
@@ -208,6 +208,8 @@ def pytest_cmdline_main(config):
         return
     else:
         config.option.worker = None
+        if config.option.mproc_remote_clients and not config.option.mproc_server_uri:
+            config.option.mproc_server_uri = "delegated://"
     if not hasattr(config, "ptmproc_runtime"):
         config.ptmproc_runtime = None
 
