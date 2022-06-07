@@ -22,7 +22,7 @@ from typing import (
     Union,
 )
 
-from pytest_mproc import user_output, get_auth_key, Constants
+from pytest_mproc import user_output, get_auth_key
 from pytest_mproc.fixtures import Node
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure, remote_root_context
@@ -351,8 +351,6 @@ class Bundle:
                     port_q.put(server_port)
                     server_host = worker_config.remote_host
                 index += 1
-                cli_args, cli_env = worker_config.argument_env_list()
-                env.update(cli_env)
                 if worker_config.remote_host not in deployment_tasks:
                     deployment_tasks[worker_config.remote_host] = asyncio.create_task(self.deploy(
                         ssh_client=ssh_client,
@@ -368,9 +366,11 @@ class Bundle:
                     if deployment_tasks[host]:
                         await deployment_tasks[host]
                         deployment_tasks[host] = False
-                    args = _determine_cli_args(worker_config, ptmproc_args)
+                    args, worker_env = _determine_cli_args(worker_config, ptmproc_args, sys.argv[1:])
+                    env.update(worker_env)
+                    args += ["--as-worker", f"{server_host}:{server_port}"]
                     return await self.execute_remote(
-                        *(list(args) + list(cli_args)) + ["--as-worker", f"{server_host}:{server_port}"],
+                        *args ,
                         worker_id=f"Worker-{index}",
                         env=env,
                         cwd=remote_root / f'Worker-{index}',
@@ -566,20 +566,22 @@ class Bundle:
                 yield line
 
 
-def _determine_cli_args(worker_config: RemoteHostConfig, ptmproc_args: Dict[str, Any]):
-    args = list(sys.argv[1:])  # copy of
+def _determine_cli_args(worker_config: RemoteHostConfig, ptmproc_args: Dict[str, Any], sys_args: List[str]):
+    worker_args, worker_env = worker_config.argument_env_list()
     # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
-    for arg in sys.argv[1:]:
+    args = list(sys_args)  # make a copy
+    for arg in sys_args:
         typ = ptmproc_args.get(arg)
         if not typ:
             continue
-        if arg == "--cores":
-            if "cores" in worker_config.arguments:
-                try:
-                    index = args.index("--cores")
-                    args[index + 1] = str(worker_config.arguments['cores'])
-                except ValueError:
-                    args += ['--cores', str(worker_config.arguments['cores'])]
+        if arg in worker_args:
+            try:
+                index = args.index(arg)
+                if typ != bool:
+                    args.remove(args[index + 1])
+                args.remove(args[index])
+            except ValueError:
+                raise ValueError("No argument supplied for --cores option")
         elif typ in (bool,) and arg in args:
             args.remove(arg)
         elif arg in args:
@@ -587,6 +589,7 @@ def _determine_cli_args(worker_config: RemoteHostConfig, ptmproc_args: Dict[str,
             if index + 1 < len(args):
                 args.remove(args[index + 1])
             args.remove(arg)
+    args += worker_args
     if "--cores" not in args:
         args += ["--cores", "1"]
-    return args
+    return args, worker_env
