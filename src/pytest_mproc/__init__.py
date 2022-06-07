@@ -14,7 +14,7 @@ from typing import Union, Callable, Optional, Any, Dict
 # to indicate if running as main (host) or not;  set in plugin.py
 from dataclasses import dataclass
 
-is_main = '--as-main' in sys.argv
+is_main = '--as-main' in sys.argv or '--remote-worker' in sys.argv
 is_worker = '--as-worker' in sys.argv
 
 _auth_key = None
