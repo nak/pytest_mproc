@@ -126,6 +126,7 @@ def test_remote_execution_cli(tmp_path):
         print(f">>>>>>>>  RUNNING {' '.join(args)}")
         completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=1200, env=env,
                                    cwd=str(tmp_path))
+        assert (tmp_path / "artifacts" / "artifacts-Worker-1.zip").exists()
         assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from " \
                                           f"{str(Path(__file__).parent.absolute())}"
 

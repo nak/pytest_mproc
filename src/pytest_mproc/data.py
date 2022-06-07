@@ -3,7 +3,10 @@ from enum import Enum
 from typing import List, Union, Optional
 
 from pytest_mproc import DEFAULT_PRIORITY
-from pytest import TestReport
+try:
+    from pytest import TestReport
+except Exception:
+    from _pytest.reports import TestReport
 
 
 class TestExecutionConstraint(Enum):

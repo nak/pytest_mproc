@@ -1,2 +1,5 @@
--r pure_requirements.txt
--r impure_requirements.txt
+pytest>=6
+requests>=2.27
+aiofile>=3.7
+aiocontext>=0.1
+aiohttp>=3.8

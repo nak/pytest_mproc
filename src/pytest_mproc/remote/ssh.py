@@ -22,7 +22,7 @@ from typing import (
 )
 
 from pytest_mproc import user_output
-from pytest_mproc.user_output import debug_print
+from pytest_mproc.user_output import debug_print, always_print
 
 SUCCESS = 0
 
@@ -198,7 +198,7 @@ class SSHClient:
         """
         Pull file(s) from remote client
 
-        :param remote_path: file or directory to pull (recurseively) from remote client
+        :param remote_path: file or directory to pull (recursively) from remote client
         :param local_path: path to copy to local host
         :param recursive: specify True if copying a directory
         :param timeout: optional timeout for command to execute
@@ -209,8 +209,10 @@ class SSHClient:
             args = ['-p', '-r',  f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
         else:
             args = ['-p', f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
-        proc = await asyncio.create_subprocess_exec(
-            "scp", *self._global_options, *args,
+        args = list(self._global_options) + args
+        cmd = f"scp {' '.join(args)}"
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -220,9 +222,9 @@ class SSHClient:
             rc = await proc.wait()
         if rc != 0:
             stdout = await proc.stdout.read()
-            cmd = "scp " + ' '.join(self._global_options) + ' ' + ' '.join(args)
-            msg = f"\n!!! Copy from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} using\n"\
-                  f"{cmd}\n\n{stdout.decode('utf-8')}"
+            msg = f"\n!!! Copy from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} [{cmd}]\n"\
+                  f"\n{stdout.decode('utf-8')}\n\n"
+            always_print(msg)
             raise CommandExecutionFailure(msg, rc)
 
     async def get_remote_platform_info(self):

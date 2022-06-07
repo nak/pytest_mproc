@@ -170,9 +170,7 @@ class Bundle:
                         relative_run_dir=relative_run_dir,
                         system_executable=system_executable)
         bundle._sources.extend(project_config.src_paths)
-        os.write(sys.stderr.fileno(), f"\n\n>>> Building bundle.  This may take a little while...\n\n".encode('utf-8'))
-        # site_pkgs = env.set_up_local(project_config=project_config, cache_dir=cls.CACHE_DIR)
-        # bundle._sources.append(site_pkgs)
+        os.write(sys.stderr.fileno(), f"\n\n>>> Building bundle...\n\n".encode('utf-8'))
         always_print(">>> Zipping contents for remote worker...")
         with zipfile.ZipFile(bundle.zip_path, mode='w') as zfile:
             for path in bundle._test_files:
@@ -211,10 +209,10 @@ class Bundle:
             )
             await ssh_client.install_packages(
                 'pytest', 'pytest_mproc',
-                venv = remote_venv,
-                cwd = remote_venv.parent,
-                stdout = stdout,
-                stderr = sys.stderr)
+                venv=remote_venv,
+                cwd=remote_venv.parent,
+                stdout=stdout,
+                stderr=sys.stderr)
 
         return remote_venv
 
@@ -222,6 +220,7 @@ class Bundle:
                      remote_venv: Path, remote_root: Path, timeout: Optional[float] = None) -> None:
         """
         Deploy this bundle to a remote ssh client
+        :param remote_venv: location of Python virtual environment on remote host
         :param ssh_client: where to deploy
         :param timeout: raise TimeoutError if deployment takes too long
         :param remote_root: remote path to where bundle is deployed
@@ -276,7 +275,8 @@ class Bundle:
         root = Path(__file__).parent.parent.parent
         await ssh_client.mkdir(remote_root / 'site-packages' / 'pytest_mproc' / 'remote', exists_ok=True)
         await ssh_client.push(root / 'pytest_mproc' / '*.py', remote_root / 'site-packages' / 'pytest_mproc' / '.')
-        await ssh_client.push(root / 'pytest_mproc' / 'remote' / '*.py', remote_root / 'site-packages' / 'pytest_mproc' / 'remote' / '.')
+        await ssh_client.push(root / 'pytest_mproc' / 'remote' / '*.py', remote_root / 'site-packages' / 'pytest_mproc'
+                              / 'remote' / '.')
         python = str(remote_venv / 'bin' / 'python3')
         env = {'PYTHONPATH': str(remote_root / 'site-packages'),
                'AUTH_TOKEN_STDIN': '1'}
@@ -310,6 +310,11 @@ class Bundle:
         """
         deploy and execute to/on multiple host targets concurrently (async)
 
+        :param delegation_port:
+        :param port_q:
+        :param hosts_q:
+        :param server_info:
+        :param ptmproc_args:
         :param username: optional username for login-based ssh
         :param password: optional password for login-based ssh
         :param auth_key: auth token to use in multiprocessing authentication
@@ -319,9 +324,9 @@ class Bundle:
         :return: Dict of host, proc where host is host process executed on and proc is the completed process
         """
         tasks: List[asyncio.Task] = []
-        deployments = {}
+        deployments: Dict[str, Tuple[Path, Path]] = {}
         contexts = {}
-        deployment_tasks: Dict[str, asyncio.Task] = {}
+        deployment_tasks: Dict[str, Union[bool, asyncio.Task]] = {}
         delegation_proc: Optional[asyncio.subprocess.Process] = None
         delegation_host: Optional[str] = None
         try:
@@ -336,7 +341,7 @@ class Bundle:
                 if worker_config.remote_host not in contexts:
                     context = remote_root_context(self._project_name, ssh_client, worker_config.remote_root)
                     contexts[worker_config.remote_host] = context
-                    remote_roots[worker_config.remote_host], remote_venv_root = await context.__aenter__()
+                    (remote_roots[worker_config.remote_host], remote_venv_root) = await context.__aenter__()
                     remote_venvs[worker_config.remote_host] = remote_venv_root / 'venv'
                 remote_root = remote_roots[worker_config.remote_host]
                 remote_venv = remote_venvs[worker_config.remote_host]
@@ -359,7 +364,7 @@ class Bundle:
                         timeout=deploy_timeout
                     ))
 
-                async def execute(worker_config: RemoteHostConfig):
+                async def execute(worker_config: RemoteHostConfig, worker_id: str):
                     host = worker_config.remote_host
                     # we must wait if deployment is not finished
                     # this setup parallelizes multiple host efficiently
@@ -370,10 +375,10 @@ class Bundle:
                     env.update(worker_env)
                     args += ["--as-worker", f"{server_host}:{server_port}"]
                     return await self.execute_remote(
-                        *args ,
-                        worker_id=f"Worker-{index}",
+                        *args,
+                        worker_id=worker_id,
                         env=env,
-                        cwd=remote_root / f'Worker-{index}',
+                        cwd=remote_root / worker_id,
                         ssh_client=ssh_client,
                         timeout=timeout,
                         deploy_timeout=deploy_timeout,
@@ -383,7 +388,7 @@ class Bundle:
                         deploy=False
                     )
 
-                task = asyncio.get_event_loop().create_task(execute(worker_config))
+                task = asyncio.get_event_loop().create_task(execute(worker_config, worker_id=f"Worker-{index}"))
                 tasks.append(task)
                 if worker_config.remote_host not in deployments:
                     deployments[ssh_client.host] = (remote_root, remote_venv)
@@ -429,6 +434,9 @@ class Bundle:
                              ) -> Tuple[str, asyncio.subprocess.Process]:
         """
         Execute tests on remote host
+        :param deploy: whether to deploy or not (aka assume deployment already taken care of)
+        :param deploy_timeout: timeout on deployments after this many seconds
+        :param cwd: directory to run from
         :param ssh_client: ssh client to use to execute remotely
         :param args: args to pass on cmd line
         :param env: additional environment variables to set (key/value pairs)
@@ -475,7 +483,6 @@ class Bundle:
         try:
             if self.prepare_script:
                 always_print("Preparing environment through prepare script...")
-                # noinspection SpellCheckingInspection
                 proc = await ssh_client.execute_remote_cmd(
                     f"./prepare | tee \"{remote_artifacts_dir}{os.sep}{self._prepare_script.stem}.log\"",
                     prefix_cmd=f"set -o pipefail; ",
@@ -511,7 +518,6 @@ class Bundle:
             if proc and self._finalize_script:
                 always_print("Finalizing worker through finalize script on client %s...", ssh_client.host)
                 with suppress(Exception):
-                    # noinspection SpellCheckingInspection
                     finalize_proc = await ssh_client.execute_remote_cmd(
                         f"./finalize  | tee \"{remote_artifacts_dir}{os.sep}]{self._finalize_script.stem}.log\"",
                         cwd=cwd,
@@ -524,21 +530,23 @@ class Bundle:
                     if finalize_proc.returncode:
                         debug_print(f"!!! WARNING: finalize script failed! ")
             worker_id = worker_id or (f"{ssh_client.host}-{pid}" if pid else ssh_client.host)
-            destination_dir = remote_artifacts_dir.absolute()
+            destination_dir = self._artifacts_path.absolute()
             try:
                 if proc:
                     destination_dir.mkdir(exist_ok=True, parents=True)
                     await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
-                    await ssh_client.execute_remote_cmd(cwd=remote_artifacts_dir,
-                                                        command=f"zip -r {str(remote_artifacts_dir / 'artifacts.zip')} *",
-                                                        stdout=stdout,
-                                                        stderr=sys.stderr)
-                    await ssh_client.pull(remote_artifacts_dir / "artifacts.zip", destination_dir / "artifacts.zip",
+                    await ssh_client.execute_remote_cmd(
+                        cwd=remote_artifacts_dir,
+                        command=f"zip -r {str(remote_artifacts_dir / 'artifacts.zip')} *",
+                        stdout=stdout,
+                        stderr=sys.stderr)
+                    await ssh_client.pull(remote_artifacts_dir / "artifacts.zip",
+                                          destination_dir / f"artifacts-{worker_id}.zip",
                                           recursive=False)
+                    with zipfile.ZipFile(destination_dir / f"artifacts-{worker_id}.zip") as zfile:
+                        zfile.extractall(destination_dir)
             except CommandExecutionFailure as e:
-                os.write(sys.stderr.fileno(),
-                         f"\n\n!!! Failed to pull {str(remote_artifacts_dir)} to {destination_dir}:\n"
-                         f"    {e}\n\n".encode('utf-8'))
+                always_print(f"Failed to pull artifacts from worker: {e}")
         return ssh_client.host, proc
 
     async def monitor_remote_execution(self, host: str, *args: str,
@@ -556,8 +564,9 @@ class Bundle:
                 env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + env["PYTHONPATH"]
             else:
                 env["PYTHONPATH"] = str(remote_root / 'site-packages')
-            venv = await self.deploy(ssh_client, remote_root=remote_root, remote_venv=remote_venv_root / 'venv',
-                                     timeout=deploy_timeout)
+            await self.deploy(ssh_client, remote_root=remote_root, remote_venv=remote_venv_root / 'venv',
+                              timeout=deploy_timeout)
+            venv = remote_venv_root / 'venv'
             command = venv / 'bin' / 'python3'
             async for line in ssh_client.monitor_remote_execution(
                     command, '-m', 'pytest', *args, timeout=timeout, env=env,
