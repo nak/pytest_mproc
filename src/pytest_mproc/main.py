@@ -24,7 +24,7 @@ import pytest
 from _pytest.reports import TestReport
 
 from pytest_mproc import resource_utilization, find_free_port, user_output, DEFAULT_PRIORITY, get_auth_key, FatalError, \
-    Constants
+    Constants, Settings
 from pytest_mproc.data import (
     ClientDied,
     GroupTag,
@@ -84,8 +84,9 @@ class RemoteExecutionThread:
             if '@' in destination_text:
                 self._username, port_text = destination_text.split('@', maxsplit=1)
             else:
-                self._username = os.environ.get('SSH_USERNAME')
+                self._username = Settings.ssh_username
                 port_text = destination_text
+            assert self._username
             self._delegation_port = int(port_text) if port_text else find_free_port()
         else:
             self._delegation_port = None
@@ -102,8 +103,12 @@ class RemoteExecutionThread:
         args = (
             server, server_port, self._project_config, self._remote_hosts_config,
             self._remote_sys_executable, self._q, timeout, deploy_timeout,
-            auth_key, hosts_q, port_q, user_output.verbose, Constants.ptmproc_args,
-            self._delegation_port, self._username
+            auth_key, hosts_q, port_q, user_output.verbose,
+            Constants.ptmproc_args,
+            Settings.cache_dir,
+            Settings.tmp_root,
+            self._username, Settings.ssh_password,
+            self._delegation_port,
         )
         self._proc = multiprocessing.Process(target=RemoteExecutionThread._start, args=args)
         self._proc.start()
@@ -121,9 +126,16 @@ class RemoteExecutionThread:
                port_q: Queue,
                verbose: bool,
                ptmproc_args: Dict[str, Any],
+               cache_dir: Path,
+               tmp_root: Path,
+               username: str,
+               password: Optional[str] = None,
                delegation_port: Optional[int] = None,
-               username: Optional[str] = None
                ):
+        Constants.ptmproc_args = ptmproc_args
+        Settings.set_ssh_credentials(username, password)
+        Settings.set_cache_dir(cache_dir)
+        Settings.set_tmp_root(tmp_root)
         finish_sem = None
         user_output.set_verbose(verbose)
         delegation_proc = None
@@ -136,7 +148,6 @@ class RemoteExecutionThread:
                     auth_key=auth_key,
                     timeout=timeout,
                     deploy_timeout=deploy_timeout,
-                    username=username,
                     server_info=(server, server_port),
                     delegation_port=delegation_port,
                     hosts_q=hosts_q,

@@ -93,7 +93,7 @@ def _add_option(group, name: str, dest: str, action: str,
             type=typ,
             help=help_text,
         )
-    Constants.set(name, typ)
+    Constants.set_ptmproc_args(name, typ)
 
 
 @pytest.mark.tryfirst

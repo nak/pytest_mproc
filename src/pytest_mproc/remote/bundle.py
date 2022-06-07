@@ -22,7 +22,7 @@ from typing import (
     Union,
 )
 
-from pytest_mproc import user_output, get_auth_key
+from pytest_mproc import user_output, get_auth_key, Settings
 from pytest_mproc.fixtures import Node
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure, remote_root_context
@@ -36,7 +36,6 @@ lock = RLock()
 
 class Bundle:
 
-    # noinspection SpellCheckingInspection
     CACHE_DIR = Path(os.path.expanduser('~')).absolute() / ".ptmproc"
 
     def __init__(self, root_dir: Path,
@@ -248,7 +247,7 @@ class Bundle:
                 text = ('\n' + (await proc.stdout.read()).decode('utf-8')) if proc.stdout else ""
                 raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
             if self._requirements_path:
-                always_print(f"Installing requirements on remote worker {ssh_client.host}...")
+                always_print(f"Installing requirements on remote worker {ssh_client.host} to {remote_venv}...")
                 await ssh_client.install(
                     venv=remote_venv,
                     remote_root=remote_root,
@@ -299,8 +298,6 @@ class Bundle:
             server_info: Tuple[str, int],
             hosts_q: Queue,
             port_q: Queue,
-            username: Optional[str] = None,
-            password: Optional[str] = None,
             deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
             timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
@@ -315,8 +312,6 @@ class Bundle:
         :param hosts_q:
         :param server_info:
         :param ptmproc_args:
-        :param username: optional username for login-based ssh
-        :param password: optional password for login-based ssh
         :param auth_key: auth token to use in multiprocessing authentication
         :param deploy_timeout: optional timeout if deployment takes too long
         :param env: dict of environment variables to use on execution
@@ -337,7 +332,8 @@ class Bundle:
             remote_roots: Dict[str, Path] = {}
             remote_venvs: Dict[str, Path] = {}
             while worker_config is not None:
-                ssh_client = SSHClient(worker_config.remote_host, username=username, password=password)
+                ssh_client = SSHClient(host=worker_config.remote_host, username=Settings.ssh_username,
+                                       password=Settings.ssh_password)
                 if worker_config.remote_host not in contexts:
                     context = remote_root_context(self._project_name, ssh_client, worker_config.remote_root)
                     contexts[worker_config.remote_host] = context
@@ -557,7 +553,7 @@ class Bundle:
                                        remote_root: Optional[Path] = None,
                                        env: Optional[Dict[str, str]] = None,
                                        ) -> AsyncGenerator[str, str]:
-        ssh_client = SSHClient(host, username, password)
+        ssh_client = SSHClient(host=host, username=username, password=password)
         env = env or {}
         async with remote_root_context(ssh_client, remote_root) as (remote_root, remote_venv_root):
             if "PYTHONPATH" in env:

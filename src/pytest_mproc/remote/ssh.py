@@ -21,7 +21,7 @@ from typing import (
     Union, AsyncContextManager, List,
 )
 
-from pytest_mproc import user_output
+from pytest_mproc import user_output, Settings
 from pytest_mproc.user_output import debug_print, always_print
 
 SUCCESS = 0
@@ -47,10 +47,16 @@ class SSHClient:
     SSH Client objct for interacting with a specific client
     """
     host: str
-    username: Optional[str] = None
+    username: str
     password: Optional[str] = None
 
     _global_options = []
+
+    def __init__(self, **kwargs):
+        self.host = kwargs['host']
+        self.username = kwargs['username']
+        self.password = kwargs.get('password')
+        assert self.username
 
     @classmethod
     def set_global_options(cls, *args: str) -> None:
@@ -371,16 +377,24 @@ class SSHClient:
             raise CommandExecutionFailure(command, proc.returncode)
 
     @asynccontextmanager
-    async def mkdtemp(self) -> Path:
+    async def mkdtemp(self, tmp_root: Optional[Path] = None) -> Path:
         """
         :return: temporary directory created on remote client
         """
-        proc = await self._remote_execute(
-            f"mktemp -d --tmpdir ptmproc-tmp.XXXXXXXXXX",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            shell=True
-        )
+        if tmp_root is None:
+            proc = await self._remote_execute(
+                f"mktemp -d --tmpdir ptmproc-tmp.XXXXXXXXXX",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                shell=True
+            )
+        else:
+            proc = await self._remote_execute(
+                f"mktemp -d  {str(tmp_root / 'ptmproc-tmp.XXXXXXXXXX')}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                shell=True
+            )
         await asyncio.wait_for(proc.wait(), timeout=5)
         if proc.returncode != 0:
             stdout = await proc.stdout.read()
@@ -490,26 +504,22 @@ async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_r
     :param remote_root: an explicit location on the remote host (will not be remove on exit of context)
     :return: the remote root created (or reflects the remote root provided explicitly)
     """
-    allow_cache = os.environ.get('PTMPROC_DISABLE_CACHE', False) not in ('1', 'True', 'true', 'TRUE')
-    if allow_cache:
+    remote_root = remote_root or Settings.tmp_root
+    if not Settings.cache_dir:
         proc = await ssh_client.execute_remote_cmd('echo \${HOME}', stdout=asyncio.subprocess.PIPE, shell=True)
         stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
         if proc.returncode != 0 or not stdout_text:
-            var_cache_path = Path('/var') / 'cache' / 'ptmproc'
+            cache_path = remote_root
         else:
-            var_cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
-        # noinspection PyBroadException
-        try:
-            await ssh_client.mkdir(var_cache_path / project_name, exists_ok=True)
-            debug_print(f"Using {var_cache_path / project_name} to cache python venv")
-            venv_root = var_cache_path / project_name
-        except Exception:
-            venv_root = None
+            cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
     else:
-        venv_root = None
+        cache_path = Settings.cache_dir or remote_root
+    venv_root = cache_path / project_name
+    await ssh_client.mkdir(venv_root, exists_ok=True)
+    debug_print(f"Using {cache_path / project_name} to cache python venv")
     if remote_root:
         yield remote_root, venv_root or remote_root
     else:
-        async with ssh_client.mkdtemp() as root:
+        async with ssh_client.mkdtemp(Settings.tmp_root) as root:
             debug_print(f"Using dir {venv_root} to set up python venv and {root} as temp staging dir")
             yield root, venv_root or root

@@ -2,15 +2,10 @@ from pathlib import Path
 
 import setuptools
 
-VERSION = "5.0.14"
+VERSION = "5.0.15"
 
 requirements = []
-with open(Path(__file__).parent / 'pure_requirements.txt', 'r') as in_stream:
-    for line in in_stream:
-        line = line.strip()
-        if line:
-            requirements.append(line)
-with open(Path(__file__).parent / 'impure_requirements.txt', 'r') as in_stream:
+with open(Path(__file__).parent / 'requirements.txt', 'r') as in_stream:
     for line in in_stream:
         line = line.strip()
         if line:

@@ -10,13 +10,11 @@ from enum import Enum
 from glob import glob
 from multiprocessing import Semaphore
 from multiprocessing import JoinableQueue
-from multiprocessing.managers import SyncManager
+from multiprocessing.managers import SyncManager, RemoteError
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 
-import pytest
-
-from pytest_mproc import get_auth_key, find_free_port, get_ip_addr
+from pytest_mproc import get_auth_key, find_free_port, get_ip_addr, Settings
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.fixtures import Global
 from pytest_mproc.remote.ssh import SSHClient, remote_root_context
@@ -52,7 +50,7 @@ class OrchestrationManager:
         self._is_server = False
         self._mproc_pid: Optional[int] = None
         self._remote_pid: Optional[int] = None
-        self._finalize_sem : Dict[str, multiprocessing.Semaphore] = {}
+        self._finalize_sem: Dict[str, multiprocessing.Semaphore] = {}
 
     @staticmethod
     def key() -> str:
@@ -77,9 +75,10 @@ class OrchestrationManager:
         must be opened for incoming requests.  Firewalls can prevent this, hence the other
         protocol options
 
+        :param project_name:  name of project under test
         :param uri: URI in form <protocol>://host:port where protocol is one of 'local', 'remote', 'ssh'
         :param as_client: only for local protocol: whether to instantiate as a server or as a client
-        :return: OrchestrationMenager instance
+        :return: OrchestrationManager instance
         """
         parts = uri.split('://', maxsplit=1)
         try:
@@ -123,16 +122,17 @@ class OrchestrationManager:
             raise SystemError("Invalid protocol to process")
         return mgr
 
+    # noinspection PyPep8Naming
     def Queue(self, size: Optional[int] = None):
         if size:
             return self._global_mgr.Queue(size)
         return self._global_mgr.Queue()
 
-    def connect(self, host: Optional[str]=None) -> None:
+    def connect(self, host: Optional[str] = None) -> None:
         """
         Connect as a client to an existing server
 
-        :param host: if host assignment defered, use this
+        :param host: if host assignment deferred, use this
         """
         if self._host is not None and host is not None:
             raise ValueError("Cannot specify host on connect when one already assigned on construction")
@@ -146,6 +146,7 @@ class OrchestrationManager:
         Global.Manager.register("register_worker")
         Global.Manager.register("count")
         Global.Manager.register("completed")
+        # noinspection SpellCheckingInspection
         Global.Manager.register("JoinableQueue")
         Global.Manager.register("get_test_queue")
         Global.Manager.register("get_test_queue")
@@ -165,6 +166,7 @@ class OrchestrationManager:
         Global.Manager.register("register_worker", self._register_worker)
         Global.Manager.register("count", self._count)
         Global.Manager.register("completed", self._completed)
+        # noinspection SpellCheckingInspection
         Global.Manager.register("JoinableQueue", JoinableQueue,
                                 exposed=["put", "get", "task_done", "join", "close", "get_nowait"])
         Global.Manager.register("Semaphore", Semaphore, exposed=["acquire", "release"])
@@ -177,7 +179,7 @@ class OrchestrationManager:
         self._is_server = True
 
     def join(self, timeout: Optional[float] = None) -> None:
-        with suppress(EOFError, ConnectionResetError, ConnectionRefusedError):
+        with suppress(EOFError, ConnectionResetError, ConnectionRefusedError, RemoteError):
             self._global_mgr.join(self.key(), timeout)
 
     def _join(self, key: str,  timeout: Optional[float] = None) -> None:
@@ -189,7 +191,7 @@ class OrchestrationManager:
         :raises: TimeoutError if timeout is specified and reached before join completes
         """
         for client in self._clients[key]:  # empty if client
-            with suppress(ConnectionRefusedError):
+            with suppress(ConnectionRefusedError, RemoteError):
                 client.join(timeout=timeout)
 
     def register_client(self, client):
@@ -203,7 +205,7 @@ class OrchestrationManager:
     def register_worker(self, worker) -> None:
         """
         Register worker (there can be multiple workers per client)
-        :param worker: worker to regisster
+        :param worker: worker to register
         """
         # noinspection PyUnresolvedReferences
         self._global_mgr.register_worker(worker, self.key())
@@ -275,6 +277,7 @@ class OrchestrationManager:
         self._finalize_sem.setdefault(key, multiprocessing.Semaphore(0))
         return self._finalize_sem[key]
 
+    # noinspection SpellCheckingInspection
     @staticmethod
     def launch(host: str, port: int, project_name: str) -> Tuple[int, int]:
         destination = host
@@ -282,7 +285,7 @@ class OrchestrationManager:
         try:
             user, _ = destination.split('@', maxsplit=1)
         except ValueError:
-            user = None
+            user = Settings.ssh_username
         sem = multiprocessing.Semaphore(0)
         mpmgr = SyncManager(authkey=get_auth_key())
         mpmgr.start()
@@ -313,7 +316,8 @@ class OrchestrationManager:
             ssh = SSHClient(host=host, username=user)
             root = Path(__file__).parent.parent
             files = glob(str(root / 'pytest_mproc' / '**' / '*.py'), recursive=True)
-            async with remote_root_context(project_name=project_name, ssh_client=ssh, remote_root=None) as (tmpdir, venv_dir):
+            async with remote_root_context(project_name=project_name, ssh_client=ssh, remote_root=None) \
+                    as (tmpdir, venv_dir):
                 remote_sys_executable = 'python{}.{}'.format(*sys.version_info)
                 await ssh.execute_remote_cmd(remote_sys_executable, '-m', 'venv', 'venv',
                                              cwd=venv_dir)
@@ -346,7 +350,7 @@ class OrchestrationManager:
                 sem.release()
                 returns.update({'remote_proc_id': remote_proc.pid})
                 await remote_proc.wait()
-        except:
+        except Exception:
             if remote_proc:
                 remote_proc.terminate()
             sem.release()

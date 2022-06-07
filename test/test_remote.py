@@ -13,6 +13,7 @@ import subprocess
 from asyncio import Semaphore
 from pathlib import Path
 
+import pytest_mproc
 from pytest_mproc import find_free_port
 from pytest_mproc.main import RemoteExecutionThread
 from pytest_mproc.orchestration import OrchestrationManager
@@ -106,6 +107,7 @@ def test_remote_execution_cli(tmp_path):
         # remote_host = 'fssh://pi@10.220.45.119:{find_free_port()}'
         remote_host = f'127.0.0.1:{find_free_port()}'
         client_connect = remote_host.split(":")[0]
+        pytest_mproc.Settings.set_ssh_credentials(username='pi')
         remote_server = f'delegated://pi@'
         client_connect = '10.220.45.110'
         # remote_server = remote_host
