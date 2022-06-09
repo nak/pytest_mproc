@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest_mproc
 from pytest_mproc import find_free_port
-from pytest_mproc.main import RemoteExecutionThread
+from pytest_mproc.main import RemoteSession
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 
@@ -163,10 +163,10 @@ def test_remote_execution_thread(tmp_path, chdir):
         RemoteHostConfig(ipname),
         RemoteHostConfig(ipname),
     ]
-    thread = RemoteExecutionThread(project_config=project_config,
-                                   remote_sys_executable=shutil.which("python3"),
-                                   remote_hosts_config=client_hosts,
-                                   )
+    thread = RemoteSession(project_config=project_config,
+                           remote_sys_executable=shutil.which("python3"),
+                           remote_hosts_config=client_hosts,
+                           )
     try:
         sem = Semaphore(0)
         time.sleep(3)

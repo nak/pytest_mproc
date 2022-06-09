@@ -279,8 +279,7 @@ class OrchestrationManager:
 
     # noinspection SpellCheckingInspection
     @staticmethod
-    def launch(host: str, port: int, project_name: str) -> Tuple[int, int]:
-        destination = host
+    def launch(destination: str, port: int, project_name: str) -> Tuple[int, int]:
         host = destination.split('@')[-1]
         try:
             user, _ = destination.split('@', maxsplit=1)

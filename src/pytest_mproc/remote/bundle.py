@@ -360,7 +360,8 @@ class Bundle:
                         timeout=deploy_timeout
                     ))
 
-                async def execute(worker_config: RemoteHostConfig, worker_id: str):
+                async def execute(worker_config: RemoteHostConfig, worker_id: str) \
+                        -> Tuple[str, asyncio.subprocess.Process]:
                     host = worker_config.remote_host
                     # we must wait if deployment is not finished
                     # this setup parallelizes multiple host efficiently
