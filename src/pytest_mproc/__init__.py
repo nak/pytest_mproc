@@ -1,6 +1,9 @@
+import asyncio
 import multiprocessing
+import time
 from multiprocessing.process import current_process
 from pathlib import Path
+from queue import Empty, Full
 
 import binascii
 import inspect
@@ -200,3 +203,63 @@ class Settings:
         :param tmp_dir:  root dir where temp directories are created (and removed on finalization)
         """
         cls.tmp_root = Path(tmp_dir) if tmp_dir else None
+
+
+class AsyncMPQueue:
+    """
+    wraps mp Queue to provide an async (albeit plling) interface
+    """
+
+    INTERVAL_POLLING = 0.5  # seconds
+    TIMEOUT_JOIN = 5.0  # seconds
+
+    def __init__(self, wrapped_q: multiprocessing.JoinableQueue):
+        assert type(wrapped_q) != AsyncMPQueue
+        self._q = wrapped_q
+
+    def raw(self) -> multiprocessing.JoinableQueue:
+        return self._q
+
+    async def get(self):
+        """
+        :return: next item in queue
+        """
+        while True:
+            try:
+                item = self._q.get(block=False)
+                self._q.task_done()
+                await asyncio.sleep(0)
+                return item
+            except Empty:
+                await asyncio.sleep(self.INTERVAL_POLLING)
+
+    async def put(self, item) -> None:
+        """
+        put an item in the queue
+        :param item: item to place
+        """
+        while True:
+            try:
+                self._q.put(item, block=False)
+                await asyncio.sleep(0)
+                break
+            except Full:
+                await asyncio.sleep(self.INTERVAL_POLLING)
+
+    def close(self):
+        self._q.close()
+
+    def get_nowait(self):
+        return self._q.get_nowait()
+
+    def put_nowait(self, item):
+        return self._q.put(item)
+
+    async def join(self, timeout: float = TIMEOUT_JOIN) -> None:
+        # assume join only called on "put" thread when it expects
+        # all items in the queue to be drained and no more puts are expected
+        start = time.monotonic()
+        while not self._q.empty():
+            await asyncio.sleep(self.INTERVAL_POLLING)
+            if time.monotonic() - start > timeout:
+                raise TimeoutError(f"Timed out after {timeout:.1f} seconds joining queue")

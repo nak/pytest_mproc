@@ -1,51 +1,18 @@
 """
 This package contains code to coordinate execution from a main thread to worker threads (processes)
 """
+import asyncio
 import os
+import subprocess
 import sys
 import time
 from contextlib import suppress
 
 from multiprocessing.managers import SyncManager
 from subprocess import TimeoutExpired
-from typing import Optional
-from pytest_mproc import find_free_port, get_ip_addr, get_auth_key, FatalError
+from typing import Optional, List
 from pytest_mproc.utils import BasicReporter
-
-
-class CoordinatorFactory:
-    """
-    Responsible for creating Coordinator instances and launching them
-    """
-
-    sm: Optional[SyncManager] = None
-
-    def __init__(self, num_processes: int, mgr, as_remote_client: bool):
-        """
-        :param num_processes: number of parallel executions to be conducted
-        :param mgr: global manager of queues, etc.
-        :param as_remote_client: whether running as remote client (or on local host if False)
-        """
-        self._num_processes = num_processes
-        self._is_local = not as_remote_client
-        if self.sm is None and not self._is_local:
-            self.sm = SyncManager(authkey=get_auth_key(), address=(get_ip_addr(), find_free_port()))
-            self.sm.start()
-        self._mgr = mgr
-
-    def launch(self, uri: str) -> "Coordinator":
-        if not self._is_local:
-            # noinspection PyUnresolvedReferences
-            coordinator = self.sm.Coordinator(self._num_processes,
-                                              self._is_local)
-        else:
-            coordinator = Coordinator(self._num_processes,
-                                      self._is_local)
-        # noinspection PyUnresolvedReferences
-        self._mgr.register_client(coordinator)
-        executable = os.environ.get('PTMPROC_EXECUTABLE', sys.executable)
-        coordinator.start(uri, executable)
-        return coordinator
+from pytest_mproc.worker import WorkerSession
 
 
 class Coordinator:
@@ -54,55 +21,54 @@ class Coordinator:
     Coordinators are scoped to a node and only handle a collection of workers on that node
     """
 
-    def __init__(self, num_processes: int, is_local: bool):
+    _singleton : Optional["Coordinator"] = None
+
+    def __init__(self):
         """
-        :param num_processes: number of parallel executions to be conducted
-        :param is_local: whether Coordinator is to be run on same node as main orchestrator or is on a remote machine
         """
-        self._is_local = is_local
-        self._num_processes = num_processes
+        assert Coordinator._singleton is None, "Attempt to instantiate Coordinator more than once on same machine"
         self._count = 0
         self._session_start_time = time.time()
         self._reporter = BasicReporter()
-        self._worker_procs = []
+        self._worker_procs: List[subprocess.Popen] = []
 
-    def is_local(self):
-        return self._is_local
+    @classmethod
+    def singleton(cls):
+        if cls._singleton is None:
+           cls._singleton = Coordinator()
+        return cls._singleton
 
-    def start(self, uri: str, executable: str) -> None:
+    def start_workers(self, uri: str, num_processes: int) -> None:
         """
-        Start all worker processes
+        State a worker
 
-        :return: this object
+        :param uri: uri of server that manages the test and result queues
+        :param num_processes: number of worker processes to launch
         """
-        from pytest_mproc.worker import WorkerSession
-        for index in range(self._num_processes):
+        executable = os.environ.get('PTMPROC_EXECUTABLE', sys.executable)
+        for index in range(num_processes):
             proc = WorkerSession.start(uri, executable)
             self._worker_procs.append(proc)
-        time.sleep(3)
-        failed = 0
-        for proc in self._worker_procs:
+            self._worker_procs.append(proc)
+        time.sleep(1)
+        for index, proc in enumerate(self._worker_procs):
             if proc.returncode is not None:
-                failed += 1
-        if failed == len(self._worker_procs):
-            raise FatalError("all worker client have died unexpectedly")
-        return
+                raise SystemError(f"Worker-{index} failed to start")
 
-    def join(self, timeout: Optional[float] = None):
+    def shutdown(self, timeout: Optional[float] = None):
         for proc in self._worker_procs:
             try:
-                proc.wait(timeout)
+                proc.wait(timeout=timeout)
             except TimeoutExpired:
                 with suppress(OSError):
                     proc.kill()
+        self._worker_procs = []
 
     def kill(self):
-        if CoordinatorFactory.sm:
-            CoordinatorFactory.sm.shutdown()
         for proc in self._worker_procs:
             proc.kill()
         self._worker_procs = []
 
 
 # register the proxy class as the Coordinator class for SyncManager
-SyncManager.register("Coordinator", Coordinator)
+SyncManager.register("Coordinator", Coordinator, exposed=["start", "shutdown", "kill"])

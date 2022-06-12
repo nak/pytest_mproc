@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import functools
 import logging
@@ -101,15 +102,19 @@ class Global:
 
     class Manager(FixtureManager):
 
-        _singleton: Optional["Global.Maager"] = None
+        _singleton: Dict[str, "Global.Manager"] = {}
 
         def __init__(self, host: str, port: int):
             super().__init__((host, port))
 
+        @staticmethod
+        def key() -> str:
+            return hashlib.sha256(get_auth_key()).hexdigest()
+
         @classmethod
         def singleton(cls, address: Optional[Tuple[str, int]] = None, as_client: bool = False) -> "Global.Manager":
-            if cls._singleton and cls._singleton.address[0] is not None:
-                return cls._singleton
+            if cls.key() in cls._singleton and cls._singleton[cls.key()].address[0] is not None:
+                return cls._singleton[cls.key()]
             elif address is None:
                 raise SystemError("Attempt to get Global manager before start or connect")
             if as_client:
@@ -132,15 +137,14 @@ class Global:
                     singleton._is_serving = True
                 except:
                     raise
-            cls._singleton = singleton
-            return cls._singleton
+            cls._singleton[cls.key()] = singleton
+            return cls._singleton[cls.key()]
 
         @classmethod
         def shutdown(cls) -> None:
-            # noinspection PyProtectedMember
-            if cls._singleton is not None and cls._singleton._is_serving:
-                cls._singleton.shutdown()
-                cls._singleton = None
+            if cls.key() in cls._singleton[cls.key()]:
+                cls._singleton[cls.key()].shutdown()
+                del cls._singleton[cls.key()]
 
     def __init__(self, config):
         super().__init__(config)
@@ -160,7 +164,7 @@ def global_fixture(**kwargs):
         @functools.wraps(func)
         def _wrapper(*args, **kwargs):
             nonlocal value
-            assert Global.Manager._singleton is not None, "Global Manager did not start as expected"
+            assert Global.Manager.key() in Global.Manager._singleton, "Global Manager did not start as expected"
             global_mgr = Global.Manager.singleton()
             # when serving potentially multiple full pytest session in a standalone server,
             # we distinguish sessions via the auth token

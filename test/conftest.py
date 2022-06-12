@@ -16,9 +16,9 @@ from pytest_mproc.plugin import TmpDirFactory
 
 _node_tmpdir = None
 
-pytest_mproc.Settings.set_ssh_credentials('pi')
-pytest_mproc.Settings.set_tmp_root(Path('/home/pi/tmp'))
-pytest_mproc.Settings.set_cache_dir(Path('/home/pi/cache'))
+#pytest_mproc.Settings.set_ssh_credentials('pi')
+#pytest_mproc.Settings.set_tmp_root(Path('/home/pi/tmp'))
+#pytest_mproc.Settings.set_cache_dir(Path('/home/pi/cache'))
 
 
 def get_ip_addr():

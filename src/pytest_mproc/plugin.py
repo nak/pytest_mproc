@@ -1,12 +1,16 @@
 """
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
+import asyncio
 import os
 import sys
 
 import _pytest.terminal
 
 from pytest_mproc import worker, user_output, Constants
+from pytest_mproc.coordinator import Coordinator
+from pytest_mproc.main import Orchestrator
+from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.user_output import debug_print
 
 import getpass
@@ -75,8 +79,6 @@ def _add_option(group, name: str, dest: str, action: str,
     """
     internal add option function to allow us to keep track of pytest-specific options from command line
     """
-    from pytest_mproc.main import Orchestrator
-    from pytest_mproc.orchestration import OrchestrationManager
     # noinspection PyProtectedMember
     if typ == bool:
         group._addoption(
@@ -242,8 +244,6 @@ def pytest_cmdline_main(config):
 
 
 def mproc_pytest_cmdline_coordinator(config):
-    from pytest_mproc.orchestration import OrchestrationManager
-    from pytest_mproc.coordinator import CoordinatorFactory
     config.option.no_summary = True
     config.option.no_header = True
     config.option.ptmproc_config = PytestMprocConfig(
@@ -258,26 +258,27 @@ def mproc_pytest_cmdline_coordinator(config):
         debug_print(f"Running coordinator connecting to {uri}")
         config.option.ptmproc_config.server_uri = uri
         if not config.option.collectonly:
-            mgr = OrchestrationManager.create(uri=uri, as_client=True)
-            factory = CoordinatorFactory(
-                num_processes=config.option.ptmproc_config.num_cores,
-                mgr=mgr,
-                as_remote_client=True)
+            coordinator = Coordinator()
             config.ptmproc_runtime = PytestMprocRuntime(mproc_main=None,
-                                                        coordinator=factory.launch(uri))
+                                                        coordinator=coordinator)
+            mgr = OrchestrationManager.create(uri=uri, as_client=True, project_name=None)
+            mgr.register_coordinator(coordinator)
+            coordinator.start_workers(uri=uri,
+                                      num_processes=config.option.ptmproc_config.num_cores)
+
+
+# TODO: ############# shutdown ptmproc_runtime in common way
 
 
 def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
-    from pytest_mproc.main import Orchestrator
-    from pytest_mproc.coordinator import CoordinatorFactory
     assert "--as-worker" not in sys.argv
-    is_server = hasattr(config.option, 'mproc_server_uri') and config.option.mproc_server_uri is not None
+    has_remotes = hasattr(config.option, 'mproc_server_uri') and config.option.mproc_server_uri is not None
     config.option.ptmproc_config.server_uri = getattr(config.option, 'mproc_server_uri') or \
                                               f'127.0.0.1:{find_free_port()}'
     local_proj_file = Path("./ptmproc_project.cfg")
     project_config = getattr(config.option, "project_structure_path", None) or \
         (local_proj_file if local_proj_file.exists() else None)
-    if is_server:
+    if has_remotes:
         remote_clients = config.option.mproc_remote_clients
         version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
         mproc_remote_sys_executable = getattr(config.option, "mproc_remote_sys_executable", None) or \
@@ -295,25 +296,22 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
         raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
     reporter.write(f"Running as main @ {config.option.ptmproc_config.server_uri}\n", green=True)
     default_proj_config = Path(os.getcwd()) / "ptmproc_project.cfg"
-    if is_server:
+    if has_remotes:
         project_config = project_config if (project_config is not None or not default_proj_config.exists())\
             else default_proj_config
     else:
         project_config = None
     orchestrator = Orchestrator(
-        deploy_timeout=DEPLOY_TIMEOUT,
-        remote_sys_executable=config.option.ptmproc_config.remote_sys_executable,
         project_config=ProjectConfig.from_file(Path(project_config)) if project_config else None,
-        uri=config.option.ptmproc_config.server_uri,
-        remote_clients_config=config.option.ptmproc_config.remote_hosts)
+        uri=config.option.ptmproc_config.server_uri)
     config.ptmproc_runtime = PytestMprocRuntime(mproc_main=orchestrator, coordinator=None)
-    if not is_server:
-        # noinspection PyProtectedMember
-        factory = CoordinatorFactory(
-            num_processes=config.option.ptmproc_config.num_cores,
-            mgr=config.ptmproc_runtime.mproc_main._mp_manager,
-            as_remote_client=False)
-        coordinator = factory.launch(config.option.ptmproc_config.server_uri)
+    if has_remotes:
+        # this won't run until run loop when even loop is kicked off :-(
+        asyncio.create_task(orchestrator.start_remote(remote_workers_config=config.option.ptmproc_config.remote_hosts,
+                                                      deploy_timeout=config.option.ptmproc_config.connection_timeout))
+
+    else:
+        coordinator = orchestrator.start_local(num_processes=config.option.ptmproc_config.num_cores)
         config.ptmproc_runtime.coordinator = coordinator
     config.option.dist = "no"
     val = config.getvalue
@@ -341,33 +339,6 @@ def pytest_configure(config):
     config.option.dist = "no"
 
 
-def process_fixturedef(item, target, fixturedef, request, config, scope):
-    if not fixturedef:
-        return
-    for argname in fixturedef.argnames:
-        if argname in config.option.fixtures:
-            continue
-        # noinspection PyProtectedMember
-        fixdef = item._fixtureinfo.name2fixturedefs.get(argname, [None])[0]
-        if fixdef is None:
-            continue
-        if fixturedef.scope in ['node', 'global']:
-            process_fixturedef(item, target, fixdef, request, config, fixdef.scope)
-    generated = config.generated_fixtures
-    if not fixturedef or fixturedef.scope != scope:
-        return
-    name = fixturedef.argname
-    if name not in config.option.fixtures:
-        fixture = pytest.fixtures.resolve_fixture_function(fixturedef, request)
-        args = [config.option.fixtures[argname] for argname in fixturedef.argnames]
-        val = fixture(*args)
-        if inspect.isgenerator(val):
-            generated.append(val)
-            val = next(val)
-        target.put_fixture(name, val)
-        config.option.fixtures[name] = val
-
-
 # noinspection PyProtectedMember
 def pytest_runtestloop(session):
     if session.config.option.collectonly:
@@ -379,7 +350,7 @@ def pytest_runtestloop(session):
     if reporter is None:
         reporter = BasicReporter()
     if session.testsfailed and not session.config.option.continue_on_collection_errors:
-        raise session.Interrupted("%d errors during collection" % session.testsfailed)
+        raise session.Interrupted("%d errors during collection!!" % session.testsfailed)
 
     if session.config.option.collectonly:
         return  # should never really get here, but for consistency
@@ -429,8 +400,6 @@ def pytest_runtestloop(session):
                                         f"group '{fixturedef.func._pytest_group.name}'.  A test cannot" +
                                         "belong to two distinct groups")
                             item._pyfuncitem._pytest_group = fixturedef.func._pytest_group
-                        if coordinator and name not in session.config.option.fixtures:
-                            process_fixturedef(item, coordinator, fixturedef, item._request, session.config, 'node')
                     except Exception as e:
                         session.shouldfail = \
                             f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}' {format_exc()}"
@@ -441,9 +410,11 @@ def pytest_runtestloop(session):
             and session.config.ptmproc_runtime.mproc_main:
         orchestrator = session.config.ptmproc_runtime.mproc_main
         try:
-            with orchestrator:
-                orchestrator.set_items(session.items)
-                orchestrator.run_loop(session)
+            async def loop():
+                async with orchestrator:
+                    orchestrator.set_items(session.items)
+                    await orchestrator.run_loop(session)
+            asyncio.get_event_loop().run_until_complete(loop())
         except Exception as e:
             reporter.write(format_exc() + "\n", red=True)
             reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
@@ -451,7 +422,7 @@ def pytest_runtestloop(session):
     if session.config.option.worker:
         session.config.option.worker.test_loop(session)
     elif session.config.ptmproc_runtime.coordinator:
-        session.config.ptmproc_runtime.coordinator.join()
+        session.config.ptmproc_runtime.coordinator.shutdown()
     return True
 
 
@@ -540,7 +511,9 @@ def pytest_sessionfinish(session):
             session.config.ptmproc_runtime.coordinator.kill()
     if not session.config.option.worker and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.mproc_main is not None:
+        global skipped_count
         orchestrator = session.config.ptmproc_runtime.mproc_main
+        orchestrator.output_summary()
         orchestrator.shutdown()
     yield
     session.config.option.verbose = verbose

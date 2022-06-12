@@ -22,7 +22,7 @@ from typing import (
     Union,
 )
 
-from pytest_mproc import user_output, get_auth_key, Settings
+from pytest_mproc import user_output, get_auth_key, Settings, Constants
 from pytest_mproc.fixtures import Node
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure, remote_root_context
@@ -201,11 +201,15 @@ class Bundle:
 
         if proc.returncode != 0:
             always_print(f"Installing python virtual environment to {remote_venv}")
-            await ssh_client.execute_remote_cmd(
+            proc =await ssh_client.execute_remote_cmd(
                 self._remote_executable, '-m', 'venv', str(remote_venv),
                 stdout=stdout,
-                stderr=sys.stderr
+                stderr=asyncio.subprocess.PIPE
             )
+            if proc.returncode != 0:
+                data = await proc.stderr.read()
+                raise CommandExecutionFailure(f"{self._remote_executable} -m venv {str(remote_venv)} faile:\n\n  {data}",
+                                              proc.returncode)
             await ssh_client.install_packages(
                 'pytest', 'pytest_mproc',
                 venv=remote_venv,
@@ -294,10 +298,9 @@ class Bundle:
 
     async def execute_remote_multi(
             self,
-            ptmproc_args: Dict[str, Any],
             server_info: Tuple[str, int],
-            hosts_q: Queue,
-            port_q: Queue,
+            hosts_q: asyncio.Queue,
+            port_q: asyncio.Queue,
             deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
             timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
@@ -311,7 +314,6 @@ class Bundle:
         :param port_q:
         :param hosts_q:
         :param server_info:
-        :param ptmproc_args:
         :param auth_key: auth token to use in multiprocessing authentication
         :param deploy_timeout: optional timeout if deployment takes too long
         :param env: dict of environment variables to use on execution
@@ -327,7 +329,7 @@ class Bundle:
         try:
             env = env.copy() if env else {}
             index = 0
-            worker_config: RemoteHostConfig = hosts_q.get()
+            worker_config: RemoteHostConfig = await hosts_q.get()
             server_host, server_port = server_info
             remote_roots: Dict[str, Path] = {}
             remote_venvs: Dict[str, Path] = {}
@@ -349,7 +351,7 @@ class Bundle:
                         ssh_client=ssh_client,
                         delegation_port=delegation_port, remote_venv=remote_venv,
                         remote_root=remote_root)
-                    port_q.put(server_port)
+                    await port_q.put(server_port)
                     server_host = worker_config.remote_host
                 index += 1
                 if worker_config.remote_host not in deployment_tasks:
@@ -368,7 +370,7 @@ class Bundle:
                     if deployment_tasks[host]:
                         await deployment_tasks[host]
                         deployment_tasks[host] = False
-                    args, worker_env = _determine_cli_args(worker_config, ptmproc_args, sys.argv[1:])
+                    args, worker_env = _determine_cli_args(worker_config, Constants.ptmproc_args, sys.argv[1:])
                     env.update(worker_env)
                     args += ["--as-worker", f"{server_host}:{server_port}"]
                     return await self.execute_remote(
@@ -384,14 +386,12 @@ class Bundle:
                         remote_venv=remote_venv,
                         deploy=False
                     )
-
                 task = asyncio.get_event_loop().create_task(execute(worker_config, worker_id=f"Worker-{index}"))
                 tasks.append(task)
                 if worker_config.remote_host not in deployments:
                     deployments[ssh_client.host] = (remote_root, remote_venv)
-                worker_config = hosts_q.get()
-            results, _ = await asyncio.wait(tasks, timeout=timeout,
-                                            return_when=asyncio.ALL_COMPLETED)
+                worker_config = await hosts_q.get()
+            results, _ = await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.ALL_COMPLETED)
             results = [r.result() for r in results]
             self._artifacts_path.mkdir(exist_ok=True)
             with open(self._artifacts_path / "worker_info.txt", 'w') as out_stream:
@@ -467,7 +467,7 @@ class Bundle:
         env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
         if "PTMPROC_BASE_PORT" in os.environ:
             env["PTMPROC_BASE_PORT"] = os.environ["PTMPROC_BASE_PORT"]
-        always_print("Executing tests on remote worker %s...", ssh_client.host)
+        always_print(f"Executing tests on remote worker %s via {command}...", ssh_client.host)
         run_dir = self.remote_run_dir(remote_root)
         await ssh_client.mkdir(cwd, exists_ok=True)
         await ssh_client.execute_remote_cmd("ln", "-sf", str(run_dir / '*'), str(cwd / '.'))
@@ -494,7 +494,7 @@ class Bundle:
                           f"see log in artifacts. worker-{worker_id}{os.sep}{self._prepare_script.stem}.log"
                     debug_print(msg)
                     raise SystemError(msg)
-            cmd = f"{command} -m pytest {' '.join(args)} -s | "\
+            cmd = f"{command} -m pytest {' '.join(args)} -s 2>&1 | "\
                   f"tee {remote_artifacts_dir}{os.sep}pytest_stdout.log"
             debug_print(">>> From %s running %s\n\n %s", cwd, cmd, env)
             await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)

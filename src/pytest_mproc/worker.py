@@ -1,3 +1,4 @@
+import asyncio
 import os
 import socket
 import subprocess
@@ -11,6 +12,8 @@ from multiprocessing import (
     Semaphore,
 )
 from typing import Iterator, Union
+
+import binascii
 import pytest
 # noinspection PyProtectedMember
 from _pytest.config import _prepareconfig
@@ -194,23 +197,23 @@ class WorkerSession:
         :return: Process created for new worker
         """
         from pytest_mproc.fixtures import Node
-        import binascii
         env = os.environ.copy()
-        env["PYTEST_WORKER"] = "1"
-        env["AUTH_TOKEN_STDIN"] = "1"
-        if user_output.verbose:
-            env['PTMPROC_VERBOSE'] = '1'
-        else:
-            env['PTMPROC_VERBOSE'] = '0'
-        env['PTMPROC_NODE_MGR_PORT'] = str(Node.Manager.PORT)
+        env.update({
+            "PYTEST_WORKER": "1",
+            "AUTH_TOKEN_STDIN": "1",
+            'PTMPROC_VERBOSE': '1' if user_output.verbose else '0',
+            'PTMPROC_NODE_MGR_PORT': str(Node.Manager.PORT),
+        })
         stdout = sys.stdout
         stderr = sys.stderr
         executable = executable or sys.executable
-        proc = subprocess.Popen([executable, '-m', __name__, uri] + sys.argv[1:],
-                                env=env,
-                                stdout=stdout, stderr=stderr, stdin=subprocess.PIPE)
+        proc = subprocess.Popen(
+            [executable, '-m', __name__, uri] + sys.argv[1:],
+            env=env,
+            stdout=stdout, stderr=stderr,
+            stdin=subprocess.PIPE)
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
-        proc.stdin.flush()
+        proc.stdin.close()
         return proc
 
     @staticmethod
@@ -306,10 +309,9 @@ def main():
     # noinspection PyUnresolvedReferences
     mgr.register_worker((get_ip_addr(), os.getpid()))
     # noinspection PyUnresolvedReferences
-    test_q = mgr.get_test_queue()
+    test_q = mgr.get_test_queue().raw()
     # noinspection PyUnresolvedReferences
-    result_q = mgr.get_results_queue()
-
+    result_q = mgr.get_results_queue().raw()
     worker = WorkerSession(index=os.getpid(),
                            is_remote='--as-worker' in sys.argv,
                            test_q=test_q,

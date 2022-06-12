@@ -2,6 +2,7 @@
 SSH utilities for remote client interactions
 """
 import asyncio
+import getpass
 import logging
 import os
 import shlex
@@ -54,9 +55,8 @@ class SSHClient:
 
     def __init__(self, **kwargs):
         self.host = kwargs['host']
-        self.username = kwargs['username']
+        self.username = kwargs.get('username', getpass.getuser())
         self.password = kwargs.get('password')
-        assert self.username
 
     @classmethod
     def set_global_options(cls, *args: str) -> None:
@@ -262,13 +262,13 @@ class SSHClient:
         proc = await self._remote_execute(
             cmd,
             stdout=stdout,
-            stderr=stderr,
+            stderr=sys.stderr,
             cwd=str(cwd) if cwd is not None else None
         )
         stdout, _ = await proc.communicate()
         assert proc.returncode is not None
         if proc.returncode != 0:
-            os.write(sys.stderr.fileno(), f"Command {cmd} failed to install on remote".encode('utf-8'))
+            os.write(sys.stderr.fileno(), f"Command {cmd} frpm {cwd}failed to install on remote".encode('utf-8'))
             raise CommandExecutionFailure(cmd, proc.returncode)
 
     async def install(self,
@@ -504,7 +504,6 @@ async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_r
     :param remote_root: an explicit location on the remote host (will not be remove on exit of context)
     :return: the remote root created (or reflects the remote root provided explicitly)
     """
-    remote_root = remote_root or Settings.tmp_root
     if not Settings.cache_dir:
         proc = await ssh_client.execute_remote_cmd('echo \${HOME}', stdout=asyncio.subprocess.PIPE, shell=True)
         stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
@@ -513,7 +512,7 @@ async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_r
         else:
             cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
     else:
-        cache_path = Settings.cache_dir or remote_root
+        cache_path = Settings.cache_dir
     venv_root = cache_path / project_name
     await ssh_client.mkdir(venv_root, exists_ok=True)
     debug_print(f"Using {cache_path / project_name} to cache python venv")
