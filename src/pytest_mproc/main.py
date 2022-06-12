@@ -1,6 +1,8 @@
 import asyncio
 import multiprocessing
 import os
+from multiprocessing.managers import RemoteError
+
 import pytest
 import resource
 import socket
@@ -47,7 +49,7 @@ __all__ = ["Orchestrator", "RemoteSession"]
 
 lock = RLock()
 WorkerSpec = Union[List[RemoteHostConfig], AsyncIterator[RemoteHostConfig]]
-
+POLLING_INTERVAL_HOST_VALIDATION = 1
 
 # noinspection PyBroadException
 def _localhost():
@@ -73,7 +75,7 @@ class RemoteSession:
                  ):
         """
 
-        :param project_config: user defined project parameters needed for creaint the bundle to send
+        :param project_config: user defined project parameters needed for creating the bundle to send
         :param remote_sys_executable: optional string path to remote executable for Python to use (must version-match)
         :param mgr:
         """
@@ -106,8 +108,8 @@ class RemoteSession:
             deploy_timeout: Optional[float] = None,
             env: Dict[str, str] = None,
     ) -> None:
-        always_print(f"START WORKERS ACTIVE {self._delegation_port}")
         port_q = asyncio.Queue(1)
+        delegation_q = asyncio.Queue(1)
         with tempfile.TemporaryDirectory() as tmp_root,\
                 Bundle.create(root_dir=Path(tmp_root),
                               project_config=self._project_config,
@@ -122,19 +124,37 @@ class RemoteSession:
                         delegation_port=self._delegation_port,
                         hosts_q=hosts_q,
                         port_q=port_q,
+                        delegation_q=delegation_q,
                         env=env
                     )
                 )
                 if self._delegation_port is not None:
-                    yield await asyncio.wait_for(port_q.get(), timeout=deploy_timeout)
+                    self._delegation_port = await asyncio.wait_for(port_q.get(), timeout=deploy_timeout)
+                    delegation_host = await asyncio.wait_for(delegation_q.get(), timeout=deploy_timeout)
+                    yield self._delegation_port
                 else:
+                    delegation_host = None
                     yield -1
-                self._procs, delegation_host, delegation_proc = await self._session_task
-                result_q = self._mp_mgr.get_results_queue()
+                if delegation_host:
+                    tries = 30
+                    while tries:
+                        try:
+                            mgr = OrchestrationManager.create(uri=f"{delegation_host}:{self._delegation_port}",
+                                                              as_client=True)
+                            result_q = mgr.get_results_queue()
+                            break
+                        except Exception:
+                            tries -= 1
+                            always_print(f"Connecting.. tries left: {tries}")
+                            if tries <= 0:
+                                raise
+                            await asyncio.sleep(1)
+                else:
+                    result_q = self._mp_mgr.get_results_queue()
                 self._validate_task = asyncio.create_task(
-                    self.validate_clients(result_q=result_q,
-                                          remote_host_procs=self._procs)
+                    self.validate_clients(result_q=result_q, remote_host_procs=self._procs)
                 )
+                self._procs, delegation_proc = await self._session_task
                 self._procs = {}
                 await asyncio.wait_for(self._validate_task, timeout=5)
                 self._validate_task.cancel()
@@ -142,7 +162,6 @@ class RemoteSession:
                     # normally, result_q is closed, unless there is an exception that prevents any tests from
                     # running straight off
                     await result_q.join()
-                    await asyncio.wait_for(result_q.put(AllClientsCompleted()), timeout=timeout)
             except Exception as e:
                 with suppress(Exception):
                     self._validate_task.cancel()
@@ -153,14 +172,15 @@ class RemoteSession:
                     await asyncio.wait_for(result_q.put(FatalError(msg)), timeout=timeout)
                 raise
             finally:
-                self._validate_task.cancel()
-                await self.shutdown()
+                await asyncio.wait_for(result_q.put(AllClientsCompleted()), timeout=timeout)
+                if self._validate_task:
+                    self._validate_task.cancel()
 
     @staticmethod
     async def validate_clients(result_q: AsyncMPQueue,
                                remote_host_procs: Dict[str, asyncio.subprocess.Process]) -> None:
         """
-        Continually ping workers to nsure they are alive, and dtop worker if not, rescheduling any pending tests to
+        Continually ping workers to ensure they are alive, and drop worker if not, rescheduling any pending tests to
         that worker
 
         :param result_q: Used to signal a client died
@@ -197,13 +217,10 @@ class RemoteSession:
                     if host in remote_host_procs and procs[host].returncode is not None:
                         del remote_host_procs[host]
                     debug_print(f"{host} is alive")
-            time.sleep(1)
+            time.sleep(POLLING_INTERVAL_HOST_VALIDATION)
 
     async def shutdown(self):
         self._procs = {}
-        with suppress(Exception):
-            finish_sem = self._mp_mgr.get_finalize_sem()
-            finish_sem.release()
         with suppress(Exception):
             self._validate_task.cancel()
         if self._session_task is not None:
@@ -245,16 +262,11 @@ class Orchestrator:
         self._session_start_time = time.time()
 
         # definitions and  managers responsible for flow of tests and results:
-        self._sm = None
         project_name = project_config.project_name if project_config else None
         self._mp_manager = OrchestrationManager.create(uri, project_name=project_name, as_client=False)
         self._finish_sem = Semaphore(0)
-        if not self._mp_manager.delegated:
-            self._test_q = self._mp_manager.get_test_queue()
-            self._result_q = self._mp_manager.get_results_queue()
-        else:
-            self._test_q = None
-            self._result_q = None
+        self._test_q = None
+        self._result_q = None
         # for information output:
         self._reporter = BasicReporter()
         self._rusage = None
@@ -284,9 +296,9 @@ class Orchestrator:
 
         :param worker_q: where to put workers as they are received/listed
         :param worker_configs: list or async generator of worker configurations
-        :param deploy_timeout: timeout if takinsg to long
+        :param deploy_timeout: timeout if taking to long
         :param finish_sem: if released, indicates everything is finished and to give up getting/configuring more workers
-        :param delegate_q: put the first worker received as the delegate server, if needd
+        :param delegate_q: put the first worker received as the delegate server, if needed
         """
         sem = asyncio.Semaphore(0)
         try:
@@ -367,25 +379,30 @@ class Orchestrator:
         """
         delegated_host = await asyncio.wait_for(delegate_q.get(), timeout=deploy_timeout)
         port = await asyncio.wait_for(port_q.get(), timeout=deploy_timeout)
+        polling_interval = 1  # seconds
         tries = 30
+        self._mp_manager = OrchestrationManager.create(
+            uri=f"{delegated_host}:{port}",
+            project_name=self._project_config.project_name + "HERE",
+            as_client=True,
+            connect=False
+        )
         while tries:
             # noinspection PyBroadException
             try:
-                self._mp_manager.connect(delegated_host, port)
-                self._server_uri = f"{delegated_host}:{port}"
-                self._uri = f"{self._username}@{delegated_host}:{port}" if self._username is not None else self._uri
-                self._test_q = self._mp_manager.get_test_queue()
-                self._result_q = self._mp_manager.get_results_queue()
+                self._mp_manager.connect()
                 break
             except Exception:
                 always_print(f"Connecting; tries left: {tries}")
-                delegated_host = None
                 tries -= 1
                 if tries <= 0:
                     raise SystemError(f"Failed to start delegate manager on {delegated_host}"
                                       f":{self._mp_manager.port}")
-                time.sleep(1)
-
+                time.sleep(polling_interval)
+        self._server_uri = f"{delegated_host}:{port}"
+        self._uri = f"{self._username}@{delegated_host}:{port}" if self._username is not None else self._uri
+        self._test_q = self._mp_manager.get_test_queue()
+        self._result_q = self._mp_manager.get_results_queue()
 
     @property
     def host(self):
@@ -399,24 +416,19 @@ class Orchestrator:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self._populate_worker_queue_task:
-            with suppress(TimeoutError):
-                await asyncio.wait_for(self._populate_worker_queue_task,3)
-        with suppress(Exception):
-            self._populate_worker_queue_task.cancel()
         with suppress(asyncio.TimeoutError):
             if self._workers_task:
-                await  asyncio.wait_for(self._workers_task, timeout=3)
+                await asyncio.wait_for(self._workers_task, timeout=5)
         with suppress(Exception):
             self._workers_task.cancel()
+        self._mp_manager.finalize()
+        if self._populate_worker_queue_task:
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self._populate_worker_queue_task, 3)
+        with suppress(Exception):
+            self._populate_worker_queue_task.cancel()
         with suppress(Exception):
             await self._hosts_q.put(None)  # may already be closed, but in case of error path, etc
-        if self._remote_session is not None:
-            if self._remote_session.shutdown() is None:
-                with suppress(Exception):
-                    await self._remote_session.shutdown()
-        with suppress(Exception):
-            await self._mp_manager.shutdown()
         if self._remote_session:
             await self._remote_session.shutdown()
 
@@ -447,7 +459,8 @@ class Orchestrator:
                     f"{exit_result.test_count} tests in {exit_result.resource_utilization.time_span:.2f} " +
                     f"seconds; User CPU: {exit_result.resource_utilization.user_cpu:.2f}%, " +
                     f"Sys CPU: {exit_result.resource_utilization.system_cpu:.2f}%, " +
-                    f"Mem consumed (add'l from base): {exit_result.resource_utilization.memory_consumed / 1000.0:.2f}M\n")
+                    f"Mem consumed (add'l from base): "
+                    f"{exit_result.resource_utilization.memory_consumed / 1000.0:.2f}M\n")
             else:
                 sys.stdout.write(f"Process Worker-{exit_result.worker_index} executed 0 tests\n")
         sys.stdout.write("\n")
@@ -502,15 +515,17 @@ class Orchestrator:
             sys.stdout.write("INTERNAL_ERROR> %s\n" % str(e))
 
     async def read_results(self, hook):
-
+        """
+        read results and take actions (in batches)
+        :param hook: pytest hook needed for test reporting
+        """
         try:
             test_count = 0
             error_count = 0
-
             result_batch: Union[List[ResultType], None] = await self._result_q.get()
             while result_batch is not None:
                 if isinstance(result_batch, AllClientsCompleted):
-                    self._test_q.close()
+                    self._result_q.close()
                     break
                 elif isinstance(result_batch, ClientDied):
                     key = f"{result_batch.host}-{result_batch.pid}"
@@ -573,27 +588,10 @@ class Orchestrator:
                     else:
                         self._process_worker_message(hook,  result)
                 result_batch = await self._result_q.get()
-            try:
-                result_batch = self._result_q.get_nowait()
-            except Empty:
-                result_batch = None
-            while result_batch:
-                if isinstance(result_batch, list):
-                    for result in result_batch:
-                        test_count += 1
-                        if isinstance(result, ResultException):
-                            raise Exception("Internal ERROR") from result
-                        else:
-                            self._process_worker_message(hook,  result)
-                try:
-                    result_batch = self._result_q.get_nowait()
-                except Empty:
-                    result_batch = None
         finally:
             self._result_q.close()
 
     async def populate_test_queue(self, test_q: AsyncMPQueue, tests: List[TestBatch], uri: str):
-        # noinspection PyBroadException
         count = 0
 
         for test_batch in tests:
@@ -654,7 +652,6 @@ class Orchestrator:
                                      tests=self._tests,
                                      uri=self._server_uri)
         )
-        # validate_clients_task = asyncio.create_task(self.validate_clients(, self._result_q))
         try:
             # only master will read results and post reports through pytest
             await self.read_results(session.config.hook)
@@ -666,12 +663,6 @@ class Orchestrator:
             raise session.Failed(True)
         finally:
             with suppress(Exception):
-                finish_sem = self._mp_manager.get_finalize_sem()
-                finish_sem.release()
-            if self._sm is not None:
-                with suppress(Exception):
-                    self._sm.shutdown()
-            with suppress(Exception):
                 # should never time out since workers are done
                 await asyncio.wait_for(populate_tests_task, timeout=1)
             with suppress(Exception):
@@ -680,8 +671,6 @@ class Orchestrator:
             time_span = time.time() - start_time
             self._rusage = resource_utilization(time_span=time_span, start_rusage=start_rusage, end_rusage=end_rusage)
             sys.stdout.write("\r\n")
-            # noinspection PyProtectedMember
-            self._mp_manager.join()
 
     def output_summary(self):
         self._output_summary()

@@ -1,6 +1,4 @@
-import asyncio
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -9,14 +7,12 @@ from contextlib import suppress
 from multiprocessing import (
     JoinableQueue,
     Queue,
-    Semaphore,
 )
 from typing import Iterator, Union
 
 import binascii
 import pytest
 # noinspection PyProtectedMember
-from _pytest.config import _prepareconfig
 import resource
 
 from pytest_mproc import resource_utilization, TestError, user_output, get_ip_addr, get_auth_key
@@ -29,11 +25,6 @@ from pytest_mproc.data import (
     TestStateEnum,
 )
 from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
-from pytest_mproc.ptmproc_data import (
-    PytestMprocConfig,
-    PytestMprocWorkerRuntime,
-)
-from pytest_mproc.user_output import debug_print
 from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:
@@ -178,14 +169,14 @@ class WorkerSession:
         """
         assert self._test_q is not None
 
-        def generator(test_q: JoinableQueue) -> Iterator[TestBatch]:
-            test = test_q.get()
+        def generator() -> Iterator[TestBatch]:
+            test = self._test_q.get()
             while test:
-                test_q.task_done()
+                self._test_q.task_done()
                 yield test
-                test = test_q.get()
-            test_q.task_done()
-        session.items_generator = generator(self._test_q)
+                test = self._test_q.get()
+            self._test_q.task_done()
+        session.items_generator = generator()
         session._named_items = {item.nodeid.split(os.sep)[-1]: item for item in session.items}
         return session.items
 
@@ -215,43 +206,6 @@ class WorkerSession:
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.close()
         return proc
-
-    @staticmethod
-    def run(index: int, is_remote: bool, start_sem: Semaphore, fixture_sem: Semaphore,
-            test_q: JoinableQueue, result_q: Queue, sync_sem: Semaphore()) -> None:
-        from pytest_mproc.orchestration import OrchestrationManager
-        sync_sem.release()
-        start_sem.acquire()
-        worker = WorkerSession(index, is_remote, test_q, result_q)
-        worker._fixture_sem = fixture_sem
-        args = sys.argv[1:]
-        # remove coverage args, as pytest_cov handles multiprocessing already and will apply coverage to worker
-        # as a proc that was launched from main thread which itself has coverage (otherwise it will attempt
-        # duplicate coverage processing and file conflicts galore)
-        args = [arg for arg in args if not arg.startswith("--cov=")]
-        config = _prepareconfig(args, plugins=[])
-        config.option.ptmproc_config = PytestMprocConfig()
-        config.ptmproc_runtime = PytestMprocWorkerRuntime()
-        # unregister terminal (don't want to output to stdout from worker)
-        # as well as xdist (don't want to invoke any plugin hooks from another distribute testing plugin if present)
-        config.pluginmanager.unregister(name="terminal")
-        config.pluginmanager.register(worker, "mproc_worker")
-        worker._client = OrchestrationManager.create(uri=config.option.ptmproc_config.server_uri, as_client=True)
-        workerinput = {'slaveid': "worker-%d" % worker._index,
-                       'workerid': "worker-%d" % worker._index,
-                       'cov_master_host': socket.gethostname(),
-                       'cov_slave_output': os.path.join(os.getcwd(), "worker-%d" % worker._index),
-                       'cov_master_topdir': os.getcwd()
-                       }
-        config.slaveinput = workerinput
-        config.slaveoutput = workerinput
-        try:
-            # and away we go....
-            config.hook.pytest_cmdline_main(config=config)
-        finally:
-            # noinspection PyProtectedMember
-            config._ensure_unconfigure()
-            worker._reporter.write(f"\nWorker-{index} finished\n")
 
     def pytest_internalerror(self, __excrepr):
         self._put(ResultException(SystemError("Internal pytest error")))
@@ -312,6 +266,8 @@ def main():
     test_q = mgr.get_test_queue().raw()
     # noinspection PyUnresolvedReferences
     result_q = mgr.get_results_queue().raw()
+    assert test_q is not None
+    assert result_q is not None
     worker = WorkerSession(index=os.getpid(),
                            is_remote='--as-worker' in sys.argv,
                            test_q=test_q,
@@ -332,8 +288,7 @@ def main():
         msg = f"Worker {get_ip_addr()}-{os.getpid()} died with exception {e}\n {traceback.format_exc()}"
         os.write(sys.stderr.fileno(), msg.encode('utf-8'))
     finally:
-        with suppress(Exception):  # result q is probably closed by now, but for good measure...
-            result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
+        result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
         with suppress(Exception):
             Node.Manager.shutdown()
     return status

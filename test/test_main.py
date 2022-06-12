@@ -17,8 +17,6 @@ from pytest_mproc.data import AllClientsCompleted, ClientDied, TestBatch, Result
 from pytest_mproc.main import RemoteSession, Orchestrator
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteHostConfig
-from pytest_mproc.user_output import always_print
-from pytest_mproc.worker import WorkerSession
 
 
 @pytest.fixture()
@@ -119,7 +117,7 @@ def test_one():
 
         result_q = OrchestrationManager.create(uri="local://localhost:8734", as_client=True,
                                                project_name="test").get_results_queue()
-        result_q = AsyncMPQueue(result_q)
+        result_q = result_q
         r = await asyncio.wait_for(result_q.get(), timeout=140)
         while True:
             assert type(r) in (ClientDied, AllClientsCompleted, ResultExit)
@@ -143,14 +141,14 @@ def test_one():
 @pytest.mark.asyncio
 async def test_populate_worker_queue(project_config: ProjectConfig):
     port = 9341
-    orchestrator = Orchestrator(uri=f"localhost:{port}", project_config=project_config)
-    async with orchestrator:
+    async with Orchestrator(uri=f"localhost:{port}", project_config=project_config) as orchestrator:
         test_q = orchestrator.mp_mgr.get_test_queue()
         tests = [TestBatch(['test1.1', 'test1.2'], priority=2)] + \
                 [TestBatch([f'test3.{n}' for n in range(100)], priority=5)] + \
                 [TestBatch([f'test{n}.1'], priority=1) for n in range(100)]
         orchestrator.mp_mgr.register_worker(
-            ('localhost', WorkerSession(1, False, None, None)))  # we only use count, so any object to register will do
+            ('localhost', 42)  #  WorkerSession(1, False, None, None)))  # we only use count, so any object to register will do
+        )
         try:
             task = asyncio.create_task(orchestrator.populate_test_queue(test_q=test_q, tests=tests, uri=orchestrator.uri))
             test_batch = await asyncio.wait_for(test_q.get(), timeout=5)
@@ -173,16 +171,22 @@ async def test_populate_worker_queue(project_config: ProjectConfig):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('uri', ["localhost:9342", "delegated://pi@", ])
+@pytest.mark.parametrize('uri', [
+    "localhost:9342",
+    "delegated://pi@",
+])
 async def test_start_remote(project_config: ProjectConfig, uri: str, request):
     project_config.project_root = Path(__file__).parent.parent
+    project_config.test_files += [Path('test') / 'test_mproc_runs.py',
+                                  Path('testsrc') / 'testcode' / '*.py',
+                                  Path('testsrc') / 'testcode' / '**' / '*.py']
     orchestrator = Orchestrator(uri=uri, project_config=project_config)
     cwd = os.getcwd()
     argv = sys.argv
-    sys.argv = [sys.argv[0]] + sys.argv[2:] + ['test/test_mproc_runs.py']
-    env = {'PYTHONPATH': str(Path(__file__).parent.parent / 'src')}
+    env = {'PYTHONPATH': f"{str(Path(__file__).parent.parent / 'src')}:{str(Path(__file__).parent.parent / 'testsrc')}"}
     async with orchestrator:
         try:
+            sys.argv = [sys.argv[0]] + ['test/test_mproc_runs.py', '-s', '--cores', '1']
             assert project_config.project_root.exists()
             os.chdir(project_config.project_root)
             await orchestrator.start_remote(
@@ -192,24 +196,30 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
                 ],
                 deploy_timeout=20,
                 env=env)
-            items = ['test_alg1']
+            await asyncio.sleep(1)
+            items = [TestBatch(test_ids=['test_mproc_runs.py::test_some_alg1'])]
             mgr = OrchestrationManager.create(orchestrator.uri, project_name='test', as_client=True)
             test_q = mgr.get_test_queue()
             result_q = mgr.get_results_queue()
             for item in items:
                 await asyncio.wait_for(test_q.put(item), timeout=5)
-            result = await asyncio.wait_for(result_q.get(), timeout=20)
+            await asyncio.wait_for(test_q.put(None), timeout=5)
+            await asyncio.wait_for(test_q.put(None), timeout=5)
+            client_count = 2
+            result = await asyncio.wait_for(result_q.get(), timeout=10)
+            got_complete = False
             while not isinstance(result, AllClientsCompleted):
                 result = await asyncio.wait_for(result_q.get(), timeout=5)
+                if isinstance(result, ClientDied):
+                    client_count -= 1
+                elif isinstance(result, AllClientsCompleted):
+                    got_complete = True
             try:
-                await asyncio.wait_for(result_q.get(), timeout=2)
-                assert False, "unexpected result after signalled that all client completed"
+                result = await asyncio.wait_for(result_q.get(), timeout=2)
+                if got_complete or not isinstance(result, AllClientsCompleted):
+                    assert False, "unexpected result after signalled that all client completed"
             except asyncio.TimeoutError:
                 pass
-        except Exception as e:
-            import traceback
-            print(traceback.format_exc())
-            raise
         finally:
             os.chdir(cwd)
             sys.argv = argv

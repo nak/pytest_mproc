@@ -11,7 +11,7 @@ from pytest_mproc import worker, user_output, Constants
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.orchestration import OrchestrationManager
-from pytest_mproc.user_output import debug_print
+from pytest_mproc.user_output import debug_print, always_print
 
 import getpass
 import inspect
@@ -500,7 +500,7 @@ def pytest_sessionfinish(session):
     with suppress(Exception):
         fixtures.Node.Manager.shutdown()
     with suppress(Exception):
-        fixtures.Global.Manager.shutdown()
+        fixtures.Global.Manager.stop()
     if session.config.option.worker:
         session.config.option.verbose = -2
     if session.config.ptmproc_runtime and not session.config.ptmproc_runtime.mproc_main:

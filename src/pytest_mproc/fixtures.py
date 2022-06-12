@@ -4,7 +4,6 @@ import functools
 import logging
 import os
 import sys
-import time
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
 from pytest_mproc.user_output import debug_print, always_print
@@ -35,14 +34,14 @@ class FixtureManager(BaseManager):
         super().__init__(address=addr, authkey=get_auth_key())
 
     # noinspection PyAttributeOutsideInit
-    def start(self, *args, **kwargs):
-        debug_print(f"Starting {self.__class__.__qualname__} server {self.address}...")
+    def start(self):
+        always_print(f"Starting {self.__class__.__qualname__} server {self.address}...")
         # server:
         self._fixtures: Dict[str, Any] = {}
         self.__class__.register("get_fixture", self._get_fixture)
         self.__class__.register("put_fixture", self._put_fixture)
-        super().start(*args, **kwargs)
-        debug_print(f"Started {self.__class__.__qualname__} server.")
+        super().start()
+        always_print(f"Started {self.__class__.__qualname__} server.")
 
     def connect(self):
         self.__class__.register("get_fixture")
@@ -141,7 +140,7 @@ class Global:
             return cls._singleton[cls.key()]
 
         @classmethod
-        def shutdown(cls) -> None:
+        def stop(cls) -> None:
             if cls.key() in cls._singleton[cls.key()]:
                 cls._singleton[cls.key()].shutdown()
                 del cls._singleton[cls.key()]

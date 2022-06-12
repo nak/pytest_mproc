@@ -3,7 +3,6 @@ import logging
 import os
 import platform
 from glob import glob
-from multiprocessing import Queue
 
 import binascii
 import sys
@@ -59,6 +58,7 @@ class Bundle:
         :param relative_run_dir: working directory, relative to root, where pytest should be executed; root dir if
            not specified
         """
+        self._output_task = None
         self._project_name = project_name
         self._artifacts_path = artifacts_path
         if not root_dir.exists():
@@ -208,7 +208,7 @@ class Bundle:
             )
             if proc.returncode != 0:
                 data = await proc.stderr.read()
-                raise CommandExecutionFailure(f"{self._remote_executable} -m venv {str(remote_venv)} faile:\n\n  {data}",
+                raise CommandExecutionFailure(f"{self._remote_executable} -m venv {str(remote_venv)} failed:\n\n  {data}",
                                               proc.returncode)
             await ssh_client.install_packages(
                 'pytest', 'pytest_mproc',
@@ -294,6 +294,15 @@ class Bundle:
         delegation_proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         delegation_proc.stdin.close()
         port_text = (await delegation_proc.stdout.readline()).decode('utf-8')
+
+        async def read():
+            line = (await delegation_proc.stdout.readline()).decode('utf-8')
+            while line:
+                debug_print(line.strip())
+                line = (await delegation_proc.stdout.readline()).decode('utf-8')
+
+        if user_output.verbose:
+            self._output_task = asyncio.create_task(read())
         return delegation_proc, int(port_text)
 
     async def execute_remote_multi(
@@ -301,12 +310,13 @@ class Bundle:
             server_info: Tuple[str, int],
             hosts_q: asyncio.Queue,
             port_q: asyncio.Queue,
+            delegation_q: asyncio.Queue,
             deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
             timeout: Optional[float] = None,
             auth_key: Optional[bytes] = None,
             env: Optional[Dict[str, str]] = None,
             delegation_port: Optional[int] = None,
-    ) -> Tuple[Dict[str, asyncio.subprocess.Process], str, asyncio.subprocess.Process]:
+    ) -> Tuple[Dict[str, asyncio.subprocess.Process], asyncio.subprocess.Process]:
         """
         deploy and execute to/on multiple host targets concurrently (async)
 
@@ -352,6 +362,7 @@ class Bundle:
                         delegation_port=delegation_port, remote_venv=remote_venv,
                         remote_root=remote_root)
                     await port_q.put(server_port)
+                    await delegation_q.put(delegation_host)
                     server_host = worker_config.remote_host
                 index += 1
                 if worker_config.remote_host not in deployment_tasks:
@@ -412,10 +423,15 @@ class Bundle:
                 if proc.returncode is None:
                     with suppress(OSError):
                         proc.kill()
-            return procs, delegation_host, delegation_proc
+            return procs, delegation_proc
         finally:
             for context in contexts.values():
                 await context.__aexit__(None, None, None)
+            if self._output_task:
+                with suppress(Exception):
+                    await asyncio.wait_for(self._output_task, timeout=1)
+                with suppress(Exception):
+                    self._output_task.cancel()
 
     async def execute_remote(self, *args,
                              cwd: Path,
