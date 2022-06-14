@@ -172,6 +172,7 @@ class RemoteSession:
                     await asyncio.wait_for(result_q.put(FatalError(msg)), timeout=timeout)
                 raise
             finally:
+                await bundle.cleanup()
                 await asyncio.wait_for(result_q.put(AllClientsCompleted()), timeout=timeout)
                 if self._validate_task:
                     self._validate_task.cancel()
@@ -265,8 +266,12 @@ class Orchestrator:
         project_name = project_config.project_name if project_config else None
         self._mp_manager = OrchestrationManager.create(uri, project_name=project_name, as_client=False)
         self._finish_sem = Semaphore(0)
-        self._test_q = None
-        self._result_q = None
+        if uri.startswith("delegated://"):
+            self._test_q = None
+            self._result_q = None
+        else:
+            self._test_q = self._mp_manager.get_test_queue()
+            self._results_q = self._mp_manager.get_results_queue()
         # for information output:
         self._reporter = BasicReporter()
         self._rusage = None
@@ -591,7 +596,7 @@ class Orchestrator:
         finally:
             self._result_q.close()
 
-    async def populate_test_queue(self, test_q: AsyncMPQueue, tests: List[TestBatch], uri: str):
+    async def populate_test_queue(self, tests: List[TestBatch], uri: str):
         count = 0
 
         for test_batch in tests:
@@ -599,9 +604,9 @@ class Orchestrator:
             # do lookup on worker side
             await self._test_q.put(test_batch)
             count += 1
-            if count % 20 == 0 or count >= len(tests):
+            if False and (count % 20 == 0 or count >= len(tests)):
                 try:
-                    await test_q.join()
+                    await self._test_q.join()
                 except EOFError:
                     os.write(sys.stderr.fileno(), b"\n>>> at least one worker disconnected or died unexpectedly\n")
         client = OrchestrationManager.create(uri, as_client=True)
@@ -610,7 +615,7 @@ class Orchestrator:
         for index in range(worker_count):
             await self._test_q.put(None)
         if worker_count > 0:
-            await test_q.join()
+            await self._test_q.join()
 
     # noinspection PyProtectedMember
     def set_items(self, tests):
@@ -648,8 +653,7 @@ class Orchestrator:
         start_rusage = resource.getrusage(resource.RUSAGE_SELF)
         start_time = time.time()
         populate_tests_task = asyncio.create_task(
-            self.populate_test_queue(test_q=self._test_q,
-                                     tests=self._tests,
+            self.populate_test_queue(tests=self._tests,
                                      uri=self._server_uri)
         )
         try:

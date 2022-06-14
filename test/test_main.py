@@ -60,7 +60,7 @@ async def test_validate_clients(project_config, mgr):
 
         subprocess.run = MagicMock(side_effect=mock_run)
         await asyncio.wait_for(
-            remote_session.validate_clients(result_q=AsyncMPQueue(result_q),
+            remote_session.validate_clients(result_q=result_q,
                                             remote_host_procs={'localhost': proc1,
                                                                '127.0.0.1': proc2}),
             timeout=20
@@ -72,7 +72,6 @@ async def test_validate_clients(project_config, mgr):
             proc1.kill()
         with suppress(Exception):
             proc2.kill()
-
 
 
 @pytest.mark.asyncio
@@ -92,7 +91,7 @@ def test_one():
 
 """)
     user_output.verbose = False
-    host_q = mgr.Queue(10)
+    host_q = asyncio.Queue(10)
     remote_session = RemoteSession(remote_sys_executable=sys.executable,
                                    project_config=project_config,
                                    mgr=mgr)
@@ -101,11 +100,12 @@ def test_one():
     await test_q.put(None)
     argv = sys.argv
     assert project_config.project_root.exists()
+    task = None
     try:
         sys.argv = ['-s', 'test_one.py']
         os.chdir(project_config.project_root)
-        host_q.put(RemoteHostConfig(remote_host='localhost', arguments={}))
-        host_q.put(None)
+        await host_q.put(RemoteHostConfig(remote_host='localhost', arguments={}))
+        await host_q.put(None)
 
         async def go():
             async with remote_session.start_workers(server='localhost', server_port=8734,
@@ -134,15 +134,17 @@ def test_one():
     finally:
         sys.argv = argv
         os.chdir(cwd)
-        with suppress(Exception):
-            task.cancel()
+        if task:
+            with suppress(Exception):
+                task.cancel()
 
 
 @pytest.mark.asyncio
-async def test_populate_worker_queue(project_config: ProjectConfig):
+async def test_populate_test_queue(project_config: ProjectConfig):
     port = 9341
     async with Orchestrator(uri=f"localhost:{port}", project_config=project_config) as orchestrator:
-        test_q = orchestrator.mp_mgr.get_test_queue()
+        test_q = orchestrator._test_q
+        # orchestrator._test_q = orchestrator.mp_mgr.get_test_queue()
         tests = [TestBatch(['test1.1', 'test1.2'], priority=2)] + \
                 [TestBatch([f'test3.{n}' for n in range(100)], priority=5)] + \
                 [TestBatch([f'test{n}.1'], priority=1) for n in range(100)]
@@ -150,8 +152,8 @@ async def test_populate_worker_queue(project_config: ProjectConfig):
             ('localhost', 42)  #  WorkerSession(1, False, None, None)))  # we only use count, so any object to register will do
         )
         try:
-            task = asyncio.create_task(orchestrator.populate_test_queue(test_q=test_q, tests=tests, uri=orchestrator.uri))
-            test_batch = await asyncio.wait_for(test_q.get(), timeout=5)
+            task = asyncio.create_task(orchestrator.populate_test_queue(tests=tests, uri=orchestrator.uri))
+            test_batch = await asyncio.wait_for(orchestrator._test_q.get(), timeout=5)
             index = 0
             assert test_batch.test_ids == ['test1.1', 'test1.2']
             while test_batch:
@@ -196,7 +198,6 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
                 ],
                 deploy_timeout=20,
                 env=env)
-            await asyncio.sleep(1)
             items = [TestBatch(test_ids=['test_mproc_runs.py::test_some_alg1'])]
             mgr = OrchestrationManager.create(orchestrator.uri, project_name='test', as_client=True)
             test_q = mgr.get_test_queue()
@@ -205,19 +206,12 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
                 await asyncio.wait_for(test_q.put(item), timeout=5)
             await asyncio.wait_for(test_q.put(None), timeout=5)
             await asyncio.wait_for(test_q.put(None), timeout=5)
-            client_count = 2
             result = await asyncio.wait_for(result_q.get(), timeout=10)
-            got_complete = False
             while not isinstance(result, AllClientsCompleted):
                 result = await asyncio.wait_for(result_q.get(), timeout=5)
-                if isinstance(result, ClientDied):
-                    client_count -= 1
-                elif isinstance(result, AllClientsCompleted):
-                    got_complete = True
             try:
-                result = await asyncio.wait_for(result_q.get(), timeout=2)
-                if got_complete or not isinstance(result, AllClientsCompleted):
-                    assert False, "unexpected result after signalled that all client completed"
+                await asyncio.wait_for(result_q.get(), timeout=2)
+                assert False, "unexpected result after signalled that all client completed"
             except asyncio.TimeoutError:
                 pass
         finally:

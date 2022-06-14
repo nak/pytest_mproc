@@ -1,3 +1,4 @@
+import glob
 import json
 import logging
 import multiprocessing
@@ -89,30 +90,37 @@ async def test_execute_remote_multi(bundle):
 
 def test_remote_execution_cli(tmp_path):
     root = Path(__file__).parent.parent
-    project_config = ProjectConfig(src_paths=[Path("src"), Path("testsrc")],
-                                   test_files=[Path("test") / "*.py", Path("requirements.txt")],
+    project_config = ProjectConfig(
+                                   test_files=[Path("test") / "*.py", Path("requirements.txt"),
+                                               Path("src") / 'pytest_mproc' / '*.py',
+                                               Path("src") / 'pytest_mproc' / 'remote' / '*.py',
+                                               Path("testsrc/testcode/*.py"), Path("testsrc/testcode/**/*.py")],
                                    project_root=root,
                                    project_name="pytest_mproc_test"
                                    )
     project_config_path = tmp_path / "project.cfg"
-    for path in project_config.src_paths + [Path("test")]:
-        shutil.copytree(root / path, tmp_path / path.name)
+    print("\n")
+    for path in project_config.test_files:
+        files = glob.glob(str(root / path))
+        for f in files:
+            os.makedirs( tmp_path / Path(f).relative_to(root).parent, exist_ok=True)
+            print(f">>>>>> COPY {f} to {tmp_path / Path(f).relative_to(root)}")
+            shutil.copy(f, tmp_path / Path(f).relative_to(root))
     shutil.copy(root / "test" / "resources" / "requirements.txt", tmp_path / "requirements.txt")
     with open(project_config_path, 'w') as out:
-        converted = {'src_paths': [str(p) for p in project_config.src_paths],
-                     'test_files': [str(p) for p in project_config.test_files],
+        converted = {'test_files': [str(p) for p in project_config.test_files],
                      'project_name': project_config.project_name}
         out.write(json.dumps(converted))
         out.flush()
         # remote_host = 'fssh://pi@10.220.45.119:{find_free_port()}'
         remote_host = f'127.0.0.1:{find_free_port()}'
-        client_connect = remote_host.split(":")[0]
         pytest_mproc.Settings.set_ssh_credentials(username='pi')
         remote_server = f'delegated://pi@'
         client_connect = '10.220.45.110'
+        client_connect = 'localhost'
         # remote_server = remote_host
         args = [
-            'pytest', '-s', 'test/test_mproc_runs.py', '-k', 'alg2',
+            'pytest', '-s', 'test_mproc_runs.py', '-k', 'alg2',
             '--cores', '3',
             '--as-main', f"{remote_server}",
             '--project-structure', str(project_config_path),
@@ -124,10 +132,10 @@ def test_remote_execution_cli(tmp_path):
         ]
         sys.path.insert(0, str((Path(__file__).parent / "src").absolute()))
         env = os.environ.copy()
-        env['PYTHONPATH'] = "./src"
-        print(f">>>>>>>>  RUNNING {' '.join(args)}")
+        env['PYTHONPATH'] = f"{tmp_path}/src:{tmp_path}/test:{tmp_path}/testsrc"
+        print(f"\n\n>>>>>>>>  RUNNING {' '.join(args)}")
         completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=1200, env=env,
-                                   cwd=str(tmp_path))
+                                   cwd=str(tmp_path / 'test'))
         assert (tmp_path / "artifacts" / "artifacts-Worker-1.zip").exists()
         assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from " \
                                           f"{str(Path(__file__).parent.absolute())}"
@@ -137,7 +145,6 @@ def test_remote_execution_thread(tmp_path, chdir):
     chdir.chdir(Path(__file__).parent.parent)
     root = Path(__file__).parent.parent
     project_config = ProjectConfig(
-        src_paths=[Path("src"), Path("testsrc"), Path("resources") / "requirements.txt"],
         test_files=[Path("test/*.py")],
         project_root=root,
         project_name="pytest_mproc_test"

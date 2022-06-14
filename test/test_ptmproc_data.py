@@ -12,7 +12,6 @@ class TestProjectConfig:
 
     def test_from_file(self):
         project = ProjectConfig.from_file(self.ROOT / "project.cfg")
-        assert project.src_paths == [Path("./src1"), Path("src2")]
         assert project.test_files == [
             Path("project_tests/*.py"),
             Path("./requirements1.txt"),
@@ -26,7 +25,7 @@ class TestProjectConfig:
             ProjectConfig.from_file(self.ROOT / "project_invalid_json.cfg")
         assert "Invalid json" in str(e)
 
-    @pytest.mark.parametrize("key", ['src_paths', 'test_files'])
+    @pytest.mark.parametrize("key", ['test_files'])
     def test_from_file_no_such_dir_or_file(self, chdir, key):
         chdir.chdir(self.ROOT)
         with pytest.raises(Exception) as e:

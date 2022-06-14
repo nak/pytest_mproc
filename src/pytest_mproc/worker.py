@@ -25,6 +25,7 @@ from pytest_mproc.data import (
     TestStateEnum,
 )
 from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
+from pytest_mproc.user_output import always_print
 from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:

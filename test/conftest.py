@@ -10,9 +10,12 @@ if os.path.exists("../src/pytest_mproc"):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 import multiprocessing
 import pytest_mproc.plugin
-import pytest
-from pytest_mproc.plugin import TmpDirFactory
+from pytest_mproc.plugin import *
 
+
+def pytest_addoption(parser):
+    if 'pytest_mproc' not in [g.name for g in parser._groups]:
+        pytest_mproc.plugin.pytest_addoption(parser)
 
 _node_tmpdir = None
 

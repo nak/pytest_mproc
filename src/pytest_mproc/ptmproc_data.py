@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Optional, Dict, List, Iterable, Tuple, AsyncGenerator, Any
 from dataclasses import dataclass, field
 
-SRC_PATHS = 'src_paths'
 REQUIREMENTS_PATHS = 'requirements_paths'
 TEST_FILES = 'test_files'
 
@@ -21,7 +20,6 @@ class ProjectConfig:
     project_root: Path
     test_files: List[Path]
     artifcats_path: Optional[Path] = Path('./artifacts')
-    src_paths: List[Path] = field(default_factory=list)
     prepare_script: Optional[Path] = None
     finalize_script: Optional[Path] = None
 
@@ -52,17 +50,10 @@ class ProjectConfig:
                     raise pytest.UsageError(f"{TEST_FILES} in project config '{path}' is not a list of paths")
                 if any([type(f) != str for f in data[TEST_FILES]]):
                     raise pytest.UsageError(f"'test_path' must be a single string path in '{path}'")
-                if SRC_PATHS in data and not isinstance(data[SRC_PATHS], Iterable):
-                    raise pytest.UsageError(f"'{SRC_PATHS}' in project config '{path}' is not a list of string paths")
-                for p in data[SRC_PATHS]:
-                    if not (path.parent / p).exists():
-                        raise pytest.UsageError(f"source path '{p}' relative to project config "
-                                                f"{str(path)} is not a path")
                 return ProjectConfig(
                     project_name=data['project_name'],
                     project_root=path.parent,
                     test_files=[Path(p) for p in data[TEST_FILES]],
-                    src_paths=[Path(p) for p in data[SRC_PATHS]],
                     prepare_script=data.get('prepare_script'),
                     artifcats_path=data.get('artifacts_path', Path("./artifacts")),
                     finalize_script=data.get('finalize_script'),

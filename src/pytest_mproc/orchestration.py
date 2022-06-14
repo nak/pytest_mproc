@@ -51,8 +51,8 @@ class OrchestrationManagerBase(Global.Manager):
         self._mproc_pid: Optional[int] = None
         self._remote_pid: Optional[int] = None
         self._finalize_sem = multiprocessing.Semaphore(0)
-        self._test_q = JoinableQueue()
-        self._results_q =JoinableQueue()
+        self._test_q = JoinableQueue(50)
+        self._results_q =JoinableQueue(50)
         self._finalize_sem = Semaphore(0)
 
     @property
@@ -369,8 +369,10 @@ class OrchestrationManager:
         return self._mp_manager.join(timeout)
 
     def finalize(self):
-        with suppress(ConnectionResetError, EOFError, RemoteError):  # other side will exit its process causing an error
-            return self._mp_manager.finalize()
+        #with suppress(ConnectionResetError, EOFError, RemoteError):  # other side will exit its process causing an error
+        always_print(f">>>>>>>>>>>>>>>>>> RELEASING SEM")
+        sem = self._mp_manager.get_finalize_sem()
+        sem.release()
 
     def shutdown(self):
         return self._mp_manager.shutdown()

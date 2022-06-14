@@ -307,10 +307,11 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     config.ptmproc_runtime = PytestMprocRuntime(mproc_main=orchestrator, coordinator=None)
     if has_remotes:
         # this won't run until run loop when even loop is kicked off :-(
-        asyncio.create_task(orchestrator.start_remote(remote_workers_config=config.option.ptmproc_config.remote_hosts,
-                                                      deploy_timeout=config.option.ptmproc_config.connection_timeout))
+        config.remote_coro = orchestrator.start_remote(remote_workers_config=config.option.ptmproc_config.remote_hosts,
+                                                       deploy_timeout=config.option.ptmproc_config.connection_timeout)
 
     else:
+        config.remote_coro = None
         coordinator = orchestrator.start_local(num_processes=config.option.ptmproc_config.num_cores)
         config.ptmproc_runtime.coordinator = coordinator
     config.option.dist = "no"
@@ -411,6 +412,8 @@ def pytest_runtestloop(session):
         orchestrator = session.config.ptmproc_runtime.mproc_main
         try:
             async def loop():
+                if session.config.remote_coro:
+                    await session.config.remote_coro
                 async with orchestrator:
                     orchestrator.set_items(session.items)
                     await orchestrator.run_loop(session)

@@ -76,11 +76,10 @@ class Bundle:
         self._prepare_script = Path(prepare_script) if prepare_script else None
         self._finalize_script = Path(finalize_script) if finalize_script else None
         self._remote_executable = system_executable or Path(sys.executable).name
-        self._sources: List[Path] = []
-        self._site_pkgs = tempfile.TemporaryDirectory()
         self._resources: List[Tuple[Path, Path]] = []
         self._requirements_path = None
         self._test_files = []
+        self._site_pkgs = None
         self._relative_run_path = relative_run_dir or Path(".")
         for path in test_files:
             matched = glob(str(project_root / path))
@@ -113,11 +112,16 @@ class Bundle:
         return self._finalize_script
 
     def __enter__(self) -> "Bundle":
-        self._site_pkgs.__enter__()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self._site_pkgs.__exit__(exc_type, exc_val, exc_tb)
+        pass
+
+    async def cleanup(self):
+        if self._site_pkgs:
+            client, path = self._site_pkgs
+            ssh_client: SSHClient = client
+            await ssh_client.rmdir(path)
 
     @property
     def zip_path(self):
@@ -168,7 +172,6 @@ class Bundle:
                         finalize_script=project_config.finalize_script,
                         relative_run_dir=relative_run_dir,
                         system_executable=system_executable)
-        bundle._sources.extend(project_config.src_paths)
         os.write(sys.stderr.fileno(), f"\n\n>>> Building bundle...\n\n".encode('utf-8'))
         always_print(">>> Zipping contents for remote worker...")
         with zipfile.ZipFile(bundle.zip_path, mode='w') as zfile:
@@ -183,10 +186,6 @@ class Bundle:
                 out.write(bundle._machine)
                 out.flush()
                 zfile.write(out.name, "host_ptmproc_platform")
-            for source_path in bundle._sources:
-                for f in (project_config.project_root / source_path).glob("**/*"):
-                    if f.is_file() and '__pycache__' not in f.name:
-                        zfile.write(f, f"site-packages/{f.relative_to(project_config.project_root / source_path)}")
         return bundle
 
     async def setup_remote_venv(self, ssh_client: SSHClient, remote_venv: Path) -> Path:
@@ -278,8 +277,9 @@ class Bundle:
         root = Path(__file__).parent.parent.parent
         await ssh_client.mkdir(remote_root / 'site-packages' / 'pytest_mproc' / 'remote', exists_ok=True)
         await ssh_client.push(root / 'pytest_mproc' / '*.py', remote_root / 'site-packages' / 'pytest_mproc' / '.')
-        await ssh_client.push(root / 'pytest_mproc' / 'remote' / '*.py', remote_root / 'site-packages' / 'pytest_mproc'
-                              / 'remote' / '.')
+        await ssh_client.push(local_path=root / 'pytest_mproc' / 'remote' / '*.py',
+                              remote_path=remote_root / 'site-packages' / 'pytest_mproc' / 'remote' / '.')
+        self._site_pkgs = (ssh_client, remote_root / 'site-packages')
         python = str(remote_venv / 'bin' / 'python3')
         env = {'PYTHONPATH': str(remote_root / 'site-packages'),
                'AUTH_TOKEN_STDIN': '1'}
