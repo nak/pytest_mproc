@@ -46,7 +46,6 @@ def bundle(tmpdir_factory):
             root_dir=Path(str(tmpdir)),
             project_config=ProjectConfig(
                 project_root=Path(__file__).parent.parent,
-                src_paths=[Path("src"), Path("testsrc")],
                 test_files=[Path("test/*.py")],
                 project_name="pytest_mproc_test"
             ),
@@ -70,24 +69,6 @@ async def test_execute_bundle(bundle):
         assert False, f"Execution failed:\n{text}"
 
 
-@pytest.mark.asyncio
-async def test_execute_remote_multi(bundle):
-    hosts = [
-        RemoteHostConfig("localhost", {"cores": "1"}),
-        RemoteHostConfig("localhost"),
-        RemoteHostConfig("localhost", {"cores": "1"}),
-    ]
-    sys.argv.extend(['--cores', '2'])
-    sem = Semaphore(0)
-    environ = {'PTMPROC_NODE_MGR_PORT': str(find_free_port()), 'PTMPROC_GLOBAL_MGR_PORT': str(find_free_port())}
-    procs = await bundle.execute_remote_multi(hosts, sem, ".", "-k", "alg3", "--cores", "2",
-                                              deploy_timeout=100, timeout=200,
-                                              env=environ, auth_key=multiprocessing.current_process().authkey)
-    for host, proc in procs.items():
-        assert host == "localhost"
-        assert proc.returncode != 0  # alg3 delibrately coded to fail
-
-
 def test_remote_execution_cli(tmp_path):
     root = Path(__file__).parent.parent
     project_config = ProjectConfig(
@@ -104,7 +85,6 @@ def test_remote_execution_cli(tmp_path):
         files = glob.glob(str(root / path))
         for f in files:
             os.makedirs( tmp_path / Path(f).relative_to(root).parent, exist_ok=True)
-            print(f">>>>>> COPY {f} to {tmp_path / Path(f).relative_to(root)}")
             shutil.copy(f, tmp_path / Path(f).relative_to(root))
     shutil.copy(root / "test" / "resources" / "requirements.txt", tmp_path / "requirements.txt")
     with open(project_config_path, 'w') as out:
@@ -133,10 +113,9 @@ def test_remote_execution_cli(tmp_path):
         sys.path.insert(0, str((Path(__file__).parent / "src").absolute()))
         env = os.environ.copy()
         env['PYTHONPATH'] = f"{tmp_path}/src:{tmp_path}/test:{tmp_path}/testsrc"
-        print(f"\n\n>>>>>>>>  RUNNING {' '.join(args)}")
         completed = subprocess.run(args, stdout=sys.stdout, stderr=sys.stderr, timeout=1200, env=env,
                                    cwd=str(tmp_path / 'test'))
-        assert (tmp_path / "artifacts" / "artifacts-Worker-1.zip").exists()
+        assert (tmp_path / "test" / "artifacts" / "artifacts-Worker-1.zip").exists()
         assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from " \
                                           f"{str(Path(__file__).parent.absolute())}"
 

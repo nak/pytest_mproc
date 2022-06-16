@@ -3,6 +3,8 @@ from enum import Enum
 from typing import List, Union, Optional
 
 from pytest_mproc import DEFAULT_PRIORITY
+
+# noinspection PyBroadException
 try:
     from pytest import TestReport
 except Exception:
@@ -11,7 +13,7 @@ except Exception:
 
 class TestExecutionConstraint(Enum):
     __test__ = False  # tell pytest not to treat as test class
-    SINGLE_PROCESS ="SINGLE_PROCESS"
+    SINGLE_PROCESS = "SINGLE_PROCESS"
     SINGLE_NODE = "SINGLE_NODE"
 
 
@@ -66,6 +68,7 @@ class TestState:
     pid: int
     test_id: str
     test_batch: TestBatch
+
 
 @dataclass
 class ResultExit:

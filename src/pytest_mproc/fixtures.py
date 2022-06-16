@@ -4,6 +4,7 @@ import functools
 import logging
 import os
 import sys
+from contextlib import suppress
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
 from pytest_mproc.user_output import debug_print, always_print
@@ -34,13 +35,13 @@ class FixtureManager(BaseManager):
         super().__init__(address=addr, authkey=get_auth_key())
 
     # noinspection PyAttributeOutsideInit
-    def start(self):
+    def start(self, **kwargs):
         always_print(f"Starting {self.__class__.__qualname__} server {self.address}...")
         # server:
         self._fixtures: Dict[str, Any] = {}
         self.__class__.register("get_fixture", self._get_fixture)
         self.__class__.register("put_fixture", self._put_fixture)
-        super().start()
+        super().start(**kwargs)
         always_print(f"Started {self.__class__.__qualname__} server.")
 
     def connect(self):
@@ -106,13 +107,17 @@ class Global:
         def __init__(self, host: str, port: int):
             super().__init__((host, port))
 
+        @property
+        def uri(self):
+            return f"{self.address[0]}:{self.address[1]}"
+
         @staticmethod
         def key() -> str:
             return hashlib.sha256(get_auth_key()).hexdigest()
 
         @classmethod
         def singleton(cls, address: Optional[Tuple[str, int]] = None, as_client: bool = False) -> "Global.Manager":
-            if cls.key() in cls._singleton and cls._singleton[cls.key()].address[0] is not None:
+            if cls.key() in cls._singleton:
                 return cls._singleton[cls.key()]
             elif address is None:
                 raise SystemError("Attempt to get Global manager before start or connect")
@@ -121,28 +126,23 @@ class Global:
                 host = host.split('@', maxsplit=1)[-1]
                 assert host is not None and port is not None, \
                     "Internal error: host and port not provided for global manager"
-                try:
-                    singleton = cls(host=host, port=port)
-                    singleton.connect()
-                    singleton._is_serving = False
-                except Exception as e:
-                    raise
+                singleton = cls(host=host, port=port)
+                singleton.connect()
+                singleton._is_serving = False
             else:
                 host, port = address
                 host = host.split('@', maxsplit=1)[-1]
                 singleton = cls(host=host, port=port)
-                try:
-                    singleton.start()
-                    singleton._is_serving = True
-                except:
-                    raise
+                singleton.start()
+                singleton._is_serving = True
             cls._singleton[cls.key()] = singleton
             return cls._singleton[cls.key()]
 
         @classmethod
         def stop(cls) -> None:
-            if cls.key() in cls._singleton[cls.key()]:
-                cls._singleton[cls.key()].shutdown()
+            if cls.key() in cls._singleton:
+                with suppress(Exception):  # shutdown only available if server and not client
+                    cls._singleton[cls.key()].shutdown()
                 del cls._singleton[cls.key()]
 
     def __init__(self, config):
@@ -169,6 +169,7 @@ def global_fixture(**kwargs):
             # we distinguish sessions via the auth token
             # noinspection PyUnresolvedReferences
             key = f"{get_auth_key_hex()} {func.__name__}"
+            # noinspection PyUnresolvedReferences
             value = value or global_mgr.get_fixture(key).value()
             if type(value) == FixtureManager.NoneValue:
                 v = func(*args, **kwargs)

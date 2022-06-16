@@ -1,7 +1,6 @@
 """
 This package contains code to coordinate execution from a main thread to worker threads (processes)
 """
-import asyncio
 import os
 import subprocess
 import sys
@@ -11,6 +10,7 @@ from contextlib import suppress
 from multiprocessing.managers import SyncManager
 from subprocess import TimeoutExpired
 from typing import Optional, List
+
 from pytest_mproc.utils import BasicReporter
 from pytest_mproc.worker import WorkerSession
 
@@ -21,7 +21,7 @@ class Coordinator:
     Coordinators are scoped to a node and only handle a collection of workers on that node
     """
 
-    _singleton : Optional["Coordinator"] = None
+    _singleton: Optional["Coordinator"] = None
 
     def __init__(self):
         """
@@ -35,7 +35,7 @@ class Coordinator:
     @classmethod
     def singleton(cls):
         if cls._singleton is None:
-           cls._singleton = Coordinator()
+            cls._singleton = Coordinator()
         return cls._singleton
 
     def start_workers(self, uri: str, num_processes: int) -> None:
@@ -48,7 +48,6 @@ class Coordinator:
         executable = os.environ.get('PTMPROC_EXECUTABLE', sys.executable)
         for index in range(num_processes):
             proc = WorkerSession.start(uri, executable)
-            self._worker_procs.append(proc)
             self._worker_procs.append(proc)
         time.sleep(1)
         for index, proc in enumerate(self._worker_procs):

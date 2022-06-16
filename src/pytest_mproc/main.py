@@ -1,7 +1,6 @@
 import asyncio
 import multiprocessing
 import os
-from multiprocessing.managers import RemoteError
 
 import pytest
 import resource
@@ -17,7 +16,7 @@ from multiprocessing import Semaphore
 from pathlib import Path
 from queue import Empty
 from threading import RLock
-from typing import List, Optional, Union, Dict, AsyncIterator, Iterable
+from typing import List, Optional, Union, Dict, AsyncIterator, Iterable, AsyncGenerator, Tuple
 
 from _pytest.reports import TestReport
 
@@ -39,6 +38,7 @@ from pytest_mproc.data import (
     TestStateEnum, AllClientsCompleted,
 )
 from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
+from pytest_mproc.fixtures import Global
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteHostConfig
 from pytest_mproc.remote.bundle import Bundle
@@ -50,6 +50,7 @@ __all__ = ["Orchestrator", "RemoteSession"]
 lock = RLock()
 WorkerSpec = Union[List[RemoteHostConfig], AsyncIterator[RemoteHostConfig]]
 POLLING_INTERVAL_HOST_VALIDATION = 1
+
 
 # noinspection PyBroadException
 def _localhost():
@@ -107,7 +108,7 @@ class RemoteSession:
             timeout: Optional[float] = None,
             deploy_timeout: Optional[float] = None,
             env: Dict[str, str] = None,
-    ) -> None:
+    ) -> AsyncGenerator[Tuple[int, int], Tuple[int, int]]:
         port_q = asyncio.Queue(1)
         delegation_q = asyncio.Queue(1)
         with tempfile.TemporaryDirectory() as tmp_root,\
@@ -128,40 +129,39 @@ class RemoteSession:
                         env=env
                     )
                 )
-                if self._delegation_port is not None:
+                if self._delegation_port in (None, -1):
                     self._delegation_port = await asyncio.wait_for(port_q.get(), timeout=deploy_timeout)
+                    global_mgr_port = await asyncio.wait_for(port_q.get(), timeout=deploy_timeout)
                     delegation_host = await asyncio.wait_for(delegation_q.get(), timeout=deploy_timeout)
-                    yield self._delegation_port
+                    yield self._delegation_port, global_mgr_port
                 else:
                     delegation_host = None
-                    yield -1
+                    yield -1, -1
                 if delegation_host:
                     tries = 30
+                    polling_interval = 1  # second
                     while tries:
+                        # noinspection PyBroadException
                         try:
                             mgr = OrchestrationManager.create(uri=f"{delegation_host}:{self._delegation_port}",
                                                               as_client=True)
-                            result_q = mgr.get_results_queue()
+                            results_q = mgr.get_results_queue()
                             break
                         except Exception:
                             tries -= 1
                             always_print(f"Connecting.. tries left: {tries}")
                             if tries <= 0:
                                 raise
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(polling_interval)
                 else:
-                    result_q = self._mp_mgr.get_results_queue()
+                    results_q = self._mp_mgr.get_results_queue()
                 self._validate_task = asyncio.create_task(
-                    self.validate_clients(result_q=result_q, remote_host_procs=self._procs)
+                    self.validate_clients(results_q=results_q, remote_host_procs=self._procs)
                 )
                 self._procs, delegation_proc = await self._session_task
                 self._procs = {}
                 await asyncio.wait_for(self._validate_task, timeout=5)
                 self._validate_task.cancel()
-                with suppress(FileNotFoundError, ConnectionError):
-                    # normally, result_q is closed, unless there is an exception that prevents any tests from
-                    # running straight off
-                    await result_q.join()
             except Exception as e:
                 with suppress(Exception):
                     self._validate_task.cancel()
@@ -169,22 +169,23 @@ class RemoteSession:
                 print(traceback.format_exc())
                 msg = f"!!! Exception in creating or executing bundle {e}:\n\n"
                 with suppress(Exception):
-                    await asyncio.wait_for(result_q.put(FatalError(msg)), timeout=timeout)
+                    await asyncio.wait_for(results_q.put(FatalError(msg)), timeout=timeout)
                 raise
             finally:
                 await bundle.cleanup()
-                await asyncio.wait_for(result_q.put(AllClientsCompleted()), timeout=timeout)
+                with suppress(Exception):
+                    await asyncio.wait_for(results_q.put(AllClientsCompleted()), timeout=timeout)
                 if self._validate_task:
                     self._validate_task.cancel()
 
     @staticmethod
-    async def validate_clients(result_q: AsyncMPQueue,
+    async def validate_clients(results_q: AsyncMPQueue,
                                remote_host_procs: Dict[str, asyncio.subprocess.Process]) -> None:
         """
         Continually ping workers to ensure they are alive, and drop worker if not, rescheduling any pending tests to
         that worker
 
-        :param result_q: Used to signal a client died
+        :param results_q: Used to signal a client died
         :param remote_host_procs: mapping of hosts to processes running remote shells to that host
         """
         while remote_host_procs:
@@ -211,7 +212,7 @@ class RemoteSession:
                             proc.kill()
                     # this will attempt to reschedule test
                     result = ClientDied(proc.pid, host, True)
-                    await result_q.put(result)
+                    await results_q.put(result)
                     with lock, suppress(Exception):
                         del remote_host_procs[host]
                 else:
@@ -259,19 +260,24 @@ class Orchestrator:
         self._pending: Dict[str, TestState] = {}
         self._exit_results: List[ResultExit] = []
         self._count = 0
-
         self._session_start_time = time.time()
-
         # definitions and  managers responsible for flow of tests and results:
         project_name = project_config.project_name if project_config else None
         self._mp_manager = OrchestrationManager.create(uri, project_name=project_name, as_client=False)
         self._finish_sem = Semaphore(0)
         if uri.startswith("delegated://"):
             self._test_q = None
-            self._result_q = None
+            self._results_q = None
         else:
             self._test_q = self._mp_manager.get_test_queue()
             self._results_q = self._mp_manager.get_results_queue()
+            if not uri.startswith('ssh://'):
+                host_and_port = uri.split('://', maxsplit=1)[-1].split('@', maxsplit=1)[-1]
+                host, orch_port = host_and_port.split(':')
+                port = find_free_port()
+                while port == orch_port:
+                    port = find_free_port()
+                Global.Manager.singleton((host, port), as_client=False)
         # for information output:
         self._reporter = BasicReporter()
         self._rusage = None
@@ -362,8 +368,9 @@ class Orchestrator:
                 deploy_timeout=deploy_timeout,
                 hosts_q=self._hosts_q,
                 env=env
-            ) as delegate_port:
+            ) as (delegate_port, global_mgr_port):
                 await port_q.put(delegate_port)
+                await port_q.put(global_mgr_port)
         self._workers_task = asyncio.create_task(start())
         self._populate_worker_queue_task = asyncio.create_task(asyncio.wait_for(
             self.populate_worker_queue(self._hosts_q,
@@ -384,6 +391,7 @@ class Orchestrator:
         """
         delegated_host = await asyncio.wait_for(delegate_q.get(), timeout=deploy_timeout)
         port = await asyncio.wait_for(port_q.get(), timeout=deploy_timeout)
+        global_mgr_port = await asyncio.wait_for(port_q.get(), timeout=deploy_timeout)
         polling_interval = 1  # seconds
         tries = 30
         self._mp_manager = OrchestrationManager.create(
@@ -404,10 +412,11 @@ class Orchestrator:
                     raise SystemError(f"Failed to start delegate manager on {delegated_host}"
                                       f":{self._mp_manager.port}")
                 time.sleep(polling_interval)
+        Global.Manager.singleton(address=(delegated_host, global_mgr_port), as_client=True)
         self._server_uri = f"{delegated_host}:{port}"
         self._uri = f"{self._username}@{delegated_host}:{port}" if self._username is not None else self._uri
         self._test_q = self._mp_manager.get_test_queue()
-        self._result_q = self._mp_manager.get_results_queue()
+        self._results_q = self._mp_manager.get_results_queue()
 
     @property
     def host(self):
@@ -421,12 +430,12 @@ class Orchestrator:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._mp_manager.finalize()
         with suppress(asyncio.TimeoutError):
             if self._workers_task:
                 await asyncio.wait_for(self._workers_task, timeout=5)
         with suppress(Exception):
             self._workers_task.cancel()
-        self._mp_manager.finalize()
         if self._populate_worker_queue_task:
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._populate_worker_queue_task, 3)
@@ -527,10 +536,9 @@ class Orchestrator:
         try:
             test_count = 0
             error_count = 0
-            result_batch: Union[List[ResultType], None] = await self._result_q.get()
+            result_batch: Union[List[ResultType], None] = await self._results_q.get()
             while result_batch is not None:
                 if isinstance(result_batch, AllClientsCompleted):
-                    self._result_q.close()
                     break
                 elif isinstance(result_batch, ClientDied):
                     key = f"{result_batch.host}-{result_batch.pid}"
@@ -548,7 +556,7 @@ class Orchestrator:
                                              " due to client fault; cannot reschedule a partially completed test batch")
                                 index = test_state.test_batch.test_ids.index(test_id)
                                 for tid in test_state.test_batch.test_ids[index:]:
-                                    await self._result_q.put([ResultTestStatus(
+                                    await self._results_q.put([ResultTestStatus(
                                         TestReport(nodeid=tid,
                                                    location=("<<unknown>>", None, "<<unknown>>"),
                                                    keywords={},
@@ -572,7 +580,7 @@ class Orchestrator:
                             raise ClientDied(-1, "distributed-hosts", True)
                         result_batch = None
                     else:
-                        result_batch = await self._result_q.get()
+                        result_batch = await self._results_q.get()
                     continue
                 elif isinstance(result_batch, Exception):
                     while True:
@@ -584,19 +592,19 @@ class Orchestrator:
                     raise result_batch
                 elif isinstance(result_batch, ResultExit):
                     self._exit_results.append(result_batch)
-                    result_batch = await self._result_q.get()
+                    result_batch = await self._results_q.get()
                     continue
                 for result in result_batch:
-                    test_count += 1
                     if isinstance(result, ResultException):
                         raise Exception("Internal ERROR") from result
                     else:
+                        test_count += 1
                         self._process_worker_message(hook,  result)
-                result_batch = await self._result_q.get()
+                result_batch = await self._results_q.get()
         finally:
-            self._result_q.close()
+            self._results_q.close()
 
-    async def populate_test_queue(self, tests: List[TestBatch], uri: str):
+    async def populate_test_queue(self, tests: List[TestBatch]):
         count = 0
 
         for test_batch in tests:
@@ -609,15 +617,8 @@ class Orchestrator:
                     await self._test_q.join()
                 except EOFError:
                     os.write(sys.stderr.fileno(), b"\n>>> at least one worker disconnected or died unexpectedly\n")
-        client = OrchestrationManager.create(uri, as_client=True)
-        # noinspection PyUnresolvedReferences
-        worker_count = client.count()
-        for index in range(worker_count):
-            await self._test_q.put(None)
-        if worker_count > 0:
-            await self._test_q.join()
+        self._mp_manager.signal_all_tests_sent()
 
-    # noinspection PyProtectedMember
     def set_items(self, tests):
         """
         :param tests: the items containing the pytest hooks to the tests to be run
@@ -653,8 +654,7 @@ class Orchestrator:
         start_rusage = resource.getrusage(resource.RUSAGE_SELF)
         start_time = time.time()
         populate_tests_task = asyncio.create_task(
-            self.populate_test_queue(tests=self._tests,
-                                     uri=self._server_uri)
+            self.populate_test_queue(tests=self._tests)
         )
         try:
             # only master will read results and post reports through pytest

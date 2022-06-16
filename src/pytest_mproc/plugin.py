@@ -11,10 +11,9 @@ from pytest_mproc import worker, user_output, Constants
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.orchestration import OrchestrationManager
-from pytest_mproc.user_output import debug_print, always_print
+from pytest_mproc.user_output import always_print
 
 import getpass
-import inspect
 import shutil
 import tempfile
 from contextlib import contextmanager, suppress
@@ -190,6 +189,9 @@ def pytest_addoption(parser):
     )
 
 
+cmdline_main_called = False
+
+
 def pytest_cmdline_main(config):
     """
     Called before "true" main routine.  This is to set up config values well ahead of time
@@ -197,6 +199,10 @@ def pytest_cmdline_main(config):
 
     Mostly taken from other implementations (such as xdist)
     """
+    global cmdline_main_called
+    if cmdline_main_called:
+        return
+    cmdline_main_called = True
     mproc_max_connections = getattr(config.option, "mproc_max_simultaneous_connections", 24)
     mproc_connection_timeout = getattr(config.option, "mproc_connection_timeout", None)
     mproc_disabled = getattr(config.option, "mproc_disabled")
@@ -212,9 +218,16 @@ def pytest_cmdline_main(config):
         config.option.worker = None
         if config.option.mproc_remote_clients and not config.option.mproc_server_uri:
             config.option.mproc_server_uri = "delegated://"
+    if not config.option.mproc_remote_clients and not config.option.mproc_server_uri:
+        # pure local so start Global Manager
+        from pytest_mproc.fixtures import Global
+        port = find_free_port()
+        Global.Manager.singleton(('localhost', port), as_client=False)
+        os.environ['PTMPROC_GM_URI'] = f"localhost:{port}"
+        port = find_free_port()
+        config.option.mproc_server_uri = f"localhost:{port}"
     if not hasattr(config, "ptmproc_runtime"):
         config.ptmproc_runtime = None
-
     config.option.ptmproc_config = PytestMprocConfig()
     if mproc_connection_timeout:
         config.option.ptmproc_config.connection_timeout = mproc_connection_timeout
@@ -234,7 +247,7 @@ def pytest_cmdline_main(config):
             raise pytest.UsageError(
                 "Refusing to execute on distributed system without also specifying the number of cores to use")
         reporter.write(
-            ">>>>> no number of cores provided or running in environment unsupportive of parallelized testing, "
+            ">>> no number of cores provided or running in environment unsupportive of parallelized testing, "
             "not running multiprocessing <<<<<\n", yellow=True)
         return
     if getattr(config.option, "mproc_client_connect", None):
@@ -254,8 +267,9 @@ def mproc_pytest_cmdline_coordinator(config):
     if config.option.ptmproc_config.num_cores < 1:
         raise pytest.UsageError("Number of cores must be 1 or more when running as client")
     if config.option.ptmproc_config.client_connect and not config.option.worker:
+        assert 'PTMPROC_WORKER' not in os.environ
         uri = config.option.ptmproc_config.client_connect
-        debug_print(f"Running coordinator connecting to {uri}")
+        always_print(f"Running coordinator connecting to {uri} [{os.getpid()}]")
         config.option.ptmproc_config.server_uri = uri
         if not config.option.collectonly:
             coordinator = Coordinator()
@@ -272,9 +286,9 @@ def mproc_pytest_cmdline_coordinator(config):
 
 def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     assert "--as-worker" not in sys.argv
-    has_remotes = hasattr(config.option, 'mproc_server_uri') and config.option.mproc_server_uri is not None
-    config.option.ptmproc_config.server_uri = getattr(config.option, 'mproc_server_uri') or \
-                                              f'127.0.0.1:{find_free_port()}'
+    has_remotes = "--remote-worker" in sys.argv
+    config.option.ptmproc_config.server_uri = \
+        getattr(config.option, 'mproc_server_uri') or f'127.0.0.1:{find_free_port()}'
     local_proj_file = Path("./ptmproc_project.cfg")
     project_config = getattr(config.option, "project_structure_path", None) or \
         (local_proj_file if local_proj_file.exists() else None)
@@ -301,6 +315,7 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
             else default_proj_config
     else:
         project_config = None
+
     orchestrator = Orchestrator(
         project_config=ProjectConfig.from_file(Path(project_config)) if project_config else None,
         uri=config.option.ptmproc_config.server_uri)
@@ -376,7 +391,6 @@ def pytest_runtestloop(session):
     if not session.config.option.worker \
             and session.config.ptmproc_runtime \
             and session.config.ptmproc_runtime.coordinator:
-        coordinator = session.config.ptmproc_runtime.coordinator
         for item in session.items:
             if session.shouldfail:
                 break
@@ -421,8 +435,8 @@ def pytest_runtestloop(session):
         except Exception as e:
             reporter.write(format_exc() + "\n", red=True)
             reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
-            return False
-    if session.config.option.worker:
+            raise SystemError() from e
+    elif session.config.option.worker:
         session.config.option.worker.test_loop(session)
     elif session.config.ptmproc_runtime.coordinator:
         session.config.ptmproc_runtime.coordinator.shutdown()
@@ -502,8 +516,6 @@ def pytest_sessionfinish(session):
     verbose = session.config.option.verbose
     with suppress(Exception):
         fixtures.Node.Manager.shutdown()
-    with suppress(Exception):
-        fixtures.Global.Manager.stop()
     if session.config.option.worker:
         session.config.option.verbose = -2
     if session.config.ptmproc_runtime and not session.config.ptmproc_runtime.mproc_main:
@@ -514,12 +526,13 @@ def pytest_sessionfinish(session):
             session.config.ptmproc_runtime.coordinator.kill()
     if not session.config.option.worker and session.config.ptmproc_runtime\
             and session.config.ptmproc_runtime.mproc_main is not None:
-        global skipped_count
         orchestrator = session.config.ptmproc_runtime.mproc_main
         orchestrator.output_summary()
         orchestrator.shutdown()
     yield
     session.config.option.verbose = verbose
+    with suppress(Exception):
+        fixtures.Global.Manager.stop()
 
 
 def raise_usage_error(session, msg: str):
@@ -536,8 +549,8 @@ class TmpDirFactory:
 
     """
     tmpdir is not process/thread safe when used in a multiprocessing environment.  Failures on setup can
-    occur (even if infrequently) under certain rae conditoins.  This provides a safe mechanism for
-    creating temporary directories utilizng s a global-scope fixture
+    occur (even if infrequently) under certain rae conditions.  This provides a safe mechanism for
+    creating temporary directories utilizing s a global-scope fixture
     """
 
     def __init__(self):

@@ -22,7 +22,7 @@ from typing import (
 )
 
 from pytest_mproc import user_output, get_auth_key, Settings, Constants
-from pytest_mproc.fixtures import Node
+from pytest_mproc.fixtures import Node, Global
 from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure, remote_root_context
 from pytest_mproc.user_output import debug_print, always_print
@@ -121,7 +121,8 @@ class Bundle:
         if self._site_pkgs:
             client, path = self._site_pkgs
             ssh_client: SSHClient = client
-            await ssh_client.rmdir(path)
+            with suppress(Exception):
+                await ssh_client.rmdir(path)
 
     @property
     def zip_path(self):
@@ -174,18 +175,18 @@ class Bundle:
                         system_executable=system_executable)
         os.write(sys.stderr.fileno(), f"\n\n>>> Building bundle...\n\n".encode('utf-8'))
         always_print(">>> Zipping contents for remote worker...")
-        with zipfile.ZipFile(bundle.zip_path, mode='w') as zfile:
+        with zipfile.ZipFile(bundle.zip_path, mode='w') as zip_file:
             for path in bundle._test_files:
-                zfile.write(project_config.project_root / path, f"run{os.sep}{str(path)}")
+                zip_file.write(project_config.project_root / path, f"run{os.sep}{str(path)}")
             if bundle.prepare_script:
-                zfile.write(project_config.project_root / bundle.prepare_script, 'prepare')
+                zip_file.write(project_config.project_root / bundle.prepare_script, 'prepare')
             if bundle.finalize_script:
-                zfile.write(project_config.project_root / bundle.finalize_script, 'finalize')
+                zip_file.write(project_config.project_root / bundle.finalize_script, 'finalize')
             with tempfile.NamedTemporaryFile(mode='a+') as out:
                 out.write(bundle._system)
                 out.write(bundle._machine)
                 out.flush()
-                zfile.write(out.name, "host_ptmproc_platform")
+                zip_file.write(out.name, "host_ptmproc_platform")
         return bundle
 
     async def setup_remote_venv(self, ssh_client: SSHClient, remote_venv: Path) -> Path:
@@ -200,15 +201,16 @@ class Bundle:
 
         if proc.returncode != 0:
             always_print(f"Installing python virtual environment to {remote_venv}")
-            proc =await ssh_client.execute_remote_cmd(
+            proc = await ssh_client.execute_remote_cmd(
                 self._remote_executable, '-m', 'venv', str(remote_venv),
                 stdout=stdout,
                 stderr=asyncio.subprocess.PIPE
             )
             if proc.returncode != 0:
                 data = await proc.stderr.read()
-                raise CommandExecutionFailure(f"{self._remote_executable} -m venv {str(remote_venv)} failed:\n\n  {data}",
-                                              proc.returncode)
+                raise CommandExecutionFailure(
+                    f"{self._remote_executable} -m venv {str(remote_venv)} failed:\n\n  {data}",
+                    proc.returncode)
             await ssh_client.install_packages(
                 'pytest', 'pytest_mproc',
                 venv=remote_venv,
@@ -267,10 +269,10 @@ class Bundle:
     async def delegate(self, ssh_client: SSHClient,
                        delegation_port: int,
                        remote_root: Path, remote_venv: Path)\
-            -> Tuple[asyncio.subprocess.Process, int]:
+            -> Tuple[asyncio.subprocess.Process, int, int]:
         """
         Launch a process to delegate main manager to a worker node
-        This is done when the main node is blcoekd (by firewall) from receiving incoming data on a port
+        This is done when the main node is blocked (by firewall) from receiving incoming data on a port
 
         :return: created process
         """
@@ -281,29 +283,38 @@ class Bundle:
                               remote_path=remote_root / 'site-packages' / 'pytest_mproc' / 'remote' / '.')
         self._site_pkgs = (ssh_client, remote_root / 'site-packages')
         python = str(remote_venv / 'bin' / 'python3')
-        env = {'PYTHONPATH': str(remote_root / 'site-packages'),
+        python_path = os.environ.get('PYTHONPATH') or ''
+        python_path = f"{str(remote_root / 'site-packages')}:{python_path}" if python_path \
+            else f"{str(remote_root / 'site-packages')}"
+        env = {'PYTHONPATH': python_path,
                'AUTH_TOKEN_STDIN': '1'}
         delegation_proc = await ssh_client.launch_remote_command(
             python, '-m', 'pytest_mproc.orchestration', ssh_client.host,
             str(delegation_port), self._project_name,
             env=env,
-            stderr=sys.stderr,
+            stdout=sys.stdout,
             stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         delegation_proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         delegation_proc.stdin.close()
-        port_text = (await delegation_proc.stdout.readline()).decode('utf-8')
+        line = (await delegation_proc.stderr.readline()).decode('utf-8').strip()
+        while not line.startswith("PORT:"):
+            line = (await delegation_proc.stderr.readline()).decode('utf-8').strip()
+        port_text = line.split(':', maxsplit=1)[-1]
+        while not line.startswith("GLOBAL_PORT:"):
+            line = (await delegation_proc.stderr.readline()).decode('utf-8').strip()
+        global_port_text = line.split(':', maxsplit=1)[-1]
 
         async def read():
-            line = (await delegation_proc.stdout.readline()).decode('utf-8')
+            line = (await delegation_proc.stderr.readline()).decode('utf-8')
             while line:
                 debug_print(line.strip())
                 line = (await delegation_proc.stdout.readline()).decode('utf-8')
 
         if user_output.verbose:
             self._output_task = asyncio.create_task(read())
-        return delegation_proc, int(port_text)
+        return delegation_proc, int(port_text), int(global_port_text)
 
     async def execute_remote_multi(
             self,
@@ -320,6 +331,7 @@ class Bundle:
         """
         deploy and execute to/on multiple host targets concurrently (async)
 
+        :param delegation_q: if needed, queue to post delegated host
         :param delegation_port:
         :param port_q:
         :param hosts_q:
@@ -335,7 +347,6 @@ class Bundle:
         contexts = {}
         deployment_tasks: Dict[str, Union[bool, asyncio.Task]] = {}
         delegation_proc: Optional[asyncio.subprocess.Process] = None
-        delegation_host: Optional[str] = None
         try:
             env = env.copy() if env else {}
             index = 0
@@ -357,11 +368,12 @@ class Bundle:
                     await self.setup_remote_venv(ssh_client=ssh_client, remote_venv=remote_venv)
                 if index == 0 and delegation_port is not None:
                     delegation_host = worker_config.remote_host
-                    delegation_proc, server_port = await self.delegate(
+                    delegation_proc, server_port, global_server_port = await self.delegate(
                         ssh_client=ssh_client,
                         delegation_port=delegation_port, remote_venv=remote_venv,
                         remote_root=remote_root)
                     await port_q.put(server_port)
+                    await port_q.put(global_server_port)
                     await delegation_q.put(delegation_host)
                     server_host = worker_config.remote_host
                 index += 1
@@ -377,7 +389,7 @@ class Bundle:
                         -> Tuple[str, asyncio.subprocess.Process]:
                     host = worker_config.remote_host
                     # we must wait if deployment is not finished
-                    # this setup parallelizes multiple host efficiently
+                    # this setup parallel-izes multiple host efficiently
                     if deployment_tasks[host]:
                         await deployment_tasks[host]
                         deployment_tasks[host] = False
@@ -516,6 +528,7 @@ class Bundle:
             await ssh_client.mkdir(remote_artifacts_dir, exists_ok=True)
             env["PTMPROC_WORKER_ARTIFACTS_DIR"] = str(remote_artifacts_dir)
             env["PTMPROC_VERBOSE"] = '1'
+            env["PTMPROC_GM_URI"] = Global.Manager.singleton().uri
             proc = await ssh_client.execute_remote_cmd(
                 cmd,
                 timeout=timeout,
@@ -556,8 +569,8 @@ class Bundle:
                     await ssh_client.pull(remote_artifacts_dir / "artifacts.zip",
                                           destination_dir / f"artifacts-{worker_id}.zip",
                                           recursive=False)
-                    with zipfile.ZipFile(destination_dir / f"artifacts-{worker_id}.zip") as zfile:
-                        zfile.extractall(destination_dir)
+                    with zipfile.ZipFile(destination_dir / f"artifacts-{worker_id}.zip") as zip_file:
+                        zip_file.extractall(destination_dir)
             except CommandExecutionFailure as e:
                 always_print(f"Failed to pull artifacts from worker: {e}")
         return ssh_client.host, proc
@@ -606,7 +619,7 @@ def _determine_cli_args(worker_config: RemoteHostConfig, ptmproc_args: Dict[str,
                 raise ValueError("No argument supplied for --cores option")
         elif typ in (bool,) and arg in args:
             args.remove(arg)
-        elif arg in args:
+        elif arg in args and arg != '--cores':
             index = args.index(arg)
             if index + 1 < len(args):
                 args.remove(args[index + 1])

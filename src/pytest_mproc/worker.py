@@ -25,7 +25,7 @@ from pytest_mproc.data import (
     TestStateEnum,
 )
 from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
-from pytest_mproc.user_output import always_print
+from pytest_mproc.fixtures import Global
 from pytest_mproc.utils import BasicReporter
 
 if sys.version_info[0] < 3:
@@ -48,11 +48,11 @@ class WorkerSession:
         self._is_remote = is_remote
         self._this_host = get_ip_addr()
         self._index = index
-        self._name = "worker-%d" % (index + 1)
+        self._name = "worker-%d" % index
         self._count = 0
         self._session_start_time = time.time()
         self._buffered_results = []
-        self._buffer_size = 20
+        self._buffer_size = 5
         self._timestamp = time.time()
         self._last_execution_time = time.time()
         self._resource_utilization = ResourceUtilization(-1.0, -1.0, -1.0, -1)
@@ -70,8 +70,6 @@ class WorkerSession:
         :param timeout: timeout after this many seconds, if specified
         :raises: TimeoutError is not executed in time
         """
-        if self._is_remote and isinstance(result, ResultTestStatus):
-            os.write(sys.stderr.fileno(), b'.')
         if isinstance(result, ResultExit):
             self._result_q.put(result)
         else:
@@ -83,7 +81,7 @@ class WorkerSession:
 
     def _flush(self, timeout=None):
         """
-        fluh buffered results out to the queue.
+        flush buffered results out to the queue.
         """
         if self._buffered_results:
             if timeout is not None:
@@ -247,7 +245,6 @@ class WorkerSession:
 
 
 def pytest_cmdline_main(config):
-    assert WorkerSession.singleton() is not None
     config.option.worker = WorkerSession.singleton()
 
 
@@ -260,16 +257,21 @@ def main():
     # from pytest_mproc.worker import WorkerSession
     from pytest_mproc.orchestration import OrchestrationManager
     uri = sys.argv[1]
+    global_mgr_uri = os.environ.get('PTMPROC_GM_URI')
+    if global_mgr_uri:
+        host, port_text = global_mgr_uri.split(':', maxsplit=1)
+        # set host, port for later usage (in global fixtures, etc)
+        Global.Manager.singleton(address=(host, int(port_text)), as_client=True)
     mgr = OrchestrationManager.create(uri=uri, as_client=True)
     # noinspection PyUnresolvedReferences
-    mgr.register_worker((get_ip_addr(), os.getpid()))
+    worker_index = mgr.register_worker((get_ip_addr(), os.getpid()))
     # noinspection PyUnresolvedReferences
     test_q = mgr.get_test_queue().raw()
     # noinspection PyUnresolvedReferences
     result_q = mgr.get_results_queue().raw()
     assert test_q is not None
     assert result_q is not None
-    worker = WorkerSession(index=os.getpid(),
+    worker = WorkerSession(index=worker_index,
                            is_remote='--as-worker' in sys.argv,
                            test_q=test_q,
                            result_q=result_q,

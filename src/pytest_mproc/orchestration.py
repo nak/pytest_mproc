@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import multiprocessing
 import os
 import signal
@@ -10,16 +9,15 @@ from enum import Enum
 from glob import glob
 from multiprocessing import Semaphore
 from multiprocessing import JoinableQueue
-from multiprocessing.managers import SyncManager, RemoteError
+from multiprocessing.managers import SyncManager, RemoteError, BaseManager
 from pathlib import Path
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Tuple
 
-from pytest_mproc import get_auth_key, find_free_port, get_ip_addr, Settings, AsyncMPQueue
+from pytest_mproc import get_auth_key, find_free_port, Settings, AsyncMPQueue
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.fixtures import Global
 from pytest_mproc.remote.ssh import SSHClient, remote_root_context
 from pytest_mproc.user_output import always_print, debug_print
-from pytest_mproc.worker import WorkerSession
 
 
 class Protocol(Enum):
@@ -29,7 +27,7 @@ class Protocol(Enum):
     DELEGATED = 'delegated'
 
 
-class OrchestrationManagerBase(Global.Manager):
+class OrchestrationManagerBase(BaseManager):
 
     class Value:
         def __init__(self, val):
@@ -39,21 +37,22 @@ class OrchestrationManagerBase(Global.Manager):
             return self._val
 
     def __init__(self, host: str, port: int, uri: str):
-        super().__init__(host, port)
+        super().__init__((host, port), authkey=get_auth_key())
         OrchestrationManagerBase.register("Queue", multiprocessing.Queue, exposed=["get", "put"])
         self._uri = uri
         self._port = port
         self._host = host
         # only for SSH protocol:
         self._coordinators: List[Coordinator] = []
-        self._workers: Dict[str, WorkerSession] = {}
+        self._workers: Dict[str, Tuple[str, int]] = {}
         self._is_server = False
         self._mproc_pid: Optional[int] = None
         self._remote_pid: Optional[int] = None
         self._finalize_sem = multiprocessing.Semaphore(0)
         self._test_q = JoinableQueue(50)
-        self._results_q =JoinableQueue(50)
+        self._results_q = JoinableQueue(50)
         self._finalize_sem = Semaphore(0)
+        self._all_tests_sent = False
 
     @property
     def uri(self):
@@ -75,7 +74,8 @@ class OrchestrationManagerBase(Global.Manager):
         """
         Connect as a client to an existing server
 
-        :param host: if host assignment deferred, use this
+        :param host: if host assignment deferred, use this it now, otherwise ignored
+        :param port: if port assignment deferred, use this to set it now, otherwise ignored
         """
         if self._host is not None and host is not None:
             raise ValueError("Cannot specify host on connect when one already assigned on construction")
@@ -88,6 +88,7 @@ class OrchestrationManagerBase(Global.Manager):
         OrchestrationManagerBase.register("Semaphore")
         OrchestrationManagerBase.register("join")
         OrchestrationManagerBase.register("finalize")
+        OrchestrationManagerBase.register("signal_all_tests_sent")
         OrchestrationManagerBase.register("register_coordinator")
         OrchestrationManagerBase.register("register_worker")
         OrchestrationManagerBase.register("count_raw")
@@ -96,7 +97,6 @@ class OrchestrationManagerBase(Global.Manager):
         OrchestrationManagerBase.register("get_finalize_sem")
         OrchestrationManagerBase.register("get_test_queue_raw")
         OrchestrationManagerBase.register("get_results_queue_raw")
-        host = self._host.split('@', maxsplit=1)[-1]
         self.connect()
 
     def do_start(self):
@@ -106,13 +106,14 @@ class OrchestrationManagerBase(Global.Manager):
         OrchestrationManagerBase.register("join", self._join)
         OrchestrationManagerBase.register("get_finalize_sem", self._get_finalize_sem)
         OrchestrationManagerBase.register("finalize", self._finalize)
+        OrchestrationManagerBase.register("signal_all_tests_sent", self._signal_all_tests_sent)
         OrchestrationManagerBase.register("register_coordinator", self._register_coordinator)
         OrchestrationManagerBase.register("register_worker", self._register_worker)
         OrchestrationManagerBase.register("count_raw", self._count)
         OrchestrationManagerBase.register("completed", self._completed)
         # noinspection SpellCheckingInspection
         OrchestrationManagerBase.register("JoinableQueue", JoinableQueue,
-                                exposed=["put", "get", "task_done", "join", "close", "get_nowait"])
+                                          exposed=["put", "get", "task_done", "join", "close", "get_nowait"])
         OrchestrationManagerBase.register("Semaphore", Semaphore, exposed=["acquire", "release"])
         OrchestrationManagerBase.register("get_test_queue_raw", self._get_test_queue)
         OrchestrationManagerBase.register("get_results_queue_raw", self._get_results_queue)
@@ -152,24 +153,54 @@ class OrchestrationManagerBase(Global.Manager):
 
     # noinspection PyUnresolvedReferences
     def _register_coordinator(self, client: Coordinator):
+        """
+        Register coordinator for later shutdown
+        :param client: coordinator to register
+        """
         self._coordinators.append(client)
 
-    def _register_worker(self, worker: Tuple[str, int]):
+    def _register_worker(self, worker: Tuple[str, int]) -> "OrchestrationManagerBase.Value":
+        """
+        Register a worker
+        :param worker: worker to register
+        :return: unique index of worker (as Value for multiprocessing purposes)
+        """
         ip_addr, pid = worker
         worker_key = f"{ip_addr}-{pid}"
         self._workers[worker_key] = worker
+        if self._all_tests_sent:
+            self._test_q.put(None)   # will signal worker to end, with no tests to run
+        return self.Value(len(self._workers))
 
     def _count(self):
+        """
+        :return: count of workers currently registered
+        """
         return self.Value(len(self._workers))
 
     def _completed(self, host: str, index: int):
+        """
+        Signal the worker is completed
+        :param host: which host worker is on
+        :param index: index of worker
+        :return:
+        """
         del self._workers[f"{host}-{index}"]
 
-    def _get_finalize_sem(self)-> multiprocessing.Semaphore():
+    def _get_finalize_sem(self) -> multiprocessing.Semaphore():
         return self._finalize_sem
 
     def _get_test_queue(self):
         return self._test_q
+
+    def _signal_all_tests_sent(self):
+        """
+        Signal that main node has sent all tests to the queue.  This will in turn signal all workers that
+        no more tests remain once the queue is drained
+        """
+        self._all_tests_sent = True
+        for _ in self._workers:
+            self._test_q.put(None)
 
     def _finalize(self):
         self._finalize_sem.release()
@@ -177,6 +208,12 @@ class OrchestrationManagerBase(Global.Manager):
     # noinspection SpellCheckingInspection
     @staticmethod
     def launch(destination: str, port: int, project_name: str) -> Tuple[int, int]:
+        """
+        explicitly launch an OrchestrationManager on a remote node
+        :param destination: which node
+        :param port: which port
+        :param project_name: name of project
+        """
         host = destination.split('@')[-1]
         try:
             user, _ = destination.split('@', maxsplit=1)
@@ -187,7 +224,8 @@ class OrchestrationManagerBase(Global.Manager):
         mpmgr.start()
         try:
             returns = mpmgr.dict()
-            mproc = multiprocessing.Process(target=OrchestrationManager._main,
+            # noinspection PyProtectedMember
+            mproc = multiprocessing.Process(target=OrchestrationManagerBase._main,
                                             args=(sem, host, port, user, returns, project_name))
             mproc.start()
             sem.acquire()
@@ -201,7 +239,11 @@ class OrchestrationManagerBase(Global.Manager):
     @staticmethod
     def _main(sem: multiprocessing.Semaphore, host: str, port: int, user: str, returns: Dict[str, int],
               project_name: str):
-        asyncio.get_event_loop().run_until_complete(OrchestrationManager._main_server(
+        """
+        Main processing loop for remote node to fire up OrchestrationManager
+        TODO: do we need to fire up Global.Manager as well?
+        """
+        asyncio.get_event_loop().run_until_complete(OrchestrationManagerBase._main_server(
             sem, host, port, user, returns, project_name))
 
     @staticmethod
@@ -290,6 +332,7 @@ class OrchestrationManager:
         :param project_name:  name of project under test
         :param uri: URI in form <protocol>://host:port where protocol is one of 'local', 'remote', 'ssh'
         :param as_client: only for local protocol: whether to instantiate as a server or as a client
+        :param connect:  if False, don't actually connect, allowing this to be deferred
         :return: OrchestrationManager instance
         """
         parts = uri.split('://', maxsplit=1)
@@ -314,12 +357,13 @@ class OrchestrationManager:
             username, host = host.split('@', maxsplit=1)
         if protocol == Protocol.LOCAL:
             mgr = OrchestrationManager(host, port, uri=uri)
+            assert mgr.host is not None
             if as_client:
                 if connect:
                     mgr.connect()
             else:
                 mgr.start()
-                Global.Manager._singleton[get_auth_key()] = mgr
+                # OrchestrationManager._singleton[get_auth_key()] = mgr
         elif protocol == Protocol.REMOTE:
             # always instantiate as client as there is an external server
             mgr = OrchestrationManager(host, port, uri=uri)
@@ -327,7 +371,7 @@ class OrchestrationManager:
         elif protocol == Protocol.SSH:
             assert project_name is not None
             mgr = OrchestrationManager(host, port, uri=uri)
-            mgr._mproc_pid, mgr._remote_pid = mgr.launch(mgr.host, mgr.port, project_name)
+            mgr._mproc_pid, mgr._remote_pid = mgr._mp_manager.launch(mgr.host, mgr.port, project_name)
             time.sleep(3)
             mgr.connect()
         elif protocol == Protocol.DELEGATED:
@@ -338,39 +382,77 @@ class OrchestrationManager:
         return mgr
 
     def connect(self, host: Optional[str] = None, port: Optional[int] = None):
+        """
+        Connect to OrchestrationManager
+        :param host: if host assignment deferred, which host manager is on, otherwise ignored
+        :param port: if port assignment deferred, which port manager is no, otherwise ignored
+        """
         self._mp_manager.do_connect(host, port)
 
     def start(self):
+        """
+        Start the OrchestrationManager as a server
+        """
         self._mp_manager.do_start()
 
     def get_test_queue(self) -> AsyncMPQueue:
+        # noinspection PyUnresolvedReferences
         return AsyncMPQueue(self._mp_manager.get_test_queue_raw())
 
     def get_results_queue(self) -> AsyncMPQueue:
+        # noinspection PyUnresolvedReferences
         return AsyncMPQueue(self._mp_manager.get_results_queue_raw())
 
-    def count(self):
+    def count(self) -> int:
+        """
+        :return: number of currently registered workers
+        """
         # noinspection PyUnresolvedReferences
         return self._mp_manager.count_raw().value()
 
     def get_finalize_sem(self):
+        # noinspection PyUnresolvedReferences
         return self._mp_manager.get_finalize_sem()
 
     def completed(self, host: str, index: int):
+        """
+        signal that worker is completed
+        :param host: which host worker was on
+        :param index: which index was assigned to that worker
+        """
+        # noinspection PyUnresolvedReferences
         return self._mp_manager.completed(host, index)
 
+    def signal_all_tests_sent(self):
+        """
+        Signal that all tests have been placed in the queue
+        """
+        # noinspection PyUnresolvedReferences
+        return self._mp_manager.signal_all_tests_sent()
+
     def register_coordinator(self, coordinator: Coordinator):
+        """
+        Register a coordinator for later shutdown
+
+        :param coordinator: which coordinator
+        """
+        # noinspection PyUnresolvedReferences
         return self._mp_manager.register_coordinator(coordinator)
 
-    def register_worker(self, worker: Tuple[str, int]):
-        return self._mp_manager.register_worker(worker)
+    def register_worker(self, worker: Tuple[str, int]) -> int:
+        """
+        Register a worker with given tuple of (host, index)
+
+        :param worker: unique host/index combo to identify worker
+        """
+        # noinspection PyUnresolvedReferences
+        return self._mp_manager.register_worker(worker).value()
 
     def join(self, timeout: Optional[float] = None):
         return self._mp_manager.join(timeout)
 
     def finalize(self):
-        #with suppress(ConnectionResetError, EOFError, RemoteError):  # other side will exit its process causing an error
-        always_print(f">>>>>>>>>>>>>>>>>> RELEASING SEM")
+        # noinspection PyUnresolvedReferences
         sem = self._mp_manager.get_finalize_sem()
         sem.release()
 
@@ -379,13 +461,24 @@ class OrchestrationManager:
 
 
 def main(host: str, port: int, project_name: str):
+    """
+    start up an OrchestrationManager server
+    :param host: which host
+    :param port: which port
+    :param project_name: project name, for bookkeeping
+    :return:
+    """
     if port == -1:
         port = find_free_port()
-    sys.stdout.write(str(port) + '\n')
-    sys.stdout.flush()
-    always_print(f"Serving orchestration manager on {host}:{port} until released...")
+    global_mgr_port = find_free_port()
+    Global.Manager.singleton((host, global_mgr_port), as_client=False)
     mgr = OrchestrationManager.create(uri=f"{host}:{port}", project_name=project_name,
                                       as_client=False)
+    # This is the interface back to client to provide port numbers.  CHANGES MUST BE COORDINATED
+    sys.stderr.write(f"\nPORT:{str(port)}\n")
+    sys.stderr.write(f"GLOBAL_PORT:{str(global_mgr_port)}\n")
+    sys.stderr.flush()
+    always_print(f"Serving orchestration manager on {host}:{port} until released...")
     try:
         sem = mgr.get_finalize_sem()
         always_print(f"Waiting on finalize sem... {sem}")

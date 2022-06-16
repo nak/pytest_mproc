@@ -152,7 +152,7 @@ async def test_populate_test_queue(project_config: ProjectConfig):
             ('localhost', 42)  #  WorkerSession(1, False, None, None)))  # we only use count, so any object to register will do
         )
         try:
-            task = asyncio.create_task(orchestrator.populate_test_queue(tests=tests, uri=orchestrator.uri))
+            task = asyncio.create_task(orchestrator.populate_test_queue(tests=tests))
             test_batch = await asyncio.wait_for(orchestrator._test_q.get(), timeout=5)
             index = 0
             assert test_batch.test_ids == ['test1.1', 'test1.2']
