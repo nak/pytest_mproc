@@ -18,7 +18,7 @@ import pytest_mproc
 from pytest_mproc import find_free_port
 from pytest_mproc.main import RemoteSession
 from pytest_mproc.orchestration import OrchestrationManager
-from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
+from pytest_mproc.ptmproc_data import RemoteWorkerConfig, ProjectConfig
 
 from pytest_mproc.remote.bundle import Bundle
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
@@ -118,62 +118,3 @@ def test_remote_execution_cli(tmp_path):
         assert (tmp_path / "test" / "artifacts" / "artifacts-Worker-1.zip").exists()
         assert completed.returncode == 0, f"FAILED TO EXECUTE pytest from \"{' '.join(args)}\" from " \
                                           f"{str(Path(__file__).parent.absolute())}"
-
-
-def test_remote_execution_thread(tmp_path, chdir):
-    chdir.chdir(Path(__file__).parent.parent)
-    root = Path(__file__).parent.parent
-    project_config = ProjectConfig(
-        test_files=[Path("test/*.py")],
-        project_root=root,
-        project_name="pytest_mproc_test"
-    )
-    args = list(sys.argv)
-    sys.argv = ["test/test_mproc_runs.py", "-k", "alg2", "--cores", "4"]
-    ipname = socket.gethostbyname(socket.gethostname())
-    port = find_free_port()
-    command = [
-        shutil.which("python3"), "-m", "pytest", "--as-main", f"{ipname}:{port}",
-    ]
-    command.extend(sys.argv)
-    env = os.environ.copy()
-    import binascii
-    env['AUTH_TOKEN_STDIN'] = '1'
-    env['PYTHONPATH'] = "src"
-    main_proc = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr, cwd=str(Path(__file__).parent.parent),
-                                 env=env, stdin=subprocess.PIPE)
-    main_proc.stdin.write(binascii.b2a_hex(current_process().authkey) + b'\n')
-    main_proc.stdin.close()
-    client_hosts = [
-        RemoteHostConfig(ipname),
-        RemoteHostConfig(ipname),
-        RemoteHostConfig(ipname),
-    ]
-    thread = RemoteSession(project_config=project_config,
-                           remote_sys_executable=shutil.which("python3"),
-                           remote_hosts_config=client_hosts,
-                           )
-    try:
-        sem = Semaphore(0)
-        time.sleep(3)
-        mgr = OrchestrationManager(host=ipname, port=port)
-        # noinspection PyUnresolvedReferences
-        results_q = mgr.get_results_queue()
-        thread.start_workers(
-            server=ipname,
-            server_port=port,
-            auth_key=current_process().authkey,
-            finish_sem=sem,
-            result_q=results_q,
-        )
-        sem.release()
-        sem.release()
-        sem.release()
-        thread.join(timeout=3*240)
-    finally:
-        sys.argv = args
-        try:
-            assert main_proc.wait(timeout=5) == 0
-        except (subprocess.TimeoutExpired, TimeoutError):
-            main_proc.terminate()
-            raise Exception("Main process failed to terminate")

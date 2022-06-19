@@ -23,7 +23,7 @@ from typing import (
 
 from pytest_mproc import user_output, get_auth_key, Settings, Constants
 from pytest_mproc.fixtures import Node, Global
-from pytest_mproc.ptmproc_data import RemoteHostConfig, ProjectConfig
+from pytest_mproc.ptmproc_data import RemoteWorkerConfig, ProjectConfig
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure, remote_root_context
 from pytest_mproc.user_output import debug_print, always_print
 
@@ -350,13 +350,18 @@ class Bundle:
         try:
             env = env.copy() if env else {}
             index = 0
-            worker_config: RemoteHostConfig = await hosts_q.get()
+            worker_config: RemoteWorkerConfig = await hosts_q.get()
             server_host, server_port = server_info
             remote_roots: Dict[str, Path] = {}
             remote_venvs: Dict[str, Path] = {}
             while worker_config is not None:
-                ssh_client = SSHClient(host=worker_config.remote_host, username=Settings.ssh_username,
-                                       password=Settings.ssh_password)
+                if '@' not in worker_config.remote_host:
+                    username = Settings.ssh_username
+                else:
+                    username = None
+                ssh_client = SSHClient(
+                    host=worker_config.remote_host, username=username, password=Settings.ssh_password
+                )
                 if worker_config.remote_host not in contexts:
                     context = remote_root_context(self._project_name, ssh_client, worker_config.remote_root)
                     contexts[worker_config.remote_host] = context
@@ -385,7 +390,7 @@ class Bundle:
                         timeout=deploy_timeout
                     ))
 
-                async def execute(worker_config: RemoteHostConfig, worker_id: str) \
+                async def execute(worker_config: RemoteWorkerConfig, worker_id: str) \
                         -> Tuple[str, asyncio.subprocess.Process]:
                     host = worker_config.remote_host
                     # we must wait if deployment is not finished
@@ -393,6 +398,10 @@ class Bundle:
                     if deployment_tasks[host]:
                         await deployment_tasks[host]
                         deployment_tasks[host] = False
+                    if 'jump_host' in worker_config.arguments:
+                        jump_host = worker_config.arguments['jump_host']
+                        SSHClient.set_global_options('-J', jump_host)
+                        del worker_config.arguments['jump_host']
                     args, worker_env = _determine_cli_args(worker_config, Constants.ptmproc_args, sys.argv[1:])
                     env.update(worker_env)
                     args += ["--as-worker", f"{server_host}:{server_port}"]
@@ -601,7 +610,7 @@ class Bundle:
                 yield line
 
 
-def _determine_cli_args(worker_config: RemoteHostConfig, ptmproc_args: Dict[str, Any], sys_args: List[str]):
+def _determine_cli_args(worker_config: RemoteWorkerConfig, ptmproc_args: Dict[str, Any], sys_args: List[str]):
     worker_args, worker_env = worker_config.argument_env_list()
     # remove pytest_mproc cli args to pass to client (aka additional non-pytest_mproc args)
     args = list(sys_args)  # make a copy

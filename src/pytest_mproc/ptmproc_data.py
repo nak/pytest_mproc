@@ -1,14 +1,18 @@
 import os
+from contextlib import suppress
 
-import aiohttp
 import json
 import pytest
+
 import pytest_mproc
 
 from aiofile import async_open
 from pathlib import Path
 from typing import Optional, Dict, List, Iterable, Tuple, AsyncGenerator, Any
 from dataclasses import dataclass, field
+
+from pytest_mproc.http import HTTPSession
+from pytest_mproc.user_output import always_print
 
 REQUIREMENTS_PATHS = 'requirements_paths'
 TEST_FILES = 'test_files'
@@ -65,24 +69,79 @@ class ProjectConfig:
 
 
 @dataclass
-class RemoteHostConfig:
+class RemoteWorkerConfig:
     remote_host: str
     arguments: Dict[str, str] = field(default_factory=dict)
     remote_root: Optional[Path] = None
+    _http_session = None
+
 
     @classmethod
-    def from_list(cls, value: Iterable[str]) -> List["RemoteHostConfig"]:
+    async def from_raw_list(cls, values: Iterable[str]) -> AsyncGenerator["RemoteWorkerConfig", "RemoteWorkerConfig"]:
+        direct_list = []
+        http_end_points = []
+        file_list = []
+        count = 0
+        for v in values:
+            if v.startswith('https://') or v.startswith('http://'):
+                http_end_points.append(v)
+            elif v.startswith('file://'):
+                file_list.append(v)
+            elif Path(v).exists():
+                file_list.append(f"file://{v}")
+            else:
+                direct_list.append(v)
+        if direct_list:
+            for worker_config in cls.from_list(direct_list):
+                yield worker_config
+                count += 1
+        if file_list:
+            for file_uri in file_list:
+                async for worker_config in cls.from_uri_string(file_uri):
+                    yield worker_config
+                    count += 1
+        if http_end_points:
+            for http_uri in http_end_points:
+                try:
+                    always_print(f"Attempting to read remote worker configuration from {http_uri}...")
+                    cls._http_session = HTTPSession.create(http_uri)
+                except Exception as e:
+                    always_print(f"Failed to reach end point {http_uri}: {e}; attempting next fallback if present")
+                    continue
+                try:
+                    async for json_data in cls._http_session.start():
+                        yield RemoteWorkerConfig(remote_host=json_data['host'],
+                                                 arguments=json_data['arguments'],
+                                                 remote_root=json_data.get('remote_root'))
+                        count += 1
+                except Exception as e:
+                    always_print(f"Failed to call to start session at {cls._http_session._start_url};"
+                                 " attempting next fallback if present")
+                    continue
+                if count > 0:
+                    break
+                else:
+                    with suppress(Exception):
+                        await cls._http_session.end_session()
+                    cls._http_session = None
+                    always_print(f"Failed to find available workers from {http_uri}; "
+                                 "attempting next fallback if present")
+        if count == 0:
+            pytest.fail("Failed to yield any viable remote workers. aborting")
+
+    @classmethod
+    def from_list(cls, value: Iterable[str]) -> List["RemoteWorkerConfig"]:
         """
         parse a cli input string for remote host and parameters specifications
         :param value: a string spec, a str path to a file in form file://..., or to a url in form 'http[s]://...'
             (the latter two returning a json dict in correspondence with return)
         :return: dictionary keyed on host of a dictionary of key value parameters
         """
-        configs: List["RemoteHostConfig"] = []
+        configs: List["RemoteWorkerConfig"] = []
         try:
             for item in value:
                 host, *args = item.split(';')
-                configs.append(RemoteHostConfig(
+                configs.append(RemoteWorkerConfig(
                     remote_host=host,
                     arguments={k: v for k, v in [arg.split('=') for arg in args]}
                 ))
@@ -91,7 +150,7 @@ class RemoteHostConfig:
         return configs
 
     @classmethod
-    async def from_uri_string(cls, value: str) -> AsyncGenerator["RemoteHostConfig", "RemoteHostConfig"]:
+    async def from_uri_string(cls, value: str) -> AsyncGenerator["RemoteWorkerConfig", "RemoteWorkerConfig"]:
         """
         parse a cli input string for remote host and parameters specifications
         :param value: a string spec, a str path to a file in form file://..., or to a url in form 'http[s]://...'
@@ -122,39 +181,19 @@ class RemoteHostConfig:
                     raise pytest.UsageError(
                         f"Invalid json format for client host/args specification '{value}'")
         try:
-            if value.startswith('http://') or value.startswith('https://'):
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(value) as resp:
-                        async for data, _ in resp.content.iter_chunks():
-                            buffer += data
-                            if '\n' in data:
-                                *lines, buffer = data.split('\n')
-                                for line in lines:
-                                    if not line.strip():
-                                        continue
-                                    json_data = json.loads(line.strip())
-                                    validate(json_data)
-                                    for k, v in json_data['arguments'].items():
-                                        json_data['arguments'][k] = str(v)
-                                    yield RemoteHostConfig(remote_host=json_data['host'],
-                                                           arguments=json_data['arguments'])
-            elif value.startswith('file://'):
-                async with async_open(value[7:], "r") as afp:
-                    async for line in afp:
-                        if line.startswith('#') or not line.strip():
-                            continue
-                        json_data = json.loads(line.strip())
-                        validate(json_data)
-                        for k, v in json_data['arguments'].items():
-                            json_data['arguments'][k] = str(v)
-                        yield RemoteHostConfig(remote_host=json_data['host'],
-                                               arguments=json_data['arguments'])
-            else:
-                raise pytest.UsageError(f"Invalid value for remote host(s): {value}")
+            assert value.startswith('file://')
+            async with async_open(value[7:], "r") as afp:
+                async for line in afp:
+                    if line.startswith('#') or not line.strip():
+                        continue
+                    json_data = json.loads(line.strip())
+                    validate(json_data)
+                    for k, v in json_data['arguments'].items():
+                        json_data['arguments'][k] = str(v)
+                    yield RemoteWorkerConfig(remote_host=json_data['host'],
+                                             arguments=json_data['arguments'])
         except json.JSONDecodeError:
             raise pytest.UsageError(f"invalid json input from source '{value}'")
-        except ValueError:
-            raise pytest.UsageError(f"invalid cli input for remote hosts: {value}")
 
     def argument_env_list(self) -> Tuple[List[str], Dict[str, str]]:
         arg_list: List[str] = []
@@ -167,6 +206,10 @@ class RemoteHostConfig:
                 arg_list.append(f"\"{str(value)}\"")
         return arg_list, env_list
 
+    @classmethod
+    def http_session(cls):
+        return cls._http_session
+
 
 @dataclass
 class PytestMprocConfig:
@@ -174,7 +217,7 @@ class PytestMprocConfig:
     server_uri: Optional[str] = 'localhot:None'
     client_connect: Optional[str] = None
     connection_timeout: int = 30
-    remote_hosts: List[RemoteHostConfig] = field(default_factory=list)
+    remote_hosts: List[RemoteWorkerConfig] = field(default_factory=list)
     max_simultaneous_connections = 24
     remote_sys_executable: Optional[Path] = None
 

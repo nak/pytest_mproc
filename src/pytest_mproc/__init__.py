@@ -26,7 +26,7 @@ _user_defined_port_alloc: Optional[Callable[[], int]] = None
 _user_defined_auth: Optional[Callable[[], bytes]] = None
 
 
-def set_user_defined_auth_tokn(func: Callable[[], bytes]):
+def set_user_defined_auth_token(func: Callable[[], bytes]):
     _user_defined_auth = func
 
 

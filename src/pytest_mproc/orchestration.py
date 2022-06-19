@@ -1,3 +1,7 @@
+"""
+This package contains the code to handle the RPC calls to a single manager that holds the elements
+important to distributed processing:  a single test and result queue, semaphores for control, etc.
+"""
 import asyncio
 import multiprocessing
 import os
@@ -10,6 +14,7 @@ from glob import glob
 from multiprocessing import Semaphore
 from multiprocessing import JoinableQueue
 from multiprocessing.managers import SyncManager, RemoteError, BaseManager
+from multiprocessing.process import current_process
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
@@ -21,13 +26,24 @@ from pytest_mproc.user_output import always_print, debug_print
 
 
 class Protocol(Enum):
+    """
+    Supported protocols for the manager
+    """
     LOCAL = 'local'
+    # local host
     REMOTE = 'remote'
+    # explicit hsot ip address
     SSH = 'ssh'
+    # dynamically launched on fixed remote node via ssh
     DELEGATED = 'delegated'
+    # delegated to the first worker node available
 
 
-class OrchestrationManagerBase(BaseManager):
+class OrchestrationMPManager(BaseManager):
+    """
+    This base class provides the underlying multiprocessing server interface to connect with or start the server,
+    and the API for interacting with the server that is registered as the Orchestration API
+    """
 
     class Value:
         def __init__(self, val):
@@ -38,7 +54,7 @@ class OrchestrationManagerBase(BaseManager):
 
     def __init__(self, host: str, port: int, uri: str):
         super().__init__((host, port), authkey=get_auth_key())
-        OrchestrationManagerBase.register("Queue", multiprocessing.Queue, exposed=["get", "put"])
+        OrchestrationMPManager.register("Queue", multiprocessing.Queue, exposed=["get", "put"])
         self._uri = uri
         self._port = port
         self._host = host
@@ -84,39 +100,39 @@ class OrchestrationManagerBase(BaseManager):
         elif self._host is None:
             self._host = host
             self._port = port
-        OrchestrationManagerBase.register("JoinableQueue")
-        OrchestrationManagerBase.register("Semaphore")
-        OrchestrationManagerBase.register("join")
-        OrchestrationManagerBase.register("finalize")
-        OrchestrationManagerBase.register("signal_all_tests_sent")
-        OrchestrationManagerBase.register("register_coordinator")
-        OrchestrationManagerBase.register("register_worker")
-        OrchestrationManagerBase.register("count_raw")
-        OrchestrationManagerBase.register("completed")
+        OrchestrationMPManager.register("JoinableQueue")
+        OrchestrationMPManager.register("Semaphore")
+        OrchestrationMPManager.register("join")
+        OrchestrationMPManager.register("finalize")
+        OrchestrationMPManager.register("signal_all_tests_sent")
+        OrchestrationMPManager.register("register_coordinator")
+        OrchestrationMPManager.register("register_worker")
+        OrchestrationMPManager.register("count_raw")
+        OrchestrationMPManager.register("completed")
         # noinspection SpellCheckingInspection
-        OrchestrationManagerBase.register("get_finalize_sem")
-        OrchestrationManagerBase.register("get_test_queue_raw")
-        OrchestrationManagerBase.register("get_results_queue_raw")
+        OrchestrationMPManager.register("get_finalize_sem")
+        OrchestrationMPManager.register("get_test_queue_raw")
+        OrchestrationMPManager.register("get_results_queue_raw")
         self.connect()
 
     def do_start(self):
         """
         Start this instance as the main server
         """
-        OrchestrationManagerBase.register("join", self._join)
-        OrchestrationManagerBase.register("get_finalize_sem", self._get_finalize_sem)
-        OrchestrationManagerBase.register("finalize", self._finalize)
-        OrchestrationManagerBase.register("signal_all_tests_sent", self._signal_all_tests_sent)
-        OrchestrationManagerBase.register("register_coordinator", self._register_coordinator)
-        OrchestrationManagerBase.register("register_worker", self._register_worker)
-        OrchestrationManagerBase.register("count_raw", self._count)
-        OrchestrationManagerBase.register("completed", self._completed)
+        OrchestrationMPManager.register("join", self._join)
+        OrchestrationMPManager.register("get_finalize_sem", self._get_finalize_sem)
+        OrchestrationMPManager.register("finalize", self._finalize)
+        OrchestrationMPManager.register("signal_all_tests_sent", self._signal_all_tests_sent)
+        OrchestrationMPManager.register("register_coordinator", self._register_coordinator)
+        OrchestrationMPManager.register("register_worker", self._register_worker)
+        OrchestrationMPManager.register("count_raw", self._count)
+        OrchestrationMPManager.register("completed", self._completed)
         # noinspection SpellCheckingInspection
-        OrchestrationManagerBase.register("JoinableQueue", JoinableQueue,
-                                          exposed=["put", "get", "task_done", "join", "close", "get_nowait"])
-        OrchestrationManagerBase.register("Semaphore", Semaphore, exposed=["acquire", "release"])
-        OrchestrationManagerBase.register("get_test_queue_raw", self._get_test_queue)
-        OrchestrationManagerBase.register("get_results_queue_raw", self._get_results_queue)
+        OrchestrationMPManager.register("JoinableQueue", JoinableQueue,
+                                        exposed=["put", "get", "task_done", "join", "close", "get_nowait"])
+        OrchestrationMPManager.register("Semaphore", Semaphore, exposed=["acquire", "release"])
+        OrchestrationMPManager.register("get_test_queue_raw", self._get_test_queue)
+        OrchestrationMPManager.register("get_results_queue_raw", self._get_results_queue)
         # we only need these as dicts when running a standalone remote server handling multiple
         # pytest sessions/users
         always_print(f"Starting orchestration on {self._host}:{self._port}")
@@ -137,6 +153,10 @@ class OrchestrationManagerBase(BaseManager):
 
     def shutdown(self) -> None:
         self.join(timeout=5)
+        for (host, pid) in self._workers.values():
+            ssh = SSHClient(host=host, username=Settings.ssh_username, password=Settings.ssh_password)
+            with suppress(Exception):
+                ssh.execute_remote_cmd("kill", "-9", str(pid))
         if self._remote_pid is not None:
             with suppress(Exception):
                 os.kill(self._remote_pid, signal.SIGINT)
@@ -147,6 +167,11 @@ class OrchestrationManagerBase(BaseManager):
                 os.kill(self._mproc_pid, signal.SIGINT)
             with suppress(Exception):
                 os.kill(self._mproc_pid, signal.SIGKILL)
+
+    #####################
+    # internal server API;  this methods are registered as prat of the interface, only
+    # without the leading underscore
+    #####################
 
     def _get_results_queue(self) -> JoinableQueue:
         return self._results_q
@@ -159,7 +184,7 @@ class OrchestrationManagerBase(BaseManager):
         """
         self._coordinators.append(client)
 
-    def _register_worker(self, worker: Tuple[str, int]) -> "OrchestrationManagerBase.Value":
+    def _register_worker(self, worker: Tuple[str, int]) -> "OrchestrationMPManager.Value":
         """
         Register a worker
         :param worker: worker to register
@@ -185,7 +210,9 @@ class OrchestrationManagerBase(BaseManager):
         :param index: index of worker
         :return:
         """
-        del self._workers[f"{host}-{index}"]
+        key = f"{host}-{index}"
+        if key in self._workers:
+            del self._workers[key]
 
     def _get_finalize_sem(self) -> multiprocessing.Semaphore():
         return self._finalize_sem
@@ -204,6 +231,10 @@ class OrchestrationManagerBase(BaseManager):
 
     def _finalize(self):
         self._finalize_sem.release()
+
+    #############################
+    # for SSH Invocation (experimental
+    #############################
 
     # noinspection SpellCheckingInspection
     @staticmethod
@@ -225,7 +256,7 @@ class OrchestrationManagerBase(BaseManager):
         try:
             returns = mpmgr.dict()
             # noinspection PyProtectedMember
-            mproc = multiprocessing.Process(target=OrchestrationManagerBase._main,
+            mproc = multiprocessing.Process(target=OrchestrationMPManager._main,
                                             args=(sem, host, port, user, returns, project_name))
             mproc.start()
             sem.acquire()
@@ -243,7 +274,7 @@ class OrchestrationManagerBase(BaseManager):
         Main processing loop for remote node to fire up OrchestrationManager
         TODO: do we need to fire up Global.Manager as well?
         """
-        asyncio.get_event_loop().run_until_complete(OrchestrationManagerBase._main_server(
+        asyncio.get_event_loop().run_until_complete(OrchestrationMPManager._main_server(
             sem, host, port, user, returns, project_name))
 
     @staticmethod
@@ -297,9 +328,12 @@ class OrchestrationManagerBase(BaseManager):
 
 
 class OrchestrationManager:
+    """
+    Class to hold the test queue, results queue, and control interface for shutdown, etc.
+    """
 
     def __init__(self, *args, **kwargs):
-        self._mp_manager = OrchestrationManagerBase(*args, **kwargs)
+        self._mp_manager = OrchestrationMPManager(*args, **kwargs)
 
     @property
     def uri(self):
@@ -460,14 +494,17 @@ class OrchestrationManager:
         return self._mp_manager.shutdown()
 
 
-def main(host: str, port: int, project_name: str):
+def main(host: str, port: int, project_name: str, auth_key: Optional[bytes] = None):
     """
     start up an OrchestrationManager server
     :param host: which host
     :param port: which port
     :param project_name: project name, for bookkeeping
+    :param auth_key: authentication token for validating connections
     :return:
     """
+    if auth_key is not None:
+        current_process().authkey = auth_key
     if port == -1:
         port = find_free_port()
     global_mgr_port = find_free_port()
@@ -493,4 +530,4 @@ if __name__ == "__main__":
     host = sys.argv[1]
     port = int(sys.argv[2])
     project_name = sys.argv[3]
-    main(host, port, project_name)
+    main(host, port, project_name, None)

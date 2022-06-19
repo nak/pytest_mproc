@@ -9,5 +9,6 @@ def is_degraded():
 
 class BasicReporter:
 
-    def write(self, text: AnyStr, *args: Any, **kargs: Any):
+    # noinspection PyMethodMayBeStatic
+    def write(self, text: AnyStr, *_args: Any, **_kargs: Any):
         os.write(sys.stderr.fileno(), text.encode('utf-8'))

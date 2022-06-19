@@ -33,7 +33,10 @@ class Coordinator:
         self._worker_procs: List[subprocess.Popen] = []
 
     @classmethod
-    def singleton(cls):
+    def singleton(cls) -> "Coordinator":
+        """
+        :return: sole (possibly created) singleton instance of this class
+        """
         if cls._singleton is None:
             cls._singleton = Coordinator()
         return cls._singleton
@@ -54,7 +57,12 @@ class Coordinator:
             if proc.returncode is not None:
                 raise SystemError(f"Worker-{index} failed to start")
 
-    def shutdown(self, timeout: Optional[float] = None):
+    def shutdown(self, timeout: Optional[float] = None) -> None:
+        """
+        shutdown servers and clean up
+        :param timeout: timeout if taking too long
+        :raises: TimeoutError if taking too long
+        """
         for proc in self._worker_procs:
             try:
                 proc.wait(timeout=timeout)
@@ -63,7 +71,10 @@ class Coordinator:
                     proc.kill()
         self._worker_procs = []
 
-    def kill(self):
+    def kill(self) -> None:
+        """
+        Abruptly kill all worker processes
+        """
         for proc in self._worker_procs:
             proc.kill()
         self._worker_procs = []

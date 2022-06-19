@@ -9,6 +9,7 @@ import _pytest.terminal
 
 from pytest_mproc import worker, user_output, Constants
 from pytest_mproc.coordinator import Coordinator
+from pytest_mproc.http import HTTPSession
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.user_output import always_print
@@ -23,7 +24,7 @@ from typing import Callable, Optional, Iterable, Union, Type
 
 from pytest_mproc.ptmproc_data import (
     PytestMprocConfig,
-    RemoteHostConfig,
+    RemoteWorkerConfig,
     ProjectConfig,
     PytestMprocRuntime,
 )
@@ -286,6 +287,7 @@ def mproc_pytest_cmdline_coordinator(config):
 
 def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
     assert "--as-worker" not in sys.argv
+    config.http_session = None
     has_remotes = "--remote-worker" in sys.argv
     config.option.ptmproc_config.server_uri = \
         getattr(config.option, 'mproc_server_uri') or f'127.0.0.1:{find_free_port()}'
@@ -301,10 +303,10 @@ def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
             # basically if only one is None
             raise pytest.UsageError(f"Must specify both project config and remote clients together or not at all "
                                     f"{project_config} {remote_clients}")
-        config.option.ptmproc_config.remote_hosts = None if not remote_clients \
-            else RemoteHostConfig.from_list(remote_clients)\
-            if isinstance(remote_clients, Iterable)\
-            else RemoteHostConfig.from_uri_string(remote_clients)
+        remote_clients = [remote_clients] if isinstance(remote_clients, str) else remote_clients
+        config.option.ptmproc_config.remote_hosts = None if not remote_clients\
+            else RemoteWorkerConfig.from_raw_list(remote_clients)
+        config.http_session = RemoteWorkerConfig.http_session()
         config.option.ptmproc_config.remote_sys_executable = mproc_remote_sys_executable
     if config.option.ptmproc_config.num_cores < 1:
         raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
@@ -529,6 +531,8 @@ def pytest_sessionfinish(session):
         orchestrator = session.config.ptmproc_runtime.mproc_main
         orchestrator.output_summary()
         orchestrator.shutdown()
+        if session.config.http_session is not None:
+            session.config.http_session.end_session_sync()
     yield
     session.config.option.verbose = verbose
     with suppress(Exception):

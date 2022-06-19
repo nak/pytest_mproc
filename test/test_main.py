@@ -12,11 +12,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pytest_mproc import user_output, AsyncMPQueue
+from pytest_mproc import user_output
 from pytest_mproc.data import AllClientsCompleted, ClientDied, TestBatch, ResultExit
 from pytest_mproc.main import RemoteSession, Orchestrator
 from pytest_mproc.orchestration import OrchestrationManager
-from pytest_mproc.ptmproc_data import ProjectConfig, RemoteHostConfig
+from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
 
 
 @pytest.fixture()
@@ -60,7 +60,7 @@ async def test_validate_clients(project_config, mgr):
 
         subprocess.run = MagicMock(side_effect=mock_run)
         await asyncio.wait_for(
-            remote_session.validate_clients(result_q=result_q,
+            remote_session.validate_clients(results_q=result_q,
                                             remote_host_procs={'localhost': proc1,
                                                                '127.0.0.1': proc2}),
             timeout=20
@@ -77,7 +77,7 @@ async def test_validate_clients(project_config, mgr):
 @pytest.mark.asyncio
 async def test_start_workers(mgr: OrchestrationManager, project_config: ProjectConfig):
     root = Path(__file__).parent.parent / 'src'
-    files = glob(str(root / 'pytest_mproc' / '*.py')) + glob(str(root / 'pytest_mproc'/ 'remote' / '*.py'))
+    files = glob(str(root / 'pytest_mproc' / '*.py')) + glob(str(root / 'pytest_mproc' / 'remote' / '*.py'))
     project_config.test_files = [Path(f).relative_to(root) for f in files] + \
         [Path('test_one.py')]
     os.mkdir(project_config.project_root / 'pytest_mproc')
@@ -104,7 +104,7 @@ def test_one():
     try:
         sys.argv = ['-s', 'test_one.py']
         os.chdir(project_config.project_root)
-        await host_q.put(RemoteHostConfig(remote_host='localhost', arguments={}))
+        await host_q.put(RemoteWorkerConfig(remote_host='localhost', arguments={}))
         await host_q.put(None)
 
         async def go():
@@ -128,7 +128,7 @@ def test_one():
                 except asyncio.TimeoutError:
                     pass
                 break
-            r = await asyncio.wait_for(result_q.get(), timeout=5)
+            r = await asyncio.wait_for(result_q.get(), timeout=20)
         await remote_session.shutdown()
         await asyncio.wait_for(task, timeout=3)
     finally:
@@ -193,8 +193,8 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
             os.chdir(project_config.project_root)
             await orchestrator.start_remote(
                 remote_workers_config=[
-                    RemoteHostConfig(remote_host='localhost', remote_root=project_config.project_root),
-                    RemoteHostConfig(remote_host='127.0.0.1', remote_root=project_config.project_root)
+                    RemoteWorkerConfig(remote_host='localhost', remote_root=project_config.project_root),
+                    RemoteWorkerConfig(remote_host='127.0.0.1', remote_root=project_config.project_root)
                 ],
                 deploy_timeout=20,
                 env=env)
@@ -204,11 +204,12 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
             result_q = mgr.get_results_queue()
             for item in items:
                 await asyncio.wait_for(test_q.put(item), timeout=5)
+            mgr.signal_all_tests_sent()
             await asyncio.wait_for(test_q.put(None), timeout=5)
             await asyncio.wait_for(test_q.put(None), timeout=5)
             result = await asyncio.wait_for(result_q.get(), timeout=10)
             while not isinstance(result, AllClientsCompleted):
-                result = await asyncio.wait_for(result_q.get(), timeout=5)
+                result = await asyncio.wait_for(result_q.get(), timeout=100)
             try:
                 await asyncio.wait_for(result_q.get(), timeout=2)
                 assert False, "unexpected result after signalled that all client completed"

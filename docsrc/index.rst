@@ -192,20 +192,22 @@ A 'global'-ly Scoped Fixture
 As is the case with *pytest_xdist* plugin, *pytest_mproc* uses multiprocessing module to achieve parallel concurrency.
 This raises interesting behaviors about 'session' scoped fixtures.  Each subprocess that is launched will create its own
 session-level fixture;  in other words, you can think of a session as a per-process concept, with one session-level
-fixture per process.  This is often not obvious to test developers. Many times, a global fixture is needed, with a
+fixture per process.  This is often not obvious to test developers. At times, a global fixture is needed, with a
 single instantiation across all processes and tests.  An example might be setting up a single test database.
 (NOTE: when running on more than one machine, also see 'node-level' fixtures discussed below)
 
-To achieve this, *pytest_mproc* adds a new scope: 'global'. Behind the scenes, the system uses pythons *multiprocessing*
+To achieve this, *pytest_mproc* adds a 'global' scope feature, instantiated only once and shared with all nodes.
+Behind the scenes, the system uses pythons *multiprocessing*
 module's BaseManager to provide this feature.  This is mostly transparent to the developer, with one notable exception.
 In order to communicate a fixture globally across multiple *Process* es, the object returned (or yielded) from a
-globally scoped fixture must be 'picklable'.
+globally scoped fixture must be 'picklable'.  To declare a fixture global:
 
-The 'global' scope is a level above 'session' in the hierarchy.  That means that globally scoped fixtures can only
+
+The global fixture is a level above 'session' in the hierarchy.  That means that globally scoped fixtures can only
 depend on other globally scoped fixtures.
 
 .. warning::
-    Values returned or yielded from a fixture with scope'global' must be picklable so as to be shared across multiple
+    Values returned or yielded from a global fixture must be picklable so as to be shared across multiple
     independent subprocesses.
 
 
@@ -217,69 +219,7 @@ depend on other globally scoped fixtures.
    def globally_scoped_fixture()
        ...
 
-Global fixtures can be passed any keywoard args supported by pytest.fixure.
-
-Tips for Using Global Scope Fixture
------------------------------------
-Admittedly, one has to think about how multiprocessing works to know what can and cannot be returned from a global
-test fixture.  Since they are "singletons", one useful tip if you are using (singleton) classes (such as manager classses) to
-encaspulate logic, it is best not to put anything other than what is necessary as instance variables, and delegate
-them to class variable.  Also, you should design your fixture so that any other test not depending on it is not blocked
-while on that fixture.  Example code is shown blow
-
-
-.. code-block:: python
-
-   import pytest
-   import multiprocessing
-
-   class Manager:
-
-        # not picklable, so keep at class level
-       _proc: multiprocessing.Process = None
-
-       @staticmethod
-       def start(hostname: str, port: int) -> Nont:
-           ...
-           start_some_service(hostname, port)
-
-       @classmethod
-       def setup_resources(cls) -> Nont:
-            hostname, port = '127.0.0.1', 32873
-            # service is started i the background so as not to hold up the system
-            cls._proc = multiprocessing.Procss(target=start, args=(hostname, port))
-           ...
-           return hostname, port
-
-       @classmethod
-       def shutdown(cls, hostname:str , port: int) -> None:
-            ...
-
-       def __init__(self):
-           assert self._proc is not None, "Attempt top instantiate singleton more then once"
-           # hostname and port are a str and int so easily Picklable
-           self._hostname, self._port = self.setup_resources()
-
-       def __enter__() -> "Manager":
-           return self
-
-       def __exit__(self, *args, **kargs):
-           self.shudown(self._hostname, self._port)
-           self._proc.join(timeout=5)
-
-       def hostname(self):
-            return self._hostname
-
-        def port(self):
-            return self._port
-
-
-    @pytest.fixture(scope='global')
-    def resource():
-        # called only once across all processes and for all tests
-        with Manager() as manager:
-            yield manager.hostname, manager.port
-
+Global fixtures can be passed any keyword args supported by pytest.fixture EXCEOT autouse.
 
 *pytest_mproc* guarantees that all fixtures are in place before worker clients in other processes access them, so as
 not to cause a race condition.
@@ -287,11 +227,11 @@ not to cause a race condition.
 Node-scoped Fixtures
 ====================
 
-With the system now allowing execution of mutliple workers on a single machine, and execution across multiple machines,
-this introduces a new level of scoping of fixtures:  *node*-scoped fixtures.  A fixture scoped to '*node*' is
-instantiated once per node and such instance is only available to workers on that node.
+With the system now allowing execution of multiple workers on a single machine, and execution across multiple machines,
+this introduces another level of scoping of fixtures:  *node*-scoped fixtures.  A node-level fixture is
+instantiated once per node and such instance is only available to workers (aka all test processes) on that node.
 
-To declare a fixture to be scoped to a node:
+To declare a fixture to be scoped to a node, which declares the optional autouse:
 
 .. code-block:: python
 
@@ -301,7 +241,7 @@ To declare a fixture to be scoped to a node:
    def globally_scoped_fixture()
        ...
 
-Node fixtures can be passed any keywoard args supported by pytest.fixure.
+Node fixtures can be passed any keyword args supported by pytest.fixure.
 
 .. warning::
     Values returned or yielded from a fixture with scope to a node must be picklable so as to be shared across multiple
@@ -322,98 +262,170 @@ be removed that is in use by another thread worker in any distributed execution)
 Advanced: Testing on a Distributed Set of Machines
 ==================================================
 
-*pytest_mproc* has support for running test distributed across multiple mahcines.
+*pytest_mproc* has support for running test distributed across multiple machines.
 
 .. caution::
-   This feature may not be as robust against fault tolerance.  The basic functionality exists, but robustness
-   against exception in fixtures, etc., has not been fully tested
+   You should validate that your tests run as exected before running distributed, as common errors will be
+   replicated and shown in the output for all workers.
 
-.. caution::
-   Throttling of connections only happens on a per-node basis, not globally.  It may be possible to overwhelm
-   the main node if you are using too many remote workers, causing deadlock
+The concept is that one node will act as the main node, which is what the user launches to start the tests. That
+node populates the queue of tets, and collects and reports test status. The other nodes are worker nodes (either
+launched automatically or manually) and are responsible for pull tests  (or batches of tests explicitly grouped)
+one-by-one until the test queue is exhausted, executing each test as it is pulled, returning the status of the test
+back to the main node.  When running distributed, the number of cores specified is the number of cores *per worker*.
+A worker is a single process that is pulling the tests, executing each one and reporting status.
 
-The concept is that one node will act as the main node, collecting and reporting test status, while all others
-will act as clients -- executing tests and reporting status back the the main node.  To start the main node,
-use the "--as-main" command line argument, specifying the port the server will listen on:
+Complexities of Distributed Execution
+-------------------------------------
+
+*pytest_mproc* requires a main server to handle the creation of a test and result queue and control artifacts in
+order to orchestrate test execution.  The machine that this server runs on must allow incoming connections.  There
+are options for where this server can run.  The machine hosting the main process (where the tester kicks off the
+tests) is indeed one such option. However, for a tester running on a laptop testing across a cloud of device
+(as an example), it is unlikely that the nodes in the cloud will be able to call into the tester's laptop.  Firewall
+restrictions will undougtedly prevent this.   So, understand the nature of the system you are using for
+distributed testing.
+
+Automated distributed testing, *pytest_mproc* uses ssh to deploy and execute remote worker tasks.  The test infrasrtcuture
+must therefore provide ssh access (passwordless) into the remote nodes.  A configuration file must also be defined
+to define the structure of the bundle to be deployed to the worker nodes (discussed later).
+
+Inter-process communication is secure and requires a common authentication token.  For manual deploymen to workers,
+this token must be shared across all nodes.  Such sharing is up to the user to implement and must provide a
+callback to retrieve the authentication token:
+
+.. code-block:: python
+   pytest_mproc. set_user_defined_auth_token(callback)
+   # here, callback takes no parameters and returns a bytes object containing the auth token
+
+
+This should be called globally, presumably close to the top of your *conftest.py* file.  If you with not to use
+a fixed port for the orchestration server, the tester can also provide a callback for allocating ports (otherwise
+if not port is specified, a random free port will be allocated):
+
+.. code-block:: python
+   pytest_mproc.set_user_defined_port_alloc(callback)
+   # here, callback takes no parameters and returns an int which is the port to use
+
+
+Manual Distributed Execution
+----------------------------
+This section documents how to bring up the main node, and then manually bring up workers on (presumably) remote
+nodes.
+
+To start the main node, use the "--as-main" command line argument, specifying the port the server will listen on:
 
 .. code-block:: shell
 
-   % pytest --num_cores <N> --as-main <protocol><host>:<port> ...
+   % pytest --as-main <host>:<port> ...
 
 When *--as-main* argument is present, N represents the number of cores to use on each worker when
-automated distributed testing is invoked, unless overridden
-by remote-config data specific to a worker.  This sets up the node as main, responsible for orchestrating test
-execution across multiple workers.  If no other options are present, workers must be started manually.  See
-section on automated distributed testing below for a less manual option.
+automated distributed testing is invoked.  This sets up the node as main, responsible for orchestrating test
+execution across multiple workers. In this scenario, workers must be started manually.  See
+section on automated distributed testing below if desired to run from a single *pytest* invocation.  In this
+scenario, specifying *--num-cores* here will allow workers to also start on the local node, otherwise no workers
+will be invoked under this command (delegated to manual bring-up on other machines/processes)
 
-The argument to as-main can take several forms (only one of which is useful for manual deployment of workers.  The
-*multiprocessing* package uses a server for handling remote procedure calls, and this option specifies how
-to start or connect to that server The possible options are:
+The host an port specified may also be on a remote machine (see section above on why such a scenario might be needed).
+In this case, the orchestration manager must be started manually as well.  The tester can create an application
+that calls the main function to start the server:
 
-* *[local://]<host>:<port>* -- host should be an ip address associated with local host and port is an available port
-* *[remote://]<host>:<port>* -- the host is manually (possibly continually) running on a remote machine given by the host
-and port of that server
-* *[ssh://][user@]<host>:<port> -- start a host automatically via ssh on a remote machine specified by host and port (with
-optional user specification)
+.. code-block:: python
+   pytest_mproc.orchestration.main(host, port, auth_key)
 
-To start the client nodes:
+
+To start each the worker node, assuming the necessary deployment of test code has been made on the node:
 
 .. code-block:: shell
 
-   % pytest --num_cores <N> --as-worker <host>:<port> [--connection-timeout <integer seconds>]
+   % pytest --num_cores <N> --as-worker <host>:<port>
 
-Here, N must be greater than or equal to 1;  multiple workers can be invoked on a node, with possibly multiple client
-nodes. The client will attempt to connect to the main  node for a period of 30 seconds at which point it gives up and
-exits with na error.  If *--connection-timeout* is specified, the client will timeout and exit if it takes longer than
-the provided seconds to connect.  The default is 30 seconds.
+Here, N must be greater than or equal to 1;  multiple workers can be invoked on a single node.
+Of course,  multiple worker nodes can be used as well. Each worker will attempt to connect
+to the main  node for a period of 30 seconds at which point it gives up and exits with na error.
 
 Automate Distributed Execution
 ------------------------------
 
 *pytest_mproc* supports automated deployment and execution on a set of remote worker machines.  This requires a method
-to determine the remote hosts (and parameters associated with those hosts as needd) as well as a project strcuture to
-bundle and deploy to remote host machines.  Deployments and execution are conducted vis *ssh* and any port
-referenced in options is the *ssh* port to be used.
+to determine the remote hosts (and parameters associated with those hosts as needd) as well as a definition
+of the project structure to bundle and deploy to remote host machines.
+Deployments and execution are conducted vis *ssh* and any port referenced in options is the *ssh* port to be used.
+
+One-time Setup
+..............
 
 Project definition consists of defining a set of properties in a config file in JSON format:
 
 .. code-block:: json
 
    {
-    "src_paths": ["./path/to/src1", "./path/to/src2"],
+    "project_name": "A_name_associated_with_the_project_under_test",
     "test_files": "./path/to/project_tests/*.pattern",
+    "prepare_script": "./path/to/test/setup/script",
+    "finalize_script": "./path/to/test/teardown/script",
    }
 
 These have the following meanings for creating the bundle to send to workers:
 
-* *src_paths*: list of directories or evein site-package directories to include in the bundle
-* *test_files*: location of where test code is kept, to be bundled as as directory;  this can specify any files
-and are copied to remote hosts using a path relative to the location of the project config file.  These files
-can include requirements.txt files, resources files and of course test code (but really any type of file)
+* *test_files*: Location of all files to be bundled necessary to execute tests.  If a *requirements.txt*
+  file is present, these requirements will be instsalled via *pip*. All files must be relative paths,
+  relative to the project config file itself
 * *prepare_script*: an optional script that is run before pytest execution on a remote host, to prep the
   test environment if needed.  The recommendation is to make use of pytest fixtures, however.
 * *finalize_script*: an optional script that is run after pytest execution on a remote host, to tear down the
   test environment if needed.  The recommendation is to make use of pytest fixtures, however.
 
+The information provided must be complete to run tests in isolation, without reference to any other local files as
+such files will most likely not be available on remote nodes.   Note that any requirements that are installed are
+cached so that after first execution, the overhead of *pip install* will be minimal.
+
 Project configurations are specified in a file with the path to that file specified on the command line via
-the *--project_structure* command line option, or if not provided and *project.cfg" file exists in the current
-working directory of test execution, that file will be used.  If you specify a remote hosts configuration
-for automated distribute execution, the project conbifuration file is required to tell *pytest_mproc* how
-to bundle the necessary items to send to the remote hosts.
+the *--project_structure* command line option.  Optionally, if not provided and *ptmproc_project.cfg" file
+exists in the current working directory of test execution, that file will be used.
+
+.. caution::
+   All paths specified in the project configuration file must be relative to the configuration file itself,
+   and should be at or below the directory level of the configuration file
+
+Any SSH configuration can be specified programatically if desired.  This allows for a common ssh username or
+credentials specification that is common to remote nodes, so that they need not be specified repeatedly on
+command line, for example.  Passwordless ssh with proper authentication key set up is preferred, althgouh a
+mechanidm to retrieve secrets securely, such as an ssh password, works as well.  The following python functions
+provide the API for SSH configuration:
+
+.. code-block:: python
+   pytest_mproc.Settings.set_ssh_credentials(username, optional_password)
+
+
+Directories where items are cahced (e.g., any test requirements installed on a per-project-name basis) as well
+as the temp directory where bundles are deployed can also be specified, assuming the diectories are common
+across all worker nodes:
+
+.. code-block:: python
+   fromt pathlib import Path
+   pytest_mproc.Settings.set_cached_dir(Path("/common/path/to/cache_dir/on/remote/nodes"))
+   pytest_mproc.Settings.set_tmp_root(Path("/common/path/to/cache_dir/on/remote/nodes"))
+
+Remote Hosts Specification
+..........................
 
 The remote hosts configuration is specified on the command line through the *--remote-worker* command line option.
-The value of this option can be
+The value of this option can take several forms:
 
 * a fixed host specification in the form of "<host>[:<port>];optoin1=value1;...";  the option/value pair can be
   repeated to specify multiple remote clients
-* a file with line-by-line JSON content specifying the remote host/port and options as specified below
-* an http end point that returns the remote host/port and options, again in line-by-line format
+* a file with line-by-line JSON content specifying the remote host/port and options as specified below; the option
+  cannot be repeated
+* an http end point that returns the remote host/port and options, again in line-by-line format.  The option can
+  be repeated to specify backup end points as necessary
 
 When using an http endpoint, *pytest_mproc* will do lazy loading of the response.  This is to cover the case where
-the request to the endpoint is based on a reservation system to reserve resources.  The resource may require
-preparation time before returning a reserved host or resrouce back to the main host, or may only be able to
-return a subset of the requested resources until the other become available.  In this way, *pytest_mproc* can
-start execution on the available resources while waiting for the others to become available (optimized
+the request to the endpoint is based on a reservation system that reserves specific resources.  (One example is
+using pytest to drive device testing of a mobile or smart device.)  The resource may require
+preparation time before returning a resrouce back to the main host, or may only be able to
+return a subset of the requested resources until others become available.  In this way, *pytest_mproc* can
+start execution against the available resources while waiting for the others to become available (optimized
 execution strategy).
 
 The format of the http response or in the file is in a line-by-line JSON format.  For example, if I am using pytest
@@ -421,7 +433,7 @@ to drive execution from remote hosts against attached Android devices, the conte
 
 .. code-block:: json
 
-   {"host": "host.name.or.ip", "arguments": {"device": "ANDROID_DEVICE1", "argument1": "value1"}}
+   {"host": "host.name.or.ip", "arguments": {"device": "ANDROID_DEVICE1", "argument1": "value1", "ENV_VAR": "value1"}}
 
 Arguments that are all upper case names will be passed to the remote host as environment variables.  All others will
 be passed to pytest as command line options in the form "--<option> <value>" and your pytest must be configured
@@ -431,6 +443,23 @@ by *pytest_mproc*:
 the number of cores specified on the main host command line will be used (see below)
 * *jump_host* : if specified, this host:port pair will be used to add a jump host option when invoking ssh against
 the remote host
+
+
+
+If using a web backend, the first line of json should contain the following (with no return characters of course):
+
+.. code-block:: json
+   {"session_id": "unique_sessio_id", "end_url" : "https://url/to/end/session",
+               "heartbeat_url": "https://url/to/provide/a/heartbeat"}
+
+The two optional URLs assume that the reservatio system is session-based and provides a way for *pytest_mproc* to end
+the session, as well as signal that the session is still active. The *heartbeat_url"  is a way for *pytest_mproc" to
+provide a heartbeat to the session/reservation system that the session is still active (to be provided at at least
+a 1Hz rate).  The *end_url* is a way for *pytest_mproc* to signal end of session (allowing the reservation system
+to relinquish any resources back to the system).  Both of these will be invoked as simplet GET requests.
+
+
+
 
 Distributed parallel execution from the command line can then be done through a single invocation:
 

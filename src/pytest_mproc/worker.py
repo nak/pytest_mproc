@@ -62,7 +62,7 @@ class WorkerSession:
         self._ip_addr = get_ip_addr()
         self._pid = os.getpid()
 
-    def _put(self, result: Union[TestStateEnum, ResultType, ResultExit], timeout=None):
+    def _put(self, result: Union[TestStateEnum, ResultType, ResultExit, ClientDied], timeout=None):
         """
         Append test result data to queue, flushing buffered results to queue at watermark level for efficiency
 
@@ -70,7 +70,7 @@ class WorkerSession:
         :param timeout: timeout after this many seconds, if specified
         :raises: TimeoutError is not executed in time
         """
-        if isinstance(result, ResultExit):
+        if isinstance(result, (ResultExit, ClientDied)):
             self._result_q.put(result)
         else:
             self._buffered_results.append(result)
@@ -290,8 +290,9 @@ def main():
         errored = True
         msg = f"Worker {get_ip_addr()}-{os.getpid()} died with exception {e}\n {traceback.format_exc()}"
         os.write(sys.stderr.fileno(), msg.encode('utf-8'))
-    finally:
         result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
+    finally:
+        mgr.completed(get_ip_addr(), os.getpid())
         with suppress(Exception):
             Node.Manager.shutdown()
     return status
