@@ -606,7 +606,7 @@ class Orchestrator:
                 if self._orch_manager.count() <= 0:
                     break
                 result_batch = await self._results_q.get()
-            # process stragglers left in results queue
+            # process stragglers left in results queu
             try:
                 result_batch = self._results_q.get_nowait()
                 while result_batch:

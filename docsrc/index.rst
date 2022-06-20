@@ -21,9 +21,6 @@ Introduction
 Welcome to *pytest_mproc*, a plugin for pytest to run distributed testing via multiprocessing.  This manner
 of distributed testing has several advantages, including more efficient execution over pytest-xdist in many cases.
 
-xdist works for cases perhaps where there are large number of tests, but the cost of overhead in using rsync and
-overall implementation prevents realization of test-execution-time gains that one might hope for.
-
 To begin using pytest_mproc, just install:
 
 % pip install pytest-mproc
@@ -34,9 +31,14 @@ set of machines.
 Why Use *pytest_mproc* over *pytest-xdist*?
 ===========================================
 
+Why not just use *xdist*, another parallelization mechanism for test execution? *xdist* works for cases perhaps
+where there are large number of tests, but the cost of overhead in using rsync and
+overall implementation prevents realization of test-execution-time gains that one might hope for.  *xdist* also
+does not provide a way to run distributed on multiple machines
+
 *pytest_mproc* has several advantages over xdist, depending on your situation:
 
-* Overhead furing startup is much less, and start-up time does not grow with increasing number of cores as in xdist
+* Overhead firing startup is much less, and start-up time does not grow with increasing number of cores as in xdist
 * It uses a pull model, so that each worker pulls the next test from a master queue, with no need to figure
   out how to divide the tests beforehand.  The disadvantage is that optimal efficiency requires knowledge to
   prioritize longer running tests first.
@@ -59,7 +61,8 @@ or to specify use of all available cores:
 
 % pytest --cores auto [remaining arguments]
 
-You can also specify things like "auto*2" or "auto/2" for number of cores.
+You can also specify things like "auto*2" or "auto/2" for number of cores.  This is all that is needed
+to get started with the minimal configuration for *pytest_mproc* -- running tests on multiple cores on a single machine.
 
 .. caution::
    Oversubscribing CPUs will cause additional overhead.  *pytest_mproc* kicks off all worker threads up front, and
@@ -68,27 +71,26 @@ You can also specify things like "auto*2" or "auto/2" for number of cores.
    additional (partial) batch will add more overhead, as the CPU must be split across multiple threads for some or all
    cores.
 
+When going beyond the simple one-machin parallelization, certain terminology is used.  The term 'node' is used to
+refer to a single machine within a group of machines (over which execution is distributed).  The term 'main node'
+refers to the orchestrator of the tests, responsible for overseeing test execution and reporting results to the
+user.  The term 'worker' is used to specify a single process running on a node that is doing the actual test
+execution.  The main node can distrbitue tests acros multiple other nodes, with multiple worker processes executing
+within each node.
+
 Disabling *pytest_mproc* from Command Line
-==========================================
+------------------------------------------
 
 To disable mproc (overriding all other pytest-mproc-related flags), specify "--diable-mproc True" on the command line.
-
-Top-Level Command Line Configuration Options
-============================================
-
-Aside from specifying the number of cores, the user can optionally specify the maximum number of active connections
-allowed during distributed processing.  The *multiprocessing* module can get bogged down and dwell on one thread or
-even deadlock when too many connection requests are made at one time to the main process.  To alleviate this,
-the number of allowed simultaneous connections is throttled, with a default of 24 maximum connections.  The user can
-over ride this using the *--max-simultanous-connections* option.
+Running without the --cores option will also run as normal, with no invocations of pytest_mproc features.
 
 
 Grouping Tests
 ==============
 
-By default all tests are assumed independently runnable and isolated from one another.  That is the order in which they
-run within which process does not matter.  You may wish to specify a group of tests that must run serially within the
-same process/thread.  To do this, annotate each test using a unique name for the group:
+By default all tests are assumed independently runnable and isolated from one another, and the order in which they
+run within which process does not matter.  To group tests that must run serially within the
+same process/thread, annotate each test using a unique name for the group:
 
 .. code-block:: python
 
@@ -144,8 +146,8 @@ and restrict the group to running within a single worker or withtin a single nod
 Configuring Test Execution of Groups
 ------------------------------------
 
-As discussed below, *pytest_mproc* allows execution across multiple machines/indepenent processes.  There are two
-ways to specify how a group of tests will be executed by using the *restric_to* parameter of the
+As discussed below, *pytest_mproc* allows execution across multiple machines/independent processes.  There are two
+ways to specify how a group of tests will be executed by using the *restrict_to* parameter of the
 *pytest_mproc.group* decorator.  This can take one of two values.
 
 #. *pytest_mproc.TestExecutionConstraint.SINGLE_PROCESS* - this is the default value.  This specifies that the tests
@@ -165,11 +167,11 @@ You can also specify a priority for test execution using the *pytest_mproc.prior
 
    import pytest_mproc
 
-   @pytest.mpro.priority(pytest_mproc.DEFAULT_PRIORITY - 2)
+   @pytest_mproc.priority(pytest_mproc.DEFAULT_PRIORITY - 2)
    def test_function():
       pass
 
-Groups with lower interger priority value are scheduled before those with a higher priority value.  Thus, a
+Groups with lower integer priority value are scheduled before those with a higher priority value.  Thus, a
 group with priority *pytest_mproc.DEFAULT_PRIORITY-1* will be scheduled before a group with priority
 *pytest_mproc.DEFAULT_PRIORITY-2*.  Of course, the default priority of *pytest_mproc.DEFAULT_PRIORITY*  is used if
 unspecified.
@@ -181,18 +183,21 @@ execution order relative to all other top-level tests or test groups. For tests 
 will determine the order of execution only within that group.  *pytest_mproc* does not guarantee order of
 execution for tests or test groups with the same priority.
 
-If you specify a priorty on a class of tests, all test methods within that class will have that priority, unless
+If you specify a priority on a class of tests, all test methods within that class will have that priority, unless
 a specific priority is assigned to that method through its own decorator.  In that class, the decorator for the class
 method is used.
 
 
-A 'global'-ly Scoped Fixture
-============================
+Globally Scoped Fixtures
+========================
 
-As is the case with *pytest_xdist* plugin, *pytest_mproc* uses multiprocessing module to achieve parallel concurrency.
-This raises interesting behaviors about 'session' scoped fixtures.  Each subprocess that is launched will create its own
-session-level fixture;  in other words, you can think of a session as a per-process concept, with one session-level
-fixture per process.  This is often not obvious to test developers. At times, a global fixture is needed, with a
+*pytest_mproc* uses multiprocessing module to achieve parallel concurrency.
+This raises interesting behaviors when using *pytest* and 'session' scoped fixtures.
+For multiple-process execution, Each subprocess that is launched will create its own
+session-level fixture;  in other words,  a session in the context of *pytest* is a per-process concept,
+with one session-level fixture for each process.  'session' becomes a misnomer in *pytest* in this way as the term
+was not conceived with parallelization in mind.  This is often not obvious to test developers.
+At times, a global fixture is needed, with a
 single instantiation across all processes and tests.  An example might be setting up a single test database.
 (NOTE: when running on more than one machine, also see 'node-level' fixtures discussed below)
 
@@ -202,15 +207,6 @@ module's BaseManager to provide this feature.  This is mostly transparent to the
 In order to communicate a fixture globally across multiple *Process* es, the object returned (or yielded) from a
 globally scoped fixture must be 'picklable'.  To declare a fixture global:
 
-
-The global fixture is a level above 'session' in the hierarchy.  That means that globally scoped fixtures can only
-depend on other globally scoped fixtures.
-
-.. warning::
-    Values returned or yielded from a global fixture must be picklable so as to be shared across multiple
-    independent subprocesses.
-
-
 .. code-block:: python
 
    import pytest
@@ -219,7 +215,14 @@ depend on other globally scoped fixtures.
    def globally_scoped_fixture()
        ...
 
-Global fixtures can be passed any keyword args supported by pytest.fixture EXCEOT autouse.
+The global fixture is the highest level above 'session' in the hierarchy.  That means that globally scoped fixtures can only
+depend on other globally scoped fixtures.
+
+.. warning::
+    Values returned or yielded from a global fixture must be picklable so as to be shared across multiple
+    independent subprocesses.
+
+Global fixtures can be passed any keyword args supported by *pytest.fixture* EXCEPT autouse.
 
 *pytest_mproc* guarantees that all fixtures are in place before worker clients in other processes access them, so as
 not to cause a race condition.
@@ -229,7 +232,7 @@ Node-scoped Fixtures
 
 With the system now allowing execution of multiple workers on a single machine, and execution across multiple machines,
 this introduces another level of scoping of fixtures:  *node*-scoped fixtures.  A node-level fixture is
-instantiated once per node and such instance is only available to workers (aka all test processes) on that node.
+instantiated once per node and such instance is only available to workers (aka all test processes) on that specific node.
 
 To declare a fixture to be scoped to a node, which declares the optional autouse:
 
@@ -265,8 +268,8 @@ Advanced: Testing on a Distributed Set of Machines
 *pytest_mproc* has support for running test distributed across multiple machines.
 
 .. caution::
-   You should validate that your tests run as exected before running distributed, as common errors will be
-   replicated and shown in the output for all workers.
+   You should validate that your test code does not have any top-level errors before running distributed,
+   as common errors will be replicated and shown in the output for all workers, potentially overwhelming the log.
 
 The concept is that one node will act as the main node, which is what the user launches to start the tests. That
 node populates the queue of tets, and collects and reports test status. The other nodes are worker nodes (either
@@ -278,20 +281,20 @@ A worker is a single process that is pulling the tests, executing each one and r
 Complexities of Distributed Execution
 -------------------------------------
 
-*pytest_mproc* requires a main server to handle the creation of a test and result queue and control artifacts in
-order to orchestrate test execution.  The machine that this server runs on must allow incoming connections.  There
-are options for where this server can run.  The machine hosting the main process (where the tester kicks off the
+*pytest_mproc* requires a common server to handle the creation of a test and result queue and control elements, used
+to orchestrate test execution.  The machine that this server runs on must allow incoming connections.  There
+are options for where this server can run.  The node hosting the main process (where the tester kicks off the
 tests) is indeed one such option. However, for a tester running on a laptop testing across a cloud of device
 (as an example), it is unlikely that the nodes in the cloud will be able to call into the tester's laptop.  Firewall
-restrictions will undougtedly prevent this.   So, understand the nature of the system you are using for
+restrictions will undoubtedly prevent this.   Understand the nature of the system you are using for
 distributed testing.
 
-Automated distributed testing, *pytest_mproc* uses ssh to deploy and execute remote worker tasks.  The test infrasrtcuture
+Automated distributed testing, *pytest_mproc* uses ssh to deploy and execute remote worker tasks.  The test infrastructure
 must therefore provide ssh access (passwordless) into the remote nodes.  A configuration file must also be defined
 to define the structure of the bundle to be deployed to the worker nodes (discussed later).
 
-Inter-process communication is secure and requires a common authentication token.  For manual deploymen to workers,
-this token must be shared across all nodes.  Such sharing is up to the user to implement and must provide a
+Inter-process communication is secure and requires a common authentication token.  For manual deployment to workers,
+this token must be shared across all nodes.  Such sharing is up to the user to implement and can be achieved through a
 callback to retrieve the authentication token:
 
 .. code-block:: python
@@ -345,7 +348,7 @@ Of course,  multiple worker nodes can be used as well. Each worker will attempt 
 to the main  node for a period of 30 seconds at which point it gives up and exits with na error.
 
 Automate Distributed Execution
-------------------------------
+==============================
 
 *pytest_mproc* supports automated deployment and execution on a set of remote worker machines.  This requires a method
 to determine the remote hosts (and parameters associated with those hosts as needd) as well as a definition
@@ -353,7 +356,7 @@ of the project structure to bundle and deploy to remote host machines.
 Deployments and execution are conducted vis *ssh* and any port referenced in options is the *ssh* port to be used.
 
 One-time Setup
-..............
+--------------
 
 Project definition consists of defining a set of properties in a config file in JSON format:
 
@@ -388,30 +391,31 @@ exists in the current working directory of test execution, that file will be use
    All paths specified in the project configuration file must be relative to the configuration file itself,
    and should be at or below the directory level of the configuration file
 
-Any SSH configuration can be specified programatically if desired.  This allows for a common ssh username or
+Any SSH configuration can be specified programmatically if desired.  This allows for a common ssh username or
 credentials specification that is common to remote nodes, so that they need not be specified repeatedly on
-command line, for example.  Passwordless ssh with proper authentication key set up is preferred, althgouh a
-mechanidm to retrieve secrets securely, such as an ssh password, works as well.  The following python functions
+command line, for example.  Passwordless ssh with proper authentication key set up is preferred, although a
+mechanism to retrieve secrets securely, such as an ssh password, works as well.  The following python functions
 provide the API for SSH configuration:
 
 .. code-block:: python
    pytest_mproc.Settings.set_ssh_credentials(username, optional_password)
 
 
-Directories where items are cahced (e.g., any test requirements installed on a per-project-name basis) as well
-as the temp directory where bundles are deployed can also be specified, assuming the diectories are common
-across all worker nodes:
+Directories for caching  (e.g., where any test requirements are installed on a per-project-name basis peristently)
+as well as the temp directory where bundles are deployed can also be specified, can be configured:
 
 .. code-block:: python
    fromt pathlib import Path
    pytest_mproc.Settings.set_cached_dir(Path("/common/path/to/cache_dir/on/remote/nodes"))
    pytest_mproc.Settings.set_tmp_root(Path("/common/path/to/cache_dir/on/remote/nodes"))
 
-Remote Hosts Specification
-..........................
+These will be common across all nodes, and thus all nodes must support the directory configuration.
 
-The remote hosts configuration is specified on the command line through the *--remote-worker* command line option.
-The value of this option can take several forms:
+Remote Hosts Specification
+--------------------------
+
+The remote hosts configuration (which nodes the tests execute) is specified on the command line through
+the *--remote-worker* command line option. The value of this option can take several forms:
 
 * a fixed host specification in the form of "<host>[:<port>];optoin1=value1;...";  the option/value pair can be
   repeated to specify multiple remote clients
@@ -420,13 +424,7 @@ The value of this option can take several forms:
 * an http end point that returns the remote host/port and options, again in line-by-line format.  The option can
   be repeated to specify backup end points as necessary
 
-When using an http endpoint, *pytest_mproc* will do lazy loading of the response.  This is to cover the case where
-the request to the endpoint is based on a reservation system that reserves specific resources.  (One example is
-using pytest to drive device testing of a mobile or smart device.)  The resource may require
-preparation time before returning a resrouce back to the main host, or may only be able to
-return a subset of the requested resources until others become available.  In this way, *pytest_mproc* can
-start execution against the available resources while waiting for the others to become available (optimized
-execution strategy).
+Use of a server for managin a cloud of resources is discussed in more detail below.
 
 The format of the http response or in the file is in a line-by-line JSON format.  For example, if I am using pytest
 to drive execution from remote hosts against attached Android devices, the content might look like:
@@ -444,13 +442,30 @@ the number of cores specified on the main host command line will be used (see be
 * *jump_host* : if specified, this host:port pair will be used to add a jump host option when invoking ssh against
 the remote host
 
+Interface *pytest_mproc* with a Cloud
+.....................................
 
+Hard-coding worker node ip addresses in a file or on a command line is not ideal.  Although it provides a
+brut-force method for ensuring viability of distributed testing without much setup, a more dynamic alternative
+is needed in most cases.  *pytest_mproc* provides an interface to interact with an externally developed
+http (micro) service as proxy for access into a cloud.  Reservation of resources (and relinquishing those
+resources when testing ends) is achieved by exercising this REST-ful interface.
+
+
+
+When using an http endpoint, *pytest_mproc* will do lazy loading of the response.  This is to cover the case where
+the request to the endpoint is based on a reservation system that reserves specific resources.  (One example is
+using pytest to drive device testing of a mobile or smart device.)  The resource may require
+preparation time before returning a resrouce back to the main host, or may only be able to
+return a subset of the requested resources until others become available.  In this way, *pytest_mproc* can
+start execution against the available resources while waiting for the others to become available (optimized
+execution strategy).
 
 If using a web backend, the first line of json should contain the following (with no return characters of course):
 
 .. code-block:: json
-   {"session_id": "unique_sessio_id", "end_url" : "https://url/to/end/session",
-               "heartbeat_url": "https://url/to/provide/a/heartbeat"}
+   {"session_id": "unique_sessio_id", "end_session_url" : "https://url/to/end/session",
+    "start_session_url": "https://url/to/start/session", "heartbeat_url": "https://url/to/provide/a/heartbeat"}
 
 The two optional URLs assume that the reservatio system is session-based and provides a way for *pytest_mproc* to end
 the session, as well as signal that the session is still active. The *heartbeat_url"  is a way for *pytest_mproc" to
@@ -459,7 +474,8 @@ a 1Hz rate).  The *end_url* is a way for *pytest_mproc* to signal end of session
 to relinquish any resources back to the system).  Both of these will be invoked as simplet GET requests.
 
 
-
+Running the Main CLI
+....................
 
 Distributed parallel execution from the command line can then be done through a single invocation:
 
