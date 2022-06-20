@@ -282,6 +282,12 @@ class Bundle:
         await ssh_client.push(local_path=root / 'pytest_mproc' / 'remote' / '*.py',
                               remote_path=remote_root / 'site-packages' / 'pytest_mproc' / 'remote' / '.')
         self._site_pkgs = (ssh_client, remote_root / 'site-packages')
+        await ssh_client.install_packages(
+            'pytest', 'pytest_mproc',
+            venv=remote_venv,
+            cwd=remote_venv.parent,
+            stdout=sys.stdout,
+            stderr=sys.stderr)
         python = str(remote_venv / 'bin' / 'python3')
         python_path = os.environ.get('PYTHONPATH') or ''
         python_path = f"{str(remote_root / 'site-packages')}:{python_path}" if python_path \
@@ -590,11 +596,13 @@ class Bundle:
                                        deploy_timeout: Optional[float] = FIFTEEN_MINUTES,
                                        timeout: Optional[float] = None,
                                        remote_root: Optional[Path] = None,
+                                       project_name: str,
                                        env: Optional[Dict[str, str]] = None,
                                        ) -> AsyncGenerator[str, str]:
         ssh_client = SSHClient(host=host, username=username, password=password)
         env = env or {}
-        async with remote_root_context(ssh_client, remote_root) as (remote_root, remote_venv_root):
+        async with remote_root_context(project_name=project_name, ssh_client=ssh_client,
+                                       remote_root=remote_root) as (remote_root, remote_venv_root):
             if "PYTHONPATH" in env:
                 env["PYTHONPATH"] = str(remote_root / 'site-packages') + ':' + env["PYTHONPATH"]
             else:

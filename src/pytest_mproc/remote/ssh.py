@@ -97,7 +97,7 @@ class SSHClient:
             command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
         command = command.replace('"', '\\\"')
         full_cmd = f"ssh {self.destination} {' '.join(self._global_options)} \"{command}\""
-        debug_print(f"Executing command '{full_cmd}'")
+        debug_print(f"Executing command '%s'", full_cmd)
         if shell:
             result = await asyncio.subprocess.create_subprocess_shell(
                 full_cmd,
@@ -429,8 +429,8 @@ class SSHClient:
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
-        args = [shlex.quote(arg) if '*' not in arg else arg for arg in args]
-        full_command = command + ' ' + ' '.join(args)
+        args = [shlex.quote(str(arg)) if '*' not in arg else arg for arg in args]
+        full_command = str(command) + ' ' + ' '.join(args)
         result = await self._remote_execute(
             full_command,
             stdin=stdin,

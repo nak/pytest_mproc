@@ -16,9 +16,7 @@ from pathlib import Path
 
 import pytest_mproc
 from pytest_mproc import find_free_port
-from pytest_mproc.main import RemoteSession
-from pytest_mproc.orchestration import OrchestrationManager
-from pytest_mproc.ptmproc_data import RemoteWorkerConfig, ProjectConfig
+from pytest_mproc.ptmproc_data import ProjectConfig
 
 from pytest_mproc.remote.bundle import Bundle
 from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
@@ -33,7 +31,7 @@ class TestSSHClient:
 
     @pytest.mark.asyncio
     async def test_mkdtmp(self):
-        ssh_client = SSHClient(socket.gethostbyname(socket.gethostname()))
+        ssh_client = SSHClient(host='localhost')
         async with ssh_client.mkdtemp() as tmpdir:
             assert Path(tmpdir).exists()  # this is localhost after all
         assert not Path(tmpdir).exists()
@@ -57,11 +55,12 @@ def bundle(tmpdir_factory):
 
 @pytest.mark.skipif(not ssh_pswdless, reason="No permission to ssh to localhost without password input")
 @pytest.mark.asyncio
-async def test_execute_bundle(bundle):
+async def test_execute_bundle(bundle, tmp_path):
     lines = []
     try:
         async for line in bundle.monitor_remote_execution("localhost", ".", "-k", "alg1", timeout=100,
-                                                          env=dict(os.environ)):
+                                                          env=dict(os.environ), project_name="test",
+                                                          remote_root=tmp_path):
             lines.append(line)
             print(line)
     except CommandExecutionFailure:

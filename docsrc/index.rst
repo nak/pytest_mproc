@@ -45,7 +45,7 @@ does not provide a way to run distributed on multiple machines
 * It provides a 'global' scoped test fixture to provide a single instance of a fixture across all tests, regardless of
   how many nodes.
 * It provide a 'node' scoped test fixture that is a single instance across all workers on a single machine (node)
-* It allows you to programatically group together a bunch of tests to run serially on a single worker process
+* It allows you to programmatically group together a bunch of tests to run serially on a single worker process
 * Support for execution across multiple machines
 * It provides a better mechanism for prioritizing and configuring test execution
 
@@ -53,7 +53,7 @@ does not provide a way to run distributed on multiple machines
 Usage
 =====
 
-To use with pytest, you use the -C or equivalently --cores argument to specify how many cores to run on:
+To use with pytest, you use the --cores argument to specify how many cores to run on:
 
 % pytest --cores 3 [remaining arguments]
 
@@ -75,7 +75,7 @@ When going beyond the simple one-machin parallelization, certain terminology is 
 refer to a single machine within a group of machines (over which execution is distributed).  The term 'main node'
 refers to the orchestrator of the tests, responsible for overseeing test execution and reporting results to the
 user.  The term 'worker' is used to specify a single process running on a node that is doing the actual test
-execution.  The main node can distrbitue tests acros multiple other nodes, with multiple worker processes executing
+execution.  The main node can distribute tests across multiple other nodes, with multiple worker processes executing
 within each node.
 
 Disabling *pytest_mproc* from Command Line
@@ -125,7 +125,7 @@ This is useful if the tests are using a common resource for testing and parallel
 result in interference.
 
 Groups can also be specified as class *pytest_mproc.data.GroupTag* instead of a string, to prioritize the whole group
-and restrict the group to running within a single worker or withtin a single node machine:
+and restrict the group to running within a single worker or within a single node machine:
 
 .. code-block:: python
 
@@ -355,8 +355,8 @@ to determine the remote hosts (and parameters associated with those hosts as nee
 of the project structure to bundle and deploy to remote host machines.
 Deployments and execution are conducted vis *ssh* and any port referenced in options is the *ssh* port to be used.
 
-One-time Setup
---------------
+One-time Per-Project Setup
+--------------------------
 
 Project definition consists of defining a set of properties in a config file in JSON format:
 
@@ -456,23 +456,56 @@ resources when testing ends) is achieved by exercising this REST-ful interface.
 When using an http endpoint, *pytest_mproc* will do lazy loading of the response.  This is to cover the case where
 the request to the endpoint is based on a reservation system that reserves specific resources.  (One example is
 using pytest to drive device testing of a mobile or smart device.)  The resource may require
-preparation time before returning a resrouce back to the main host, or may only be able to
+preparation time before returning a resource back to the main host, or may only be able to
 return a subset of the requested resources until others become available.  In this way, *pytest_mproc* can
 start execution against the available resources while waiting for the others to become available (optimized
-execution strategy).
+execution strategy).  All URLs used by *pytest_mproc* are GET requests.
 
-If using a web backend, the first line of json should contain the following (with no return characters of course):
+The REST interface is provided through 4 URLs.  The process used by *pytest_mproc* is
+
+#. user specifies *--remote-worker* option with the first URL, which should create a session and return a session id
+#. The response to this will contain the session id as well as three URLs, on for starting the session, which reserves
+   the necessary resource, a URL to end the session, and a URL to provide a 1Hz heartbeat while the session is active
+#. *pytest_mproc* calls the start-session URL which reserves the resources, the http server responds with the
+   remote host configurations (streamed preferably)
+#. *pytest_mproc* starts a 1Hz heartbeat that invokes the heartbeat URL each; failure by the http server to receive
+   a heartbeat will terminate the session
+#. *pytest_mproc* calls the end-session URL once testing is complete
+
+
+To this end the webserver must provide
+
+An initial URL to start a session, which should contain parameters on the number and even type of resources to be
+reserved.  (*pytest_mproc* does not carry about the details).  This should start a stateful session that
+retains the parameters.  The format of the response should contain optionally a session id (for bookkeeping only),
+and the three urls as described above:
 
 .. code-block:: json
-   {"session_id": "unique_sessio_id", "end_session_url" : "https://url/to/end/session",
+   {"session_id": "unique_session_id", "end_session_url" : "https://url/to/end/session",
     "start_session_url": "https://url/to/start/session", "heartbeat_url": "https://url/to/provide/a/heartbeat"}
 
-The two optional URLs assume that the reservatio system is session-based and provides a way for *pytest_mproc* to end
-the session, as well as signal that the session is still active. The *heartbeat_url"  is a way for *pytest_mproc" to
-provide a heartbeat to the session/reservation system that the session is still active (to be provided at at least
-a 1Hz rate).  The *end_url* is a way for *pytest_mproc* to signal end of session (allowing the reservation system
-to relinquish any resources back to the system).  Both of these will be invoked as simplet GET requests.
+The http server must support invocation of the three urls.  For the start-session, the http server should
+provide line-by-line json response with same format as for the file protocol above, with the only difference
+that a trailing '\n' must be provided:
 
+
+.. code-block:: json
+
+   {"host": "host.name.or.ip", "arguments": {"device": "ANDROID_DEVICE1", "argument1": "value1", "ENV_VAR": "value1"}}\n
+   {"host": "host2.name.or.ip", "arguments": {"device": "ANDROID_DEVICE2", "argument1": "value2", "ENV_VAR": "value2"}}\n
+   ...
+
+Preferably the http server will stream these as they become available.  The response (e.g., the number of host configs)
+returned is dictated by the initial URL parameters.   *pytest_mproc* does not care about the arguments other than
+transforming them into environment vars or command line options per the above discussion for file protocol.
+
+On start of session, the http server shoudl create a task that runs every two seconds that will terminate if the *pytest_mproc* client does
+not call the heartbeat URL within 2 seconds, otherwise cancel and then reschedule that task.
+
+When end-of-session is invoked, it terminates the session and relinquishes all resources back to the system.
+
+Presumably, the URLs will contain a session id parameter to identify the session to act upon, as the system will
+most likely support multiple session/users.
 
 Running the Main CLI
 ....................
@@ -481,27 +514,19 @@ Distributed parallel execution from the command line can then be done through a 
 
 .. code-block:: bash
 
-    % pytest --as-main", <server_host>:<server_port> --cores 1 -k alg2 --project_structure path/to/project.cfg --remote-worker https://some.endpoint.com/reserver?count=5"
+    % pytest --as-main", <protocol>://<as-socumented-above> --cores 1 -k alg2  --remote-worker https://some.endpoint.com/reserver?count=5"
 
-Note that pytest options not specific to pytest_mproc itself are passed along to the client workers (in this case,
-the "-k ale2" is pass along).  The "--cores" option is also passed to the worker client and ignores from the
-main server process (aka the main server process that is launched through this command will not execute any
-worker threads, leaving all work up to the remote clients).  If "cores" is a part of the options provided for
-a remote host as part of its configuration (as described above), it will override the value from this command line
-invocation.
-
-Breaking this down, lets say we are testing against Android devices on remote hosts and the https endpoint returns:
-
-.. code-block:: json
-
-    {"host": "host.name.or.ip1", "arguments": {"DEVICE_SERIAL": "Z02348FHJ", "default_orientation": "landscape"}}
-    {"host": "host.name.or.ip2", "arguments": {"DEVICE_SERIAL": "Z0B983HH1", "default_orientation": "portrait"}}
+This assumes running from a directory containing the *ptmproc_project.cfg* file.  The "--as-main" is actually optional
+and will default to value of "delegated://" (implying orchestration server is delegated to the first worker node,
+and that either an ssh user name is not needed or is configured programmatically).  All non-*pytest_mproc* arguments
+will be passed to worker nodes.
 
 Then the above command on the server will:
 
 #. collect all test cases to be executed (pytest functionality)
 #. populate a test queue for workers to pull from with these cases
 #. in parallel, bundle, deploy and execute pytest on the worker threads
+#. Start the orchestration manager per protocol specified
 
 Each worker host will:
 
@@ -512,8 +537,15 @@ Each worker host will:
 #. each worker thread start a test loop that pulls each test from the main test queue and executes each test until
    the queue is exhausted
 
-If --cores were specified as 4, then each worker host would launch with 4 parallel worker threads, unless
-the https endpoint provided a "cores" option with a different value as an override.
+The orchestration manager in the backgroun will:
+
+#. maintain a test_queue that the main process populates and the workers pull from
+#. maintain a results_queue that the workers populate with test results and stats, and the main node pulls from
+#. maintains control semaphores and such for proper shutdown
+
+If --cores were specified as 4, then each worker host would launch with 4 parallel worker threads (unless
+the https endpoint provided a "cores" option with a different value as an override as part of the start-session
+of a host config response).
 
 Configuration
 -------------
