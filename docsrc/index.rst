@@ -405,7 +405,7 @@ Directories for caching  (e.g., where any test requirements are installed on a p
 as well as the temp directory where bundles are deployed can also be specified, can be configured:
 
 .. code-block:: python
-   fromt pathlib import Path
+   from pathlib import Path
    pytest_mproc.Settings.set_cached_dir(Path("/common/path/to/cache_dir/on/remote/nodes"))
    pytest_mproc.Settings.set_tmp_root(Path("/common/path/to/cache_dir/on/remote/nodes"))
 

@@ -25,7 +25,6 @@ def debug_print(msg: str, *args):
     :param args: args for format string if required
     """
     global verbose
-    verbose = True
     if verbose:
         msg = f"[{get_ip_addr()}] {msg}"
         print(msg % args)

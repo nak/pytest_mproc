@@ -17,6 +17,7 @@ from pytest_mproc.data import AllClientsCompleted, ClientDied, TestBatch, Result
 from pytest_mproc.main import RemoteSession, Orchestrator
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
+from pytest_mproc.user_output import always_print
 
 
 @pytest.fixture()
@@ -98,6 +99,7 @@ def test_one():
     cwd = os.getcwd()
     test_q = mgr.get_test_queue()
     await test_q.put(None)
+    mgr.signal_all_tests_sent()
     argv = sys.argv
     assert project_config.project_root.exists()
     task = None
@@ -107,18 +109,21 @@ def test_one():
         await host_q.put(RemoteWorkerConfig(remote_host='localhost', arguments={}))
         await host_q.put(None)
 
-        async def go():
-            async with remote_session.start_workers(server='localhost', server_port=8734,
-                                                    hosts_q=host_q, timeout=10, deploy_timeout=10,
-                                                    ) as port:
-                assert port == -1  # no delegate set
-
-        task = asyncio.create_task(go())
-
         result_q = OrchestrationManager.create(uri="local://localhost:8734", as_client=True,
                                                project_name="test").get_results_queue()
-        result_q = result_q
-        r = await asyncio.wait_for(result_q.get(), timeout=140)
+
+        async def go():
+            try:
+                async with remote_session.start_workers(server='localhost', server_port=8734,
+                                                        hosts_q=host_q, timeout=10, deploy_timeout=10,
+                                                        ) as port:
+                    assert port == (-1, -1)  # no delegate set
+            except Empty as e:
+                await result_q.put(e)
+                mgr.shutdown()
+                pytest.fail(f"Exception in start workers {e}")
+        task = asyncio.create_task(go())
+        r = await asyncio.wait_for(result_q.get(), timeout=10)
         while True:
             assert type(r) in (ClientDied, AllClientsCompleted, ResultExit)
             if type(r) == AllClientsCompleted:
