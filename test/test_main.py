@@ -123,7 +123,7 @@ def test_one():
                 mgr.shutdown()
                 pytest.fail(f"Exception in start workers {e}")
         task = asyncio.create_task(go())
-        r = await asyncio.wait_for(result_q.get(), timeout=10)
+        r = await asyncio.wait_for(result_q.get(), timeout=20)
         while True:
             assert type(r) in (ClientDied, AllClientsCompleted, ResultExit)
             if type(r) == AllClientsCompleted:
