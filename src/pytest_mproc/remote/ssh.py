@@ -508,7 +508,12 @@ async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_r
         proc = await ssh_client.execute_remote_cmd('echo \${HOME}', stdout=asyncio.subprocess.PIPE, shell=True)
         stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
         if proc.returncode != 0 or not stdout_text:
-            cache_path = remote_root
+            proc = await ssh_client.execute_remote_cmd('pwd', stdout=asyncio.subprocess.PIPE, shell=True)
+            stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
+            if proc.returncode != 0 or not stdout_text:
+                cache_path = remote_root
+            else:
+                cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
         else:
             cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
     else:
