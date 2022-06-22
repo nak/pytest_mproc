@@ -22,7 +22,7 @@ from pytest_mproc.data import (
     ResourceUtilization,
     TestBatch,
     TestState,
-    TestStateEnum,
+    TestStateEnum, ReportStarted, ReportFinished,
 )
 from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
 from pytest_mproc.fixtures import Global
@@ -62,10 +62,10 @@ class WorkerSession:
         self._ip_addr = get_ip_addr()
         self._pid = os.getpid()
 
-    def _put(self, result: Union[TestStateEnum, ResultType, ResultExit, ClientDied], timeout=None):
+    def _put(self, result: Union[TestStateEnum, ResultType, ResultExit, ClientDied,
+                                 ReportStarted, ReportFinished], timeout=None):
         """
         Append test result data to queue, flushing buffered results to queue at watermark level for efficiency
-
         :param result: test result data
         :param timeout: timeout after this many seconds, if specified
         :raises: TimeoutError is not executed in time
@@ -96,7 +96,6 @@ class WorkerSession:
         This is where the action takes place.  We override the usual implementation since
         that doesn't support a dynamic generation of tests (whose source is the test Queue
         that it draws from to pick out the next test)
-
         :param session:  Where the tests generator is kept
         """
         # global my_cov
@@ -121,7 +120,9 @@ class WorkerSession:
                     item = session._named_items[bare_test_id]
                     self._put(TestState(TestStateEnum.STARTED, self._this_host, self._pid, test_id, test_batch))
                     try:
+                        self.pytest_runtest_logstart(item.nodeid, item.location)
                         item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
+                        self.pytest_runtest_logfinish(item.nodeid, item.location)
                     except TestError:
                         has_error = True
                         self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id, test_batch))
@@ -161,9 +162,7 @@ class WorkerSession:
         Invoked once pytest has collected all information about which tests to run.
         Those items are squirrelled away in a different attributes, and a generator
         is put in its place to draw from.
-
         :param session: the pytest session
-
         :return: the generator of tests to run
         """
         assert self._test_q is not None
@@ -208,6 +207,14 @@ class WorkerSession:
 
     def pytest_internalerror(self, __excrepr):
         self._put(ResultException(SystemError("Internal pytest error")))
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_logstart(self, nodeid, location):
+        self._put(ReportStarted(nodeid, location))
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_logfinish(self, nodeid, location):
+        self._put(ReportFinished(nodeid, location))
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_logreport(self, report):
@@ -277,8 +284,6 @@ def main():
                            result_q=result_q,
                            )
     WorkerSession.set_singleton(worker)
-    errored = False
-    msg = None
     assert WorkerSession.singleton() is not None
     status = None
     # noinspection PyBroadException

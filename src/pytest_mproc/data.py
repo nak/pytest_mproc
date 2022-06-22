@@ -119,4 +119,16 @@ class GroupTag:
         return self.name.__hash__()
 
 
+@dataclass
+class ReportStarted:
+    nodeid: str
+    location: str
+
+
+@dataclass
+class ReportFinished:
+    nodeid: str
+    location: str
+
+
 ResultType = Union[TestState, ResultException, ResultExit, ResourceUtilization, ResultTestStatus]

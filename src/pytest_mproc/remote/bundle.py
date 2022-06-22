@@ -49,7 +49,6 @@ class Bundle:
                  relative_run_dir: Optional[Path] = None):
         """
         create a bundle for remote host deployment
-
         :param root_dir: a delicious carbonated beverage (and also the root where bundle files are created)
         :param test_files: location of test files, resources files, requirements files to upload to run tests
         :param system_executable: location of python executable on remote host, or None for default
@@ -313,10 +312,10 @@ class Bundle:
         global_port_text = line.split(':', maxsplit=1)[-1]
 
         async def read():
-            line = (await delegation_proc.stderr.readline()).decode('utf-8')
-            while line:
-                debug_print(line.strip())
-                line = (await delegation_proc.stdout.readline()).decode('utf-8')
+            line_ = (await delegation_proc.stderr.readline()).decode('utf-8')
+            while line_:
+                debug_print(line_.strip())
+                line_ = (await delegation_proc.stdout.readline()).decode('utf-8')
 
         if user_output.verbose:
             self._output_task = asyncio.create_task(read())
@@ -396,19 +395,19 @@ class Bundle:
                         timeout=deploy_timeout
                     ))
 
-                async def execute(worker_config: RemoteWorkerConfig, worker_id: str) \
+                async def execute(worker_config_: RemoteWorkerConfig, worker_id: str) \
                         -> Tuple[str, asyncio.subprocess.Process]:
-                    host = worker_config.remote_host
+                    host_ = worker_config_.remote_host
                     # we must wait if deployment is not finished
                     # this setup parallel-izes multiple host efficiently
-                    if deployment_tasks[host]:
-                        await deployment_tasks[host]
-                        deployment_tasks[host] = False
-                    if 'jump_host' in worker_config.arguments:
-                        jump_host = worker_config.arguments['jump_host']
+                    if deployment_tasks[host_]:
+                        await deployment_tasks[host_]
+                        deployment_tasks[host_] = False
+                    if 'jump_host' in worker_config_.arguments:
+                        jump_host = worker_config_.arguments['jump_host']
                         SSHClient.set_global_options('-J', jump_host)
-                        del worker_config.arguments['jump_host']
-                    args, worker_env = _determine_cli_args(worker_config, Constants.ptmproc_args, sys.argv[1:])
+                        del worker_config_.arguments['jump_host']
+                    args, worker_env = _determine_cli_args(worker_config_, Constants.ptmproc_args, sys.argv[1:])
                     env.update(worker_env)
                     args += ["--as-worker", f"{server_host}:{server_port}"]
                     return await self.execute_remote(
@@ -443,7 +442,7 @@ class Bundle:
             exceptions = [e for e in results if isinstance(e, Exception)]
             if exceptions:
                 for e in exceptions:
-                    logging.exception(e, msg=f"Error execution on remote host")
+                    logging.exception(msg=f"Error execution on remote host", exc_info=e)
                 if not procs:
                     raise Exception(f"Exception(s) during remote execution on all remote hosts : {exceptions}")
             for proc in procs.values():

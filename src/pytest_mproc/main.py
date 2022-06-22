@@ -35,7 +35,7 @@ from pytest_mproc.data import (
     ResultExit,
     TestBatch,
     TestState,
-    TestStateEnum, AllClientsCompleted,
+    TestStateEnum, AllClientsCompleted, ReportStarted, ReportFinished,
 )
 from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
 from pytest_mproc.fixtures import Global
@@ -76,7 +76,6 @@ class RemoteSession:
                  mgr: OrchestrationManager
                  ):
         """
-
         :param project_config: user defined project parameters needed for creating the bundle to send
         :param remote_sys_executable: optional string path to remote executable for Python to use (must version-match)
         :param mgr:
@@ -307,7 +306,6 @@ class Orchestrator:
                                     delegate_q: asyncio.Queue) -> None:
         """
         Given the set of worker configurations, populate a worker queue for the orchestration to run on
-
         :param worker_q: where to put workers as they are received/listed
         :param worker_configs: list or async generator of worker configurations
         :param deploy_timeout: timeout if taking to long
@@ -323,16 +321,16 @@ class Orchestrator:
                         await delegate_q.put(worker_config.remote_host)
             else:
                 async def lazy_distribution():
-                    index = 0
-                    async for worker_config in worker_configs:
-                        if isinstance(worker_config, HTTPSession):
-                            self._http_session = worker_config
+                    index_ = 0
+                    async for worker_config_ in worker_configs:
+                        if isinstance(worker_config_, HTTPSession):
+                            self._http_session = worker_config_
                             continue
-                        if index == 0:
-                            await delegate_q.put(worker_config.remote_host)
-                        index += 1
+                        if index_ == 0:
+                            await delegate_q.put(worker_config_.remote_host)
+                        index_ += 1
                         sem.release()
-                        await worker_q.put(worker_config)
+                        await worker_q.put(worker_config_)
                         if finish_sem.acquire(block=False):
                             break
 
@@ -515,6 +513,10 @@ class Orchestrator:
                 if result.report.when == 'call' or (result.report.when == 'setup' and not result.report.passed):
                     self._count += 1
                 hook.pytest_runtest_logreport(report=result.report)
+            elif isinstance(result, ReportStarted):
+                hook.pytest_runtest_logstart(nodeid=result.nodeid, location=result.location)
+            elif isinstance(result, ReportFinished):
+                hook.pytest_runtest_logfinish(nodeid=result.nodeid, location=result.location)
             elif isinstance(result, ResultExit):
                 # process is complete, so close it and set to None
                 self._exit_results.append(result)
@@ -636,16 +638,17 @@ class Orchestrator:
                     os.write(sys.stderr.fileno(), b"\n>>> at least one worker disconnected or died unexpectedly\n")
         self._orch_manager.signal_all_tests_sent()
 
+    # noinspection PyProtectedMember
     def set_items(self, tests):
         """
         :param tests: the items containing the pytest hooks to the tests to be run
         """
 
         # noinspection PyProtectedMember
-        def priority(test) -> int:
-            tag = getattr(test._pyfuncitem.obj, "_pytest_group", None)
-            tag_priority = tag.priority if tag is not None else DEFAULT_PRIORITY
-            return getattr(test._pyfuncitem.obj, "_pytest_priority", tag_priority)
+        def priority(test_) -> int:
+            tag_ = getattr(test_._pyfuncitem.obj, "_pytest_group", None)
+            tag_priority = tag_.priority if tag_ is not None else DEFAULT_PRIORITY
+            return getattr(test_._pyfuncitem.obj, "_pytest_priority", tag_priority)
 
         grouped = [t for t in tests if getattr(t._pyfuncitem.obj, "_pytest_group", None)
                    or getattr(t._pyfuncitem, "_pytest_group", None)]
