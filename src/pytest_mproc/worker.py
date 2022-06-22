@@ -2,6 +2,9 @@ import os
 import signal
 import subprocess
 import binascii
+from glob import glob
+from pathlib import Path
+
 import pytest
 import resource
 import sys
@@ -17,13 +20,13 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Optional,
+    Tuple,
     Union,
 )
 
 from pytest_mproc.ptmproc_data import ModeEnum
-
 from pytest_mproc.user_output import always_print
-
 from pytest_mproc import TestError, user_output, get_ip_addr, get_auth_key
 from pytest_mproc.data import (
     ClientDied,
@@ -197,17 +200,25 @@ class WorkerSession:
 
     @classmethod
     def start(cls,
+              index: Tuple[int, int],
               orchestration_port: int,
               global_mgr_port: int,
-              executable: str,
               args: List[str],
-              addl_env: Dict[str, str]) -> subprocess.Popen:
+              addl_env: Dict[str, str],
+              root_path: Optional[Path],
+              worker_artifacts_dir: Path,
+              artifacts_root: Path,
+              venv_path: Optional[Path]) -> subprocess.Popen:
         """
+        :param index: worker index unique to host machine
         :param global_mgr_port: (forwarded) localhost port of global manager
         :param orchestration_port: (forwarded) localhost port of orchestration manager
-        :param executable: which executable to run under
         :param args: args to append to pytest process of worker
         :param addl_env: additional environment variables when launching worker
+        :param root_path: remote path where bundle is unpacked, or cwd if None
+        :param worker_artifacts_dir: RELATIVE path for storing artifacts, relative to run dir
+        :param artifacts_root: root artifact path (absolute) for all workers
+        :param venv_path: remote path where virtual environment is installed, ignored if None
         :return: Process created for new worker
         """
         from pytest_mproc.fixtures import Node
@@ -215,20 +226,50 @@ class WorkerSession:
         Node.Manager.singleton()
         env = os.environ.copy()
         env.update(addl_env)
+        if root_path is not None:
+            site_pkgs = root_path / 'site-packages'
+            env['PYTHONPATH'] = str(site_pkgs) if 'PYTHONPATH' not in os.environ\
+                else f"{str(site_pkgs)}:{os.environ['PYTHONPATH']}"
         env.update({
             "PTMPROC_WORKER": "1",
             "AUTH_TOKEN_STDIN": "1",
             'PTMPROC_VERBOSE': '1' if user_output.is_verbose else '0',
-            'PTMPROC_NODE_MGR_PORT': str(Node.Manager.PORT)
+            'PTMPROC_NODE_MGR_PORT': str(Node.Manager.PORT),
         })
-        stdout = sys.stdout if user_output.is_verbose else subprocess.DEVNULL
-        executable = executable or sys.executable
+        executable = str(venv_path / 'bin' / 'python3') if venv_path else sys.executable
+        run_dir = root_path / 'run' / f'Worker-{index[0]}-{index[1]}' \
+            if root_path is not None else Path(os.getcwd()) / 'run' / f'Worker-{index[0]}-{index[1]}'
+        run_dir.mkdir(exist_ok=True, parents=True)
+        main_run_path = root_path / 'run' if root_path and root_path != Path(os.getcwd()) else Path(os.getcwd())
+        files = glob(str(main_run_path / '*'))
+        for f in [Path(f) for f in files if Path(f) != main_run_path]:
+            target = run_dir / f.relative_to(main_run_path)
+            if not target.exists() and not str(target.name).startswith('Worker-') \
+                    and not target.name == worker_artifacts_dir.name:
+                target.symlink_to(f)
+        # this is to create a symlink to a global path structure
+        # to an artifact path relative to run_dir so that runtime sees the relative artifact path
+        # dir it expects, ultimately derived from the relative artifact path in project config
+        worker_artifacts_path = run_dir / worker_artifacts_dir
+        artifacts_path = artifacts_root / f'Worker-{index[0]}-{index[1]}'
+        artifacts_path.mkdir(exist_ok=True, parents=True)
+        assert artifacts_path.is_absolute()
+        if not worker_artifacts_path.exists():
+            with suppress(Exception):
+                worker_artifacts_path.symlink_to(artifacts_path)
+        log = artifacts_path / 'pytest_run.log'
+        stdout = subprocess.DEVNULL if not user_output.is_verbose else sys.stdout
+        stderr = subprocess.STDOUT if user_output.is_verbose else sys.stderr
         proc = subprocess.Popen(
-            [executable, '-m', __name__, str(orchestration_port), str(global_mgr_port), str(Node.Manager.PORT)] + args,
+            f"{executable} -m  {__name__} {orchestration_port} {global_mgr_port} {Node.Manager.PORT} "
+            f"{' '.join(args)} 2>&1 | tee {log}",
             env=env,
             stdout=stdout,
-            stderr=sys.stderr,
-            stdin=subprocess.PIPE)
+            stderr=stderr,
+            stdin=subprocess.PIPE,
+            cwd=str(run_dir),
+            shell=True,
+        )
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.close()
         return proc
@@ -253,7 +294,6 @@ class WorkerSession:
             self._put(ReportFinished(nodeid, location))
         except Exception as e:
             always_print(f"Worker-{self._index} failed to post finish of report: {e}")
-
 
     # noinspection SpellCheckingInspection
     @pytest.hookimpl(tryfirst=True)

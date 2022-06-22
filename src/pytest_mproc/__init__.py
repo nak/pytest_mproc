@@ -1,22 +1,21 @@
 import asyncio
 import multiprocessing
 import time
-from multiprocessing.process import current_process
-from pathlib import Path
-from queue import Empty, Full
-
 import binascii
 import inspect
 import os
 import secrets
 import socket
 import sys
+
 from contextlib import closing
+from dataclasses import dataclass
+from multiprocessing.process import current_process
+from pathlib import Path
+from queue import Empty, Full
 from typing import Union, Callable, Optional, Any, Dict
 
-# to indicate if running as main (host) or not;  set in plugin.py
-from dataclasses import dataclass
-
+from pytest_mproc.data import GroupTag
 
 is_main = '--as-main' in sys.argv or '--remote-worker' in sys.argv
 is_worker = '--as-worker' in sys.argv
@@ -27,10 +26,12 @@ _user_defined_auth: Optional[Callable[[], bytes]] = None
 
 
 def set_user_defined_auth_token(func: Callable[[], bytes]):
+    global _user_defined_auth
     _user_defined_auth = func
 
 
 def set_user_defined_port_alloc(func: Callable[[], int]):
+    global _user_defined_port_alloc
     _user_defined_port_alloc = func
 
 
@@ -122,15 +123,6 @@ def get_ip_addr() -> str:
         return "<<unknown ip address>>"
 
 
-DEFAULT_PRIORITY = 10
-#try:
-from pytest_mproc.data import GroupTag
-#except:
-#    # for orchestrationmanager to be able to come up independently
-#    # TODO: fix this
-#    pass
-
-
 class FatalError(Exception):
     """
     raised to exit pytest immediately
@@ -214,7 +206,7 @@ class AsyncMPQueue:
                 return item
             except Empty:
                 await asyncio.sleep(self.INTERVAL_POLLING)
-            else:
+            finally:
                 await asyncio.sleep(0)
 
     async def put(self, item) -> None:

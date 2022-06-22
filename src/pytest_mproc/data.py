@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Union, Optional
 
-from pytest_mproc import DEFAULT_PRIORITY
+from pytest_mproc.constants import DEFAULT_PRIORITY
 
 # noinspection PyBroadException
 try:

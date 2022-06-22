@@ -1,0 +1,3 @@
+DEFAULT_PRIORITY = 10
+
+ARTIFACTS_ZIP = 'artifacts.zip'

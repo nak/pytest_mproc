@@ -202,7 +202,8 @@ class SSHClient:
                                           f"[scp {' '.join(args)}] \n\n{stdout}\n\n {stderr}\n\n",
                                           rc=rc)
 
-    async def pull(self, remote_path: Path, local_path: Path, recursive: bool = True, timeout: Optional[float] = None):
+    async def pull(self, remote_path: Path, local_path: Path,
+                   recursive: bool = True, timeout: Optional[float] = None) -> None:
         """
         Pull file(s) from remote client
 
@@ -219,6 +220,7 @@ class SSHClient:
             args = ['-p', f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
         args = list(self._global_options) + args
         cmd = f"scp {' '.join(args)}"
+        debug_print(f"Executing '{cmd}'")
         proc = await asyncio.create_subprocess_shell(
             cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -234,6 +236,39 @@ class SSHClient:
                   f"\n{stdout.decode('utf-8')}\n\n"
             always_print(msg)
             raise CommandExecutionFailure(msg, rc)
+
+    def pull_sync(self, remote_path: Path, local_path: Path,
+                  recursive: bool = True, timeout: Optional[float] = None) -> None:
+        """
+        Pull file(s) from remote client
+
+        :param remote_path: file or directory to pull (recursively) from remote client
+        :param local_path: path to copy to local host
+        :param recursive: specify True if copying a directory
+        :param timeout: optional timeout for command to execute
+        :raises: TimeoutError if command fails to execute in time
+        :raises: CommendExecutionFailure if command failed to execute on remote host
+        """
+        if recursive or local_path.is_dir():
+            args = ['-p', '-r',  f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
+        else:
+            args = ['-p', f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
+        args = list(self._global_options) + args
+        cmd = f"scp {' '.join(args)}"
+        debug_print(f"Executimg '{cmd}'")
+        proc = subprocess.run(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            shell=True,
+            timeout=timeout
+        )
+        if proc.returncode != 0:
+            stdout = proc.stdout
+            msg = f"\n!!! Copy from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} [{cmd}]\n"\
+                  f"\n{stdout.decode('utf-8')}\n\n"
+            always_print(msg)
+            raise CommandExecutionFailure(msg, proc.returncode)
 
     async def get_remote_platform_info(self):
         """

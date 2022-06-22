@@ -32,6 +32,11 @@ class Protocol(Enum):
     # delegated to the first worker node available
 
 
+# rough estimate of number of results published for each test run by a worker
+# (e.g., test-report-started, test-status, test-report, test-report-finished messages)
+_RESPONSES_TO_TEST_RATIO = 10
+
+
 class OrchestrationMPManager(BaseManager):
     """
     This base class provides the underlying multiprocessing server interface to connect with or start the server,
@@ -58,7 +63,7 @@ class OrchestrationMPManager(BaseManager):
         self._remote_pid: Optional[int] = None
         self._finalize_sem = multiprocessing.Semaphore(0)
         self._test_q = JoinableQueue(50)
-        self._results_q = JoinableQueue(50)
+        self._results_q = JoinableQueue(50 * _RESPONSES_TO_TEST_RATIO)
         self._finalize_sem = Semaphore(0)
         self._all_tests_sent = False
 
@@ -122,7 +127,7 @@ class OrchestrationMPManager(BaseManager):
         OrchestrationMPManager.register("get_test_queue_raw", self._get_test_queue)
         OrchestrationMPManager.register("get_results_queue_raw", self._get_results_queue)
         OrchestrationMPManager.register("Coordinator", Coordinator,
-                                        exposed=["start", "start_worker", "shutdown", "kill"])
+                                        exposed=["start", "start_worker", "shutdown", "kill", "count"])
         # we only need these as dicts when running a standalone remote server handling multiple
         # pytest sessions/users
         always_print(f"Starting orchestration on {self._host}:{self._port}")

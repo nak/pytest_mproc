@@ -9,7 +9,7 @@ sys.path.insert(0, str(base_path.parent / "testsrc"))
 import pytest_mproc.plugin
 # to pick up dummy_src (ensure in path):
 from pytest_mproc import GroupTag
-from pytest_mproc import DEFAULT_PRIORITY
+from pytest_mproc.constants import DEFAULT_PRIORITY
 from pytest_mproc.data import TestExecutionConstraint
 
 import pytest

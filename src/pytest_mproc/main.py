@@ -17,10 +17,10 @@ from _pytest.reports import TestReport
 from pytest_mproc.remote.ssh import SSHClient
 
 from pytest_mproc import (
-    DEFAULT_PRIORITY,
     FatalError,
     find_free_port,
     Settings, user_output, get_auth_key, )
+from pytest_mproc.constants import DEFAULT_PRIORITY
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.data import (
     ClientDied,
@@ -387,8 +387,10 @@ class LocalOrchestrator(Orchestrator):
         super().__init__(project_config)
         # noinspection PyUnresolvedReferences
         self._coordinator = Coordinator(
+            coordinator_index=1,
             global_mgr_port=self._global_mgr.port,
-            orchestration_port=self._orchestration_mgr.port
+            orchestration_port=self._orchestration_mgr.port,
+            artifacts_dir=project_config.artifcats_path
         )
         self._orchestration_mgr.register_coordinator(host='localhost', coordinator=self._coordinator)
 
@@ -454,13 +456,16 @@ class RemoteOrchestrator(Orchestrator):
                 remote_root, remote_venv = await self._remote_session.setup_venv(worker_config=config)
                 self._remote_venvs[config.remote_host] = remote_venv
                 self._remote_roots[config.remote_host] = remote_root
+                coordinator_index = len(self._coordinator_procs) + 1
                 self._coordinator_procs[config.remote_host], proc1, proc2 = await self.launch_coordinator(
                     config,
+                    coordinator_index=coordinator_index,
                     local_orchestration_port=self._orchestration_mgr.port,
                     local_global_mgr_port=self._global_mgr.port,
                     remote_host=config.remote_host,
                     remote_venv=remote_venv,
-                    remote_root=remote_root
+                    remote_root=remote_root,
+                    artifacts_dir=self._project_config.artifcats_path,
                 )
                 self._port_fwd_procs += [proc1, proc2]
                 self._coordinators[config.remote_host] = self._orchestration_mgr.get_coordinator(config.remote_host)
@@ -505,11 +510,14 @@ class RemoteOrchestrator(Orchestrator):
         return site_pkgs_path
 
     @classmethod
-    async def launch_coordinator(cls, config: RemoteWorkerConfig, local_orchestration_port: int,
+    async def launch_coordinator(cls, config: RemoteWorkerConfig,
+                                 coordinator_index: int,
+                                 local_orchestration_port: int,
                                  local_global_mgr_port: int,
                                  remote_host: str,
                                  remote_venv: Path,
-                                 remote_root: Path)\
+                                 remote_root: Path,
+                                 artifacts_dir: Path)\
             -> Tuple[asyncio.subprocess.Process, asyncio.subprocess.Process, asyncio.subprocess.Process]:
         remote_sys_executable = str(remote_venv / 'bin' / 'python3')
         ssh_client = SSHClient(host=config.remote_host,
@@ -526,7 +534,8 @@ class RemoteOrchestrator(Orchestrator):
                'PYTHONPATH': python_path}
         proc = await ssh_client.launch_remote_command(
             f"{remote_sys_executable} -m pytest_mproc.coordinator "
-            f"{remote_host}:{remote_global_mgr_port}:{remote_orch_mgr_port}",
+            f"{remote_host}:{remote_global_mgr_port}:{remote_orch_mgr_port} {coordinator_index} {str(artifacts_dir)} "
+            f"{remote_root or ''} {remote_venv or ''}",
             stdout=asyncio.subprocess.PIPE,
             stderr=sys.stderr,
             stdin=asyncio.subprocess.PIPE,
@@ -550,12 +559,14 @@ class RemoteOrchestrator(Orchestrator):
         return proc, port_fwd_proc1, port_fwd_proc2
 
     def shutdown(self, normally: bool = False):
+        # with suppress(Exception):
+        self._remote_session.shutdown()
         for coordinator in self._coordinators.values():
             try:
                 coordinator.shutdown(timeout=3)
             except Exception as e:
                 if normally:
-                    raise e
+                    always_print(f"!! EXCEPTION shutting down coordinator: {e}")
         self._coordinators = {}
         for proc in self._port_fwd_procs:
             with suppress(Exception):
@@ -567,8 +578,6 @@ class RemoteOrchestrator(Orchestrator):
             with suppress(Exception):
                 proc.terminate()
         self._coordinator_procs = {}
-        with suppress(Exception):
-            self._remote_session.shutdown()
         with suppress(Exception):
             self._test_q.close()
         with suppress(Exception):

@@ -87,10 +87,9 @@ class Bundle:
         self._resources: List[Tuple[Path, Path]] = []
         self._requirements_path = None
         self._test_files = []
-        self._site_pkgs = None
         self._relative_run_path = relative_run_dir or Path(".")
         for path in test_files:
-            matched = glob(str(project_root / path))
+            matched = glob(str(project_root / path), recursive=True)
             if not matched:
                 raise ValueError(
                     f"files or wildcard pattern '{str(project_root.absolute() / path)}' did not match any files")
@@ -224,7 +223,7 @@ class Bundle:
             await ssh_client.mkdir(self.remote_run_dir(remote_root), exists_ok=True)
             debug_print(f">>> Pushing contents to remote worker {ssh_client.host}...")
             await ssh_client.push(self._zip_path, remote_root / self._zip_path.name)
-            debug_print(f">>> Unpacking tests on remote worker {ssh_client.host}...")
+            always_print(f">>> Unpacking tests on remote worker {ssh_client.host}...")
             # noinspection PyProtectedMember
             proc = await ssh_client._remote_execute(
                 f"cd {str(remote_root)} && unzip -o {str(self._zip_path.name)}",
