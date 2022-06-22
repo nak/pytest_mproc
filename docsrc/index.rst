@@ -281,23 +281,33 @@ A worker is a single process that is pulling the tests, executing each one and r
 Complexities of Distributed Execution
 -------------------------------------
 
-*pytest_mproc* requires a common server to handle the creation of a test and result queue and control elements, used
-to orchestrate test execution.  The machine that this server runs on must allow incoming connections.  There
-are options for where this server can run.  The node hosting the main process (where the tester kicks off the
-tests) is indeed one such option. However, for a tester running on a laptop testing across a cloud of device
-(as an example), it is unlikely that the nodes in the cloud will be able to call into the tester's laptop.  Firewall
-restrictions will undoubtedly prevent this.   Understand the nature of the system you are using for
-distributed testing.
+*pytest_mproc* requires a common server to handle global fixtures as well as one to administer
+the creation of a test and result queue and control elements, used
+to orchestrate test execution.  Since firewalls cannot be predictable in allowing incoming/outgoing connections,
+*ptyest_mproc* uses servers running on localhost and ssh port forwarding/reverse port forwarding to achieve
+communications across distributed nodes;  in reality each worker node need only communicate with the main node from whith
+pytest execution originates.  When starting up worker process manually, however, this implies
+that the localhost port on the hosting machine must reverse-port-forwarded connections for each worker node. The user
+must specify explicit ports to use for main and worker nodes, and ensure this port forwarding is established for
+each worker node to the main node.
+When deploying automatically, this is taken care of without any special set up by the user.
 
 Automated distributed testing, *pytest_mproc* uses ssh to deploy and execute remote worker tasks.  The test infrastructure
 must therefore provide ssh access (passwordless) into the remote nodes.  A configuration file must also be defined
 to define the structure of the bundle to be deployed to the worker nodes (discussed later).
 
-Inter-process communication is secure and requires a common authentication token.  For manual deployment to workers,
+.. note::
+   The rest of this section deals with manual bring up of worker nodes. Although this may be desired under
+   some circumstances, it does involve more work.  Use automated deployments if manual bring up is not
+   necessary.
+
+Inter-process communication is secure via ssh, with an additional layer provided by the *multiprocessing* Python module
+with a shared authentication token.  For manual deployment to workers,
 this token must be shared across all nodes.  Such sharing is up to the user to implement and can be achieved through a
 callback to retrieve the authentication token:
 
 .. code-block:: python
+
    pytest_mproc. set_user_defined_auth_token(callback)
    # here, callback takes no parameters and returns a bytes object containing the auth token
 
@@ -307,6 +317,7 @@ a fixed port for the orchestration server, the tester can also provide a callbac
 if not port is specified, a random free port will be allocated):
 
 .. code-block:: python
+
    pytest_mproc.set_user_defined_port_alloc(callback)
    # here, callback takes no parameters and returns an int which is the port to use
 
@@ -318,7 +329,7 @@ nodes.
 
 To start the main node, use the "--as-main" command line argument, specifying the port the server will listen on:
 
-.. code-block:: shell
+.. code-block:: sh
 
    % pytest --as-main <host>:<port> ...
 
@@ -329,15 +340,17 @@ section on automated distributed testing below if desired to run from a single *
 scenario, specifying *--num-cores* here will allow workers to also start on the local node, otherwise no workers
 will be invoked under this command (delegated to manual bring-up on other machines/processes)
 
-The host an port specified may also be on a remote machine (see section above on why such a scenario might be needed).
+The host an port specified  should be on the local machine.
 In this case, the orchestration manager must be started manually as well.  The tester can create an application
 that calls the main function to start the server:
 
 .. code-block:: python
+
    pytest_mproc.orchestration.main(host, port, auth_key)
 
 
-To start each the worker node, assuming the necessary deployment of test code has been made on the node:
+To start each the worker node, the port that the main server is running on must be port-forwarded to
+the worker node on a known port.  Assuming the necessary deployment of test code has been made on the node:
 
 .. code-block:: shell
 
@@ -360,7 +373,7 @@ One-time Per-Project Setup
 
 Project definition consists of defining a set of properties in a config file in JSON format:
 
-.. code-block:: json
+.. code-block:: javascript
 
    {
     "project_name": "A_name_associated_with_the_project_under_test",
@@ -375,16 +388,18 @@ These have the following meanings for creating the bundle to send to workers:
   file is present, these requirements will be instsalled via *pip*. All files must be relative paths,
   relative to the project config file itself
 * *prepare_script*: an optional script that is run before pytest execution on a remote host, to prep the
-  test environment if needed.  The recommendation is to make use of pytest fixtures, however.
+  test environment if needed.  It is executed only once per host.
+  The recommendation is to make use of pytest fixtures, however.
 * *finalize_script*: an optional script that is run after pytest execution on a remote host, to tear down the
-  test environment if needed.  The recommendation is to make use of pytest fixtures, however.
+  test environment if needed.  It is executed only once per host.
+  The recommendation is to make use of pytest fixtures, however.
 
 The information provided must be complete to run tests in isolation, without reference to any other local files as
 such files will most likely not be available on remote nodes.   Note that any requirements that are installed are
 cached so that after first execution, the overhead of *pip install* will be minimal.
 
 Project configurations are specified in a file with the path to that file specified on the command line via
-the *--project_structure* command line option.  Optionally, if not provided and *ptmproc_project.cfg" file
+the *--project_structure* command line option.  Optionally, if not provided and *ptmproc_project.cfg* file
 exists in the current working directory of test execution, that file will be used.
 
 .. caution::
@@ -398,6 +413,7 @@ mechanism to retrieve secrets securely, such as an ssh password, works as well. 
 provide the API for SSH configuration:
 
 .. code-block:: python
+
    pytest_mproc.Settings.set_ssh_credentials(username, optional_password)
 
 
@@ -405,9 +421,11 @@ Directories for caching  (e.g., where any test requirements are installed on a p
 as well as the temp directory where bundles are deployed can also be specified, can be configured:
 
 .. code-block:: python
+
    from pathlib import Path
    pytest_mproc.Settings.set_cached_dir(Path("/common/path/to/cache_dir/on/remote/nodes"))
    pytest_mproc.Settings.set_tmp_root(Path("/common/path/to/cache_dir/on/remote/nodes"))
+
 
 These will be common across all nodes, and thus all nodes must support the directory configuration.
 
@@ -429,7 +447,7 @@ Use of a server for managin a cloud of resources is discussed in more detail bel
 The format of the http response or in the file is in a line-by-line JSON format.  For example, if I am using pytest
 to drive execution from remote hosts against attached Android devices, the content might look like:
 
-.. code-block:: json
+.. code-block:: javascript
 
    {"host": "host.name.or.ip", "arguments": {"device": "ANDROID_DEVICE1", "argument1": "value1", "ENV_VAR": "value1"}}
 
@@ -480,7 +498,8 @@ reserved.  (*pytest_mproc* does not carry about the details).  This should start
 retains the parameters.  The format of the response should contain optionally a session id (for bookkeeping only),
 and the three urls as described above:
 
-.. code-block:: json
+.. code-block:: javascript
+
    {"session_id": "unique_session_id", "end_session_url" : "https://url/to/end/session",
     "start_session_url": "https://url/to/start/session", "heartbeat_url": "https://url/to/provide/a/heartbeat"}
 
@@ -489,11 +508,11 @@ provide line-by-line json response with same format as for the file protocol abo
 that a trailing '\n' must be provided:
 
 
-.. code-block:: json
+.. code-block:: python
 
    {"host": "host.name.or.ip", "arguments": {"device": "ANDROID_DEVICE1", "argument1": "value1", "ENV_VAR": "value1"}}\n
    {"host": "host2.name.or.ip", "arguments": {"device": "ANDROID_DEVICE2", "argument1": "value2", "ENV_VAR": "value2"}}\n
-   ...
+
 
 Preferably the http server will stream these as they become available.  The response (e.g., the number of host configs)
 returned is dictated by the initial URL parameters.   *pytest_mproc* does not care about the arguments other than
@@ -512,7 +531,7 @@ Running the Main CLI
 
 Distributed parallel execution from the command line can then be done through a single invocation:
 
-.. code-block:: bash
+.. code-block:: sh
 
     % pytest --as-main", <protocol>://<as-socumented-above> --cores 1 -k alg2  --remote-worker https://some.endpoint.com/reserver?count=5"
 
@@ -573,7 +592,7 @@ is fixed by the program and cannot be changed, and should be used as the top-lev
 location to store (or copy) artifacts.  Any artifacts collected under this directory will be zipped and pulled
 back to:
 
-.. code-block:: bash
+.. code-block:: sh
 
    $(PTMPROC_HOST_ARTIFACTS_DIR)/Worker-<n>/artifacts.zip
 

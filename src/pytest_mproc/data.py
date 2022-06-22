@@ -1,3 +1,7 @@
+"""
+Common data structures definitions
+"""
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Union, Optional
@@ -49,6 +53,7 @@ class ResultException(Exception):
     """
     if a pytest exception occurred, hold info on that
     """
+    # noinspection SpellCheckingInspection
     excrepr: Exception
 
 
@@ -132,3 +137,20 @@ class ReportFinished:
 
 
 ResultType = Union[TestState, ResultException, ResultExit, ResourceUtilization, ResultTestStatus]
+
+
+def resource_utilization(time_span: float, start_rusage, end_rusage) -> "ResourceUtilization":
+    if time_span <= 0.001:
+        return ResourceUtilization(-1, -1, -1, end_rusage.ru_maxrss)
+    if sys.platform.lower() == 'darwin':
+        # OS X is in bytes
+        delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss) / 1000.0
+    else:
+        delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss)
+    ucpu_secs = end_rusage.ru_utime - start_rusage.ru_utime
+    scpu_secs = end_rusage.ru_stime - start_rusage.ru_stime
+    return ResourceUtilization(
+        time_span,
+        (ucpu_secs / time_span) * 100.0,
+        (scpu_secs / time_span) * 100.0,
+        delta_mem)

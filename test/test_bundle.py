@@ -1,7 +1,6 @@
 from pathlib import Path
 
-from pytest_mproc.ptmproc_data import RemoteWorkerConfig
-from pytest_mproc.remote.bundle import _determine_cli_args
+from pytest_mproc.ptmproc_data import RemoteWorkerConfig, _determine_cli_args
 
 
 def test__determine_cli_args():

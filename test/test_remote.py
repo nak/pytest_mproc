@@ -49,23 +49,7 @@ def bundle(tmpdir_factory):
             ),
             system_executable=sys.executable
     ) as bundle:
-        bundle.add_file(_base_dir / "test" / "run_test.sh", "scripts/run_test.sh")
         yield bundle
-
-
-@pytest.mark.skipif(not ssh_pswdless, reason="No permission to ssh to localhost without password input")
-@pytest.mark.asyncio
-async def test_execute_bundle(bundle, tmp_path):
-    lines = []
-    try:
-        async for line in bundle.monitor_remote_execution("localhost", ".", "-k", "alg1", timeout=100,
-                                                          env=dict(os.environ), project_name="test",
-                                                          remote_root=tmp_path):
-            lines.append(line)
-            print(line)
-    except CommandExecutionFailure:
-        text = '\n'.join(lines)
-        assert False, f"Execution failed:\n{text}"
 
 
 def test_remote_execution_cli(tmp_path):

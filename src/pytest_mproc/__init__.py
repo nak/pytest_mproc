@@ -86,34 +86,17 @@ def group(tag: Union["GroupTag", str]):
     """
     from pytest_mproc.data import GroupTag
 
-    def decorator_group(object):
-        if inspect.isclass(object):
-            for method in [getattr(object, m) for m in dir(object) if inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
-                method._pytest_group = tag if isinstance(tag, GroupTag) else GroupTag(tag)
-        elif inspect.isfunction(object):
-            object._pytest_group = tag
+    def decorator_group(obj):
+        if inspect.isclass(obj):
+            for method in [getattr(obj, m) for m in dir(obj)
+                           if inspect.isfunction(getattr(obj, m)) and m.startswith('test')]:
+                method._pytest_group = GroupTag(tag) if isinstance(tag, str) else tag
+        elif inspect.isfunction(obj):
+            obj._pytest_group = tag
         else:
             raise Exception("group decorator can only decorate class or function object")
-        return object
+        return obj
     return decorator_group
-
-
-def resource_utilization(time_span: float, start_rusage, end_rusage) -> "ResourceUtilization":
-    from pytest_mproc.data import ResourceUtilization
-    if time_span <= 0.001:
-        return -1, -1, -1, end_rusage.ru_maxrss
-    if sys.platform.lower() == 'darwin':
-        # OS X is in bytes
-        delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss) / 1000.0
-    else:
-        delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss)
-    ucpu_secs = end_rusage.ru_utime - start_rusage.ru_utime
-    scpu_secs = end_rusage.ru_stime - start_rusage.ru_stime
-    return ResourceUtilization(
-        time_span,
-        (ucpu_secs / time_span) * 100.0,
-        (scpu_secs / time_span) * 100.0,
-        delta_mem)
 
 
 def find_free_port():
@@ -130,23 +113,22 @@ def fixture(fixturefunction, *, scope, **kargs):
     return fixture(fixturefunction, scope=scope, **kargs)
 
 
-def get_ip_addr():
+def get_ip_addr() -> str:
     hostname = socket.gethostname()
     # noinspection PyBroadException
     try:
         return socket.gethostbyname(hostname)
     except Exception:
-        return None
-
+        return "<<unknown ip address>>"
 
 
 DEFAULT_PRIORITY = 10
-try:
-    from pytest_mproc.data import GroupTag
-except:
-    # for orchestrationmanager to be able to come up independently
-    # TODO: fix this
-    pass
+#try:
+from pytest_mproc.data import GroupTag
+#except:
+#    # for orchestrationmanager to be able to come up independently
+#    # TODO: fix this
+#    pass
 
 
 class FatalError(Exception):
@@ -229,10 +211,11 @@ class AsyncMPQueue:
             try:
                 item = self._q.get(block=False)
                 self._q.task_done()
-                await asyncio.sleep(0)
                 return item
             except Empty:
                 await asyncio.sleep(self.INTERVAL_POLLING)
+            else:
+                await asyncio.sleep(0)
 
     async def put(self, item) -> None:
         """

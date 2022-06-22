@@ -1,39 +1,46 @@
 import os
+import signal
 import subprocess
+import binascii
+import pytest
+import resource
 import sys
 import time
 import traceback
+
 from contextlib import suppress
 from multiprocessing import (
     JoinableQueue,
     Queue,
 )
-from typing import Iterator, Union
+from typing import (
+    Dict,
+    Iterator,
+    List,
+    Union,
+)
 
-import binascii
-import pytest
-# noinspection PyProtectedMember
-import resource
+from pytest_mproc.ptmproc_data import ModeEnum
 
-from pytest_mproc import resource_utilization, TestError, user_output, get_ip_addr, get_auth_key
+from pytest_mproc.user_output import always_print
+
+from pytest_mproc import TestError, user_output, get_ip_addr, get_auth_key
 from pytest_mproc.data import (
     ClientDied,
-    ResultExit,
+    ReportFinished,
+    ReportStarted,
     ResourceUtilization,
+    ResultException,
+    ResultExit,
+    ResultTestStatus,
+    ResultType,
     TestBatch,
     TestState,
-    TestStateEnum, ReportStarted, ReportFinished,
+    TestStateEnum, resource_utilization,
 )
-from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
 from pytest_mproc.fixtures import Global
 from pytest_mproc.utils import BasicReporter
 
-if sys.version_info[0] < 3:
-    # noinspection PyUnresolvedReferences
-    from Queue import Empty
-else:
-    # noinspection PyUnresolvedReferences
-    from queue import Empty
 
 """maximum time between reporting status back to coordinator"""
 MAX_REPORTING_INTERVAL = 1.0  # seconds
@@ -44,15 +51,14 @@ class WorkerSession:
     Handles reporting of test status and the like
     """
 
-    def __init__(self, index, is_remote: bool, test_q: JoinableQueue, result_q: Queue):
-        self._is_remote = is_remote
+    def __init__(self, index, test_q: JoinableQueue, result_q: Queue):
         self._this_host = get_ip_addr()
         self._index = index
         self._name = "worker-%d" % index
         self._count = 0
         self._session_start_time = time.time()
         self._buffered_results = []
-        self._buffer_size = 5
+        self._buffer_size = 1
         self._timestamp = time.time()
         self._last_execution_time = time.time()
         self._resource_utilization = ResourceUtilization(-1.0, -1.0, -1.0, -1)
@@ -96,7 +102,7 @@ class WorkerSession:
         This is where the action takes place.  We override the usual implementation since
         that doesn't support a dynamic generation of tests (whose source is the test Queue
         that it draws from to pick out the next test)
-        :param session:  Where the tests generator is kept
+        :param session:  Where the test generator is kept
         """
         # global my_cov
         start_time = time.time()
@@ -120,20 +126,21 @@ class WorkerSession:
                     item = session._named_items[bare_test_id]
                     self._put(TestState(TestStateEnum.STARTED, self._this_host, self._pid, test_id, test_batch))
                     try:
-                        self.pytest_runtest_logstart(item.nodeid, item.location)
                         item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
-                        self.pytest_runtest_logfinish(item.nodeid, item.location)
                     except TestError:
                         has_error = True
                         self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id, test_batch))
+                    except KeyboardInterrupt:
+                        raise
                     except Exception as e:
                         import traceback
                         raise Exception(f"Exception running test: {e}: {traceback.format_exc()}")
 
                     finally:
                         if not has_error:
-                            self._put(TestState(TestStateEnum.FINISHED, self._this_host, self._pid,
-                                                test_id, test_batch))
+                            with suppress(Exception):
+                                self._put(TestState(TestStateEnum.FINISHED, self._this_host, self._pid,
+                                                    test_id, test_batch))
                     # very much like that in _pytest.main:
                     try:
                         if session.shouldfail:
@@ -145,14 +152,19 @@ class WorkerSession:
                     # count tests that have been run
                     self._count += 1
                     self._last_execution_time = time.time()
+        except (EOFError, ConnectionError, BrokenPipeError, KeyboardInterrupt) as e:
+            always_print(f"Worker-{self._index} terminating, testing queue closed unexpectedly")
+            if isinstance(e, KeyboardInterrupt):
+                raise
         finally:
-            self._flush()
-            assert self._buffered_results == []
-            end_usage = resource.getrusage(resource.RUSAGE_SELF)
-            time_span = self._last_execution_time - start_time
-            self._resource_utilization = resource_utilization(time_span=time_span,
-                                                              start_rusage=rusage,
-                                                              end_rusage=end_usage)
+            with suppress(Exception):
+                self._flush()
+            with suppress(Exception):
+                end_usage = resource.getrusage(resource.RUSAGE_SELF)
+                time_span = self._last_execution_time - start_time
+                self._resource_utilization = resource_utilization(time_span=time_span,
+                                                                  start_rusage=rusage,
+                                                                  end_rusage=end_usage)
             with suppress(Exception):
                 self.session_finish()
 
@@ -168,54 +180,82 @@ class WorkerSession:
         assert self._test_q is not None
 
         def generator() -> Iterator[TestBatch]:
-            test = self._test_q.get()
-            while test:
-                self._test_q.task_done()
-                yield test
+            try:
                 test = self._test_q.get()
-            self._test_q.task_done()
+                while test:
+                    self._test_q.task_done()
+                    yield test
+                    test = self._test_q.get()
+                self._test_q.task_done()
+            except (EOFError, BrokenPipeError, ConnectionError, KeyboardInterrupt) as e:
+                always_print(f"Worker-{self._index} terminating, testing queue closed unexpectedly")
+                if isinstance(e, KeyboardInterrupt):
+                    raise
         session.items_generator = generator()
         session._named_items = {item.nodeid.split(os.sep)[-1]: item for item in session.items}
         return session.items
 
     @classmethod
-    def start(cls, uri: str, executable: str) -> subprocess.Popen:
+    def start(cls,
+              orchestration_port: int,
+              global_mgr_port: int,
+              executable: str,
+              args: List[str],
+              addl_env: Dict[str, str]) -> subprocess.Popen:
         """
-        :param uri: uri of main server
+        :param global_mgr_port: (forwarded) localhost port of global manager
+        :param orchestration_port: (forwarded) localhost port of orchestration manager
         :param executable: which executable to run under
+        :param args: args to append to pytest process of worker
+        :param addl_env: additional environment variables when launching worker
         :return: Process created for new worker
         """
         from pytest_mproc.fixtures import Node
+        always_print(f"Starting worker on ports {orchestration_port} {global_mgr_port}")
+        Node.Manager.singleton()
         env = os.environ.copy()
+        env.update(addl_env)
         env.update({
-            "PYTEST_WORKER": "1",
+            "PTMPROC_WORKER": "1",
             "AUTH_TOKEN_STDIN": "1",
-            'PTMPROC_VERBOSE': '1' if user_output.verbose else '0',
-            'PTMPROC_NODE_MGR_PORT': str(Node.Manager.PORT),
+            'PTMPROC_VERBOSE': '1' if user_output.is_verbose else '0',
+            'PTMPROC_NODE_MGR_PORT': str(Node.Manager.PORT)
         })
-        stdout = sys.stdout
-        stderr = sys.stderr
+        stdout = sys.stdout if user_output.is_verbose else subprocess.DEVNULL
         executable = executable or sys.executable
         proc = subprocess.Popen(
-            [executable, '-m', __name__, uri] + sys.argv[1:],
+            [executable, '-m', __name__, str(orchestration_port), str(global_mgr_port), str(Node.Manager.PORT)] + args,
             env=env,
-            stdout=stdout, stderr=stderr,
+            stdout=stdout,
+            stderr=sys.stderr,
             stdin=subprocess.PIPE)
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.close()
         return proc
 
+    # noinspection SpellCheckingInspection
     def pytest_internalerror(self, __excrepr):
-        self._put(ResultException(SystemError("Internal pytest error")))
+        try:
+            self._put(ResultException(SystemError("Internal pytest error")))
+        except Exception as e:
+            always_print(f"Worked-{self._index} failed to pust internall error: {e}")
 
-    @pytest.hookimpl(tryfirst=True)
+    # noinspection SpellCheckingInspection
     def pytest_runtest_logstart(self, nodeid, location):
-        self._put(ReportStarted(nodeid, location))
+        try:
+            self._put(ReportStarted(nodeid, location))
+        except Exception as e:
+            always_print(f"Worker-{self._index} failed to post start of report: {e}")
 
-    @pytest.hookimpl(tryfirst=True)
+    # noinspection SpellCheckingInspection
     def pytest_runtest_logfinish(self, nodeid, location):
-        self._put(ReportFinished(nodeid, location))
+        try:
+            self._put(ReportFinished(nodeid, location))
+        except Exception as e:
+            always_print(f"Worker-{self._index} failed to post finish of report: {e}")
 
+
+    # noinspection SpellCheckingInspection
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_logreport(self, report):
         """
@@ -224,7 +264,10 @@ class WorkerSession:
 
         :param report: report to draw info from
         """
-        self._put(ResultTestStatus(report))
+        try:
+            self._put(ResultTestStatus(report))
+        except Exception as e:
+            always_print(f"Failed to log report to main node: {e}")
 
     # noinspection PyUnusedLocal
     def session_finish(self):
@@ -236,7 +279,8 @@ class WorkerSession:
                              0,
                              self._last_execution_time - self._session_start_time,
                              self._resource_utilization))
-        self._flush()
+        with suppress(Exception):
+            self._flush()
         self.set_singleton(None)
         return True
 
@@ -252,10 +296,12 @@ class WorkerSession:
 
 
 def pytest_cmdline_main(config):
-    config.option.worker = WorkerSession.singleton()
+    assert os.environ.get("PTMPROC_WORKER") == '1'
+    config.ptmproc_worker = WorkerSession.singleton()
+    config.ptmproc_config.mode = ModeEnum.MODE_WORKER
 
 
-def main():
+def main(orchestration_port: int, global_mgr_port: int, node_mgr_port: int, args: List[str]):
     from pytest_mproc import plugin  # ensures auth_key is set
     from pytest_mproc.fixtures import Node
     # noinspection PyUnresolvedReferences
@@ -263,13 +309,11 @@ def main():
     assert plugin  # to prevent flake8 unused import
     # from pytest_mproc.worker import WorkerSession
     from pytest_mproc.orchestration import OrchestrationManager
-    uri = sys.argv[1]
-    global_mgr_uri = os.environ.get('PTMPROC_GM_URI')
-    if global_mgr_uri:
-        host, port_text = global_mgr_uri.split(':', maxsplit=1)
-        # set host, port for later usage (in global fixtures, etc)
-        Global.Manager.singleton(address=(host, int(port_text)), as_client=True)
-    mgr = OrchestrationManager.create(uri=uri, as_client=True)
+    assert node_mgr_port == Node.Manager.PORT
+    Node.Manager.PORT = node_mgr_port
+    Node.Manager.singleton()  # forces creation on defined port
+    Global.Manager.singleton(address=('localhost', global_mgr_port), as_client=True)
+    mgr = OrchestrationManager.create_client(address=('localhost', orchestration_port))
     # noinspection PyUnresolvedReferences
     worker_index = mgr.register_worker((get_ip_addr(), os.getpid()))
     # noinspection PyUnresolvedReferences
@@ -279,7 +323,6 @@ def main():
     assert test_q is not None
     assert result_q is not None
     worker = WorkerSession(index=worker_index,
-                           is_remote='--as-worker' in sys.argv,
                            test_q=test_q,
                            result_q=result_q,
                            )
@@ -288,20 +331,29 @@ def main():
     status = None
     # noinspection PyBroadException
     try:
-        status = pytest.main(sys.argv[2:])
+        status = pytest.main(args)
         if isinstance(status, pytest.ExitCode):
             status = status.value
     except Exception as e:
-        errored = True
         msg = f"Worker {get_ip_addr()}-{os.getpid()} died with exception {e}\n {traceback.format_exc()}"
         os.write(sys.stderr.fileno(), msg.encode('utf-8'))
-        result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=errored, message=msg))
+        with suppress(Exception):  # if other end died, result_q is gone, so suppress exceptions
+            result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=True, message=msg))
     finally:
-        mgr.completed(get_ip_addr(), os.getpid())
+        signal.alarm(3)
+        with suppress(Exception):
+            mgr.completed(get_ip_addr(), os.getpid())
         with suppress(Exception):
             Node.Manager.shutdown()
     return status
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.stdout.write(f"PID: {os.getpid()}")
+    _orchestration_port = int(sys.argv[1])
+    _global_mgr_port = int(sys.argv[2])
+    _node_mgr_port = int(sys.argv[3])
+    sys.exit(main(orchestration_port=int(_orchestration_port),
+                  global_mgr_port=int(_global_mgr_port),
+                  node_mgr_port=int(_node_mgr_port),
+                  args=sys.argv[4:]))

@@ -14,7 +14,8 @@ import pytest
 
 from pytest_mproc import user_output
 from pytest_mproc.data import AllClientsCompleted, ClientDied, TestBatch, ResultExit
-from pytest_mproc.main import RemoteSession, Orchestrator
+from pytest_mproc.main import Orchestrator
+from pytest_mproc.remote_sessions import RemoteSessionManager
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
 from pytest_mproc.user_output import always_print
@@ -22,7 +23,7 @@ from pytest_mproc.user_output import always_print
 
 @pytest.fixture()
 def mgr():
-    mgr = OrchestrationManager.create(project_name="test", uri="local://localhost:8734", as_client=False, )
+    mgr = OrchestrationManager.create_server(adderss=('localhost', 8734))
     yield mgr
     mgr.shutdown()
 
@@ -44,9 +45,9 @@ async def test_validate_clients(project_config, mgr):
                                                             stderr=asyncio.subprocess.DEVNULL)
     try:
         result_q = mgr.get_results_queue()
-        remote_session = RemoteSession(remote_sys_executable=None,
-                                       project_config=project_config,
-                                       mgr=mgr)
+        remote_session = RemoteSessionManager(remote_sys_executable=None,
+                                              project_config=project_config,
+                                              mgr=mgr)
         count = 0
 
         def mock_run(args, stdout: Any, stdin: Any=None, stderr: Any= None, timeout: int=0, **_kwargs):
@@ -93,9 +94,8 @@ def test_one():
 """)
     user_output.verbose = False
     host_q = asyncio.Queue(10)
-    remote_session = RemoteSession(remote_sys_executable=sys.executable,
-                                   project_config=project_config,
-                                   mgr=mgr)
+    remote_session = RemoteSessionManager(remote_sys_executable=sys.executable,
+                                          project_config=project_config)
     cwd = os.getcwd()
     test_q = mgr.get_test_queue()
     await test_q.put(None)
@@ -109,8 +109,7 @@ def test_one():
         await host_q.put(RemoteWorkerConfig(remote_host='localhost', arguments={}))
         await host_q.put(None)
 
-        result_q = OrchestrationManager.create(uri="local://localhost:8734", as_client=True,
-                                               project_name="test").get_results_queue()
+        result_q = OrchestrationManager.create_client(address=('localhost', 8734)).get_results_queue()
 
         async def go():
             try:
@@ -134,7 +133,7 @@ def test_one():
                     pass
                 break
             r = await asyncio.wait_for(result_q.get(), timeout=20)
-        await remote_session.shutdown()
+        remote_session.shutdown()
         await asyncio.wait_for(task, timeout=3)
     finally:
         sys.argv = argv
@@ -204,7 +203,7 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
                 deploy_timeout=20,
                 env=env)
             items = [TestBatch(test_ids=['test_mproc_runs.py::test_some_alg1'])]
-            mgr = OrchestrationManager.create(orchestrator.uri, project_name='test', as_client=True)
+            mgr = OrchestrationManager.create_client(address=('localhost', orchestrator.port))
             test_q = mgr.get_test_queue()
             result_q = mgr.get_results_queue()
             for item in items:

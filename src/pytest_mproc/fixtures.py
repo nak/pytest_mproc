@@ -108,6 +108,14 @@ class Global:
             super().__init__((host, port))
 
         @property
+        def port(self):
+            return self.address[1]
+
+        @property
+        def host(self):
+            return self.address[0]
+
+        @property
         def uri(self):
             return f"{self.address[0]}:{self.address[1]}"
 
@@ -117,7 +125,7 @@ class Global:
 
         @classmethod
         def singleton(cls, address: Optional[Tuple[str, int]] = None, as_client: bool = False) -> "Global.Manager":
-            if cls.key() in cls._singleton:
+            if cls.key() in cls._singleton and (address is None or address == cls._singleton[cls.key()].address):
                 return cls._singleton[cls.key()]
             elif address is None:
                 raise SystemError("Attempt to get Global manager before start or connect")
@@ -161,8 +169,9 @@ def global_fixture(**kwargs):
 
         # noinspection DuplicatedCode
         @functools.wraps(func)
-        def _wrapper(*args, **kwargs):
+        def _wrapper(*args, **kwargs_):
             nonlocal value
+            # TODO: make this a "is_present" call in Global.Manager
             assert Global.Manager.key() in Global.Manager._singleton, "Global Manager did not start as expected"
             global_mgr = Global.Manager.singleton()
             # when serving potentially multiple full pytest session in a standalone server,
@@ -172,7 +181,7 @@ def global_fixture(**kwargs):
             # noinspection PyUnresolvedReferences
             value = value or global_mgr.get_fixture(key).value()
             if type(value) == FixtureManager.NoneValue:
-                v = func(*args, **kwargs)
+                v = func(*args, **kwargs_)
                 if inspect.isgenerator(v):
                     try:
                         value = next(v)
@@ -201,14 +210,14 @@ def node_fixture(**kwargs):
 
         # noinspection DuplicatedCode
         @functools.wraps(func)
-        def _wrapper(*args, **kwargs):
+        def _wrapper(*args, **kwargs_):
             nonlocal value
             node_mgr = Node.Manager.singleton()
             func_name = func.__name__
             # noinspection PyUnresolvedReferences
             value = value or node_mgr.get_fixture(func_name).value()
             if type(value) == FixtureManager.NoneValue:
-                v = func(*args, **kwargs)
+                v = func(*args, **kwargs_)
                 if inspect.isgenerator(v):
                     try:
                         value = next(v)

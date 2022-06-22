@@ -6,6 +6,7 @@ import getpass
 import logging
 import os
 import shlex
+import subprocess
 import sys
 import time
 from contextlib import suppress
@@ -45,7 +46,7 @@ class CommandExecutionFailure(Exception):
 @dataclass
 class SSHClient:
     """
-    SSH Client objct for interacting with a specific client
+    SSH Client class for interacting with a specific client
     """
     host: str
     username: str
@@ -91,7 +92,7 @@ class SSHClient:
         if env:
             for key, value in env.items():
                 command = f"{key}=\"{value}\" {command}"
-        if user_output.verbose:
+        if user_output.is_verbose:
             env["PTMPROC_VERBOSE"] = '1'
         if cwd is not None:
             command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
@@ -145,7 +146,7 @@ class SSHClient:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        rc = await asyncio.wait_for(proc.wait(), timeout=10)
+        rc = await asyncio.wait_for(proc.wait(), timeout=5)
         if rc != SUCCESS:
             raise CommandExecutionFailure(f"rm -rf {remote_path}", rc)
 
@@ -161,7 +162,7 @@ class SSHClient:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        rc = await asyncio.wait_for(proc.wait(), timeout=10)
+        rc = await asyncio.wait_for(proc.wait(), timeout=5)
         if rc != SUCCESS:
             raise CommandExecutionFailure(f"rm -rf {remote_path}", rc)
 
@@ -197,7 +198,8 @@ class SSHClient:
         if rc != SUCCESS:
             stdout = await proc.stdout.read()
             stderr = await proc.stderr.read()
-            raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)} [scp {' '.join(args)}] \n\n{stdout}\n\n {stderr}\n\n",
+            raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)} "
+                                          f"[scp {' '.join(args)}] \n\n{stdout}\n\n {stderr}\n\n",
                                           rc=rc)
 
     async def pull(self, remote_path: Path, local_path: Path, recursive: bool = True, timeout: Optional[float] = None):
@@ -209,7 +211,7 @@ class SSHClient:
         :param recursive: specify True if copying a directory
         :param timeout: optional timeout for command to execute
         :raises: TimeoutError if command fails to execute in time
-        :raises: CommendExecutionFailure if command faile to execute on remote host
+        :raises: CommendExecutionFailure if command failed to execute on remote host
         """
         if recursive or local_path.is_dir():
             args = ['-p', '-r',  f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
@@ -262,13 +264,13 @@ class SSHClient:
         proc = await self._remote_execute(
             cmd,
             stdout=stdout,
-            stderr=sys.stderr,
+            stderr=stderr,
             cwd=str(cwd) if cwd is not None else None
         )
         stdout, _ = await proc.communicate()
         assert proc.returncode is not None
         if proc.returncode != 0:
-            os.write(sys.stderr.fileno(), f"Command {cmd} frpm {cwd}failed to install on remote".encode('utf-8'))
+            os.write(sys.stderr.fileno(), f"Command {cmd} from {cwd}failed to install on remote".encode('utf-8'))
             raise CommandExecutionFailure(cmd, proc.returncode)
 
     async def install(self,
@@ -284,10 +286,10 @@ class SSHClient:
         :param cwd: directory to run from on remote host
         :param venv: path to python virtual environment on remote host
         :param remote_root: root directory on remote client
-        :param requirements_path: path, relative to remote_root, where requirments file is to be found
+        :param requirements_path: path, relative to remote_root, where requirements file is to be found
         :param stdout: as per subprocess.Popen
         :param stderr: as per subprocess.Popen
-        :raises: CommandExecutionFailure if install failes on remote client
+        :raises: CommandExecutionFailure if install failed on remote client
         """
         remote_py_executable = venv / 'bin' / 'python3'
         cmd = f"{str(remote_py_executable)} -m pip install --upgrade -r {str(remote_root / requirements_path)}"
@@ -317,7 +319,7 @@ class SSHClient:
         :param args: args to the command
         :param timeout: optional timeout for command
         :param cwd: directory on remote client in which to execute
-        :param success_code: None if not to check return code, otherwise lambda taking return code an returning
+        :param success_code: None if not to check return code, otherwise lambda taking return code and returning
            True is success or False otherwise (defaults to 0 being success code)
         :param stdin: stream to use for stdin (as in subprocess.Popen)
         :param env: optional dict of environment vars to apply
@@ -328,23 +330,23 @@ class SSHClient:
         """
         start_time = time.monotonic()
 
-        def getlines(data: str) -> Tuple[str, str]:
+        def getlines(data_: str) -> Tuple[str, str]:
             """
             Split data into lines, but treat any last remnant as a buffer for client to combine with
             a next batch of data before declaring a full line
 
-            :param data: string to process
+            :param data_: string to process
             :return: a tuple of lines contained in a string and a buffer of data leftover at end
             """
-            if '\n' in data:
-                *lines, buffer = data.splitlines()
-                if data.endswith('\n'):
-                    lines.append(buffer)
-                    return lines, ""
+            if '\n' in data_:
+                *lines_, buffer = data_.splitlines()
+                if data_.endswith('\n'):
+                    lines_.append(buffer)
+                    return lines_, ""
                 else:
-                    return lines, buffer
+                    return lines_, buffer
             else:
-                return "", data
+                return "", data_
         proc = await self.launch_remote_command(command, *args,
                                                 stdin=stdin,
                                                 stdout=asyncio.subprocess.PIPE,
@@ -363,7 +365,7 @@ class SSHClient:
         if timeout is not None and time_left <= 0.0:
             with suppress(OSError):
                 proc.terminate()
-            with suppress(TimeoutError):
+            with suppress(TimeoutError, KeyboardInterrupt):
                 await asyncio.wait_for(proc.wait(), timeout=5)
             if proc.returncode is None:
                 with suppress(OSError):
@@ -382,6 +384,7 @@ class SSHClient:
         :return: temporary directory created on remote client
         """
         if tmp_root is None:
+            # noinspection SpellCheckingInspection
             proc = await self._remote_execute(
                 f"mktemp -d --tmpdir ptmproc-tmp.XXXXXXXXXX",
                 stdout=asyncio.subprocess.PIPE,
@@ -389,6 +392,7 @@ class SSHClient:
                 shell=True
             )
         else:
+            # noinspection SpellCheckingInspection
             proc = await self._remote_execute(
                 f"mktemp -d  {str(tmp_root / 'ptmproc-tmp.XXXXXXXXXX')}",
                 stdout=asyncio.subprocess.PIPE,
@@ -413,7 +417,7 @@ class SSHClient:
                                     env: Optional[Dict[str, str]] = None,
                                     prefix_cmd: Optional[str] = None,
                                     auth_key: Optional[bytes] = None,
-                                    shell:bool = True) -> asyncio.subprocess.Process:
+                                    shell: bool = True) -> asyncio.subprocess.Process:
         """
         execute command on remote host
 
@@ -426,6 +430,7 @@ class SSHClient:
         :param stderr: stream to use for stderr (as in subprocess.Popen)
         :param env: optional dictionary of environment variables for command
         :param auth_key: authentication key for multiprocessing
+        :param shell: whether to run in shell or not
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
@@ -448,7 +453,7 @@ class SSHClient:
     async def execute_remote_cmd(self,  command, *args,
                                  stdout: Union[int, TextIO] = sys.stdout,
                                  stderr: Union[int, TextIO] = sys.stderr,
-                                 stdin: Optional[TextIO] = None,
+                                 stdin: Optional[Union[TextIO, int]] = None,
                                  timeout: Optional[float] = None,
                                  cwd: Optional[Path] = None,
                                  prefix_cmd: Optional[str] = None,
@@ -470,6 +475,7 @@ class SSHClient:
         :param stderr: stream to use for stderr (as in subprocess.Popen)
         :param env: optional dictionary of environment variables for command
         :param auth_key: authentication key for multiprocessing
+        :param shell: whether to run in shell or not
         :return: Process created (completed process if timeout is specified)
         :raises: TimeoutError if command does not execute in time (if timeout is specified)
         """
@@ -490,6 +496,80 @@ class SSHClient:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
         return proc
 
+    async def signal(self, pid, signal: int):
+        await self._remote_execute(f"kill -{signal} {pid}",
+                                   stdout=asyncio.subprocess.DEVNULL,
+                                   stderr=sys.stderr,
+                                   shell=True)
+
+    def signal_sync(self, pid, signal: int) -> None:
+        """
+        Kill process with assigned pid on remote host.
+
+        :raises CommandExecutionFailer: if it fails to kill, with exception if process is no longer active;  in that
+           case this function returns normally
+        """
+        command = f"kill -{signal} {pid}"
+        try:
+            completed = subprocess.run(["ssh", self.destination, *self._global_options, command],
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT,
+                                       timeout=3)
+            if completed.returncode != 0:
+                if b'No such process' not in completed.stdout:
+                    always_print(f"Failed to kill remote pid {pid} on {self.destination}", as_error=True)
+        except TimeoutError:
+            always_print("Timeout trying to kill remote process")
+
+    async def port_forward(self, local_port: int, remote_port: int):
+        """
+        Port forward from local machine to remote port
+        :param local_port: port on local machine to forward connection requests
+        :param remote_port: port on remote machine to accept (forwarded) connections requests
+        """
+        proc = await asyncio.subprocess.create_subprocess_exec(
+            "ssh", "-N", "-L", f"{local_port}:127.0.0.1:{remote_port}", f"{self.destination}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        await asyncio.sleep(0.5)
+        if proc.returncode is not None:
+            stdout = (await proc.stdout.read()).decode('utf-8')
+            raise CommandExecutionFailure(f"Failed to port forward: {stdout}", rc=proc.returncode)
+        return proc
+
+    async def reverse_port_forward(self, local_port: int, remote_port: int):
+        """
+        Reverse port forward from remote port to local machine
+        :param local_port: port on local machine to accept (reverse forwarded) connection requests
+        :param remote_port: port on remote machine to  forward connections requests
+        """
+        debug_print(f"Executing command 'ssh -N -R {local_port}:127.0.0.1:{remote_port} {self.destination}'")
+        proc = await asyncio.subprocess.create_subprocess_exec(
+            "ssh", "-N", "-R", f"{remote_port}:127.0.0.1:{local_port}", f"{self.destination}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        await asyncio.sleep(0.5)
+        if proc.returncode is not None:
+            stdout = (await proc.stdout.read()).decode('utf-8')
+            raise CommandExecutionFailure(f"Failed to port forward: {stdout}", rc=proc.returncode)
+        return proc
+
+    async def find_free_port(self) -> int:
+        """
+        find free port on remote host
+        """
+        # noinspection SpellCheckingInspection
+        proc = await self._remote_execute(
+            "python3 -c \"import socket; s = socket.socket(); s.bind(('', 0));print(s.getsockname()[1]);s.close()\"",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=sys.stderr,
+            shell=True
+        )
+        text = (await proc.stdout.read()).decode('utf-8')
+        return int(text.strip())
+
 
 @asynccontextmanager
 async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_root: Optional[Path]) -> \
@@ -499,9 +579,9 @@ async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_r
     path is provided as a remote root, a temporary directory is created on remote host and removed
     when exiting this context.  (Otherwise context manager has no real effect)
 
-    :param project_name: name of project, used in createing a cache dir if available to remote system
+    :param project_name: name of project, used in creating a cache dir if available to remote system
     :param ssh_client: ssh client to use in creating a temp dir if necessary
-    :param remote_root: an explicit location on the remote host (will not be remove on exit of context)
+    :param remote_root: an explicit location on the remote host (will not be removed on exit of context)
     :return: the remote root created (or reflects the remote root provided explicitly)
     """
     if not Settings.cache_dir:

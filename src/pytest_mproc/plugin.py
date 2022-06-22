@@ -6,12 +6,11 @@ import os
 import sys
 
 import _pytest.terminal
+from pytest_mproc.worker import WorkerSession
 
 from pytest_mproc import worker, user_output, Constants
-from pytest_mproc.coordinator import Coordinator
-from pytest_mproc.http import HTTPSession
-from pytest_mproc.main import Orchestrator
-from pytest_mproc.orchestration import OrchestrationManager
+from pytest_mproc.coordinator import coordinator_main
+from pytest_mproc.main import LocalOrchestrator, RemoteOrchestrator
 from pytest_mproc.user_output import always_print
 
 import getpass
@@ -20,18 +19,18 @@ import tempfile
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from traceback import format_exc
-from typing import Callable, Optional, Iterable, Union, Type
+from typing import Callable, Optional, Union, Type
 
 from pytest_mproc.ptmproc_data import (
+    ModeEnum,
     PytestMprocConfig,
     RemoteWorkerConfig,
-    ProjectConfig,
-    PytestMprocRuntime,
+    _determine_cli_args, ProjectConfig,
 )
 
 
 import pytest
-from pytest_mproc import find_free_port, fixtures
+from pytest_mproc import fixtures
 
 import socket
 
@@ -47,13 +46,13 @@ def _get_ip_addr():
     try:
         return socket.gethostbyname(socket.gethostname())
     except Exception:
-        print(">>> Cannot get ip address of host.  Return 127.0.0.1 (localhost)")
-        return "127.0.0.1"
+        return None
 
 
+# noinspection SpellCheckingInspection
 def parse_numprocesses(s: str) -> int:
     """
-    A little bit of processing to get number of parallel processes to use (since "auto" can be used to represent
+    A tiny bit of processing to get number of parallel processes to use (since "auto" can be used to represent
     # of cores on machine)
     :param s: text to process
     :return: number of parallel worker processes to use
@@ -73,7 +72,7 @@ def parse_numprocesses(s: str) -> int:
         raise Exception("Error: --cores argument must be an integer value or \"auto\" or \"auto*<int factor>\"")
 
 
-# noinspection PyProtectedMember
+# noinspection PyProtectedMember,SpellCheckingInspection
 def _add_option(group, name: str, dest: str, action: str,
                 typ: Union[Type[int], Type[str], Type[bool], Callable[[str], int]], help_text: str) -> None:
     """
@@ -98,6 +97,7 @@ def _add_option(group, name: str, dest: str, action: str,
     Constants.set_ptmproc_args(name, typ)
 
 
+# noinspection SpellCheckingInspection
 @pytest.mark.tryfirst
 def pytest_addoption(parser):
     """
@@ -119,14 +119,6 @@ def pytest_addoption(parser):
         action="store",
         typ=bool,
         help_text="disable any parallel mproc testing, overriding all other mproc arguments",
-    )
-    _add_option(
-        group,
-        "--max-simultaneous-connections",
-        dest="mproc_max_simultaneous_connections",
-        action="store",
-        typ=int,
-        help_text="max # of connections allowed at one time to main process, to prevent deadlock from overload"
     )
     _add_option(
         group,
@@ -166,8 +158,8 @@ def pytest_addoption(parser):
     else:
         _add_option(
             group,
-            "--as-worker",
-            dest="mproc_client_connect",
+            "--as-worker-node",
+            dest="mproc_mgr_ports",
             action="store",
             typ=str,
             help_text="host:port specification of master node to connect to as client"
@@ -197,150 +189,172 @@ def pytest_cmdline_main(config):
     """
     Called before "true" main routine.  This is to set up config values well ahead of time
     for things like pytest-cov that needs to know we are running distributed
-
-    Mostly taken from other implementations (such as xdist)
     """
     global cmdline_main_called
+    reporter = BasicReporter()
     if cmdline_main_called:
         return
+    has_remotes = "--remote-worker" in sys.argv
     cmdline_main_called = True
-    mproc_max_connections = getattr(config.option, "mproc_max_simultaneous_connections", 24)
     mproc_connection_timeout = getattr(config.option, "mproc_connection_timeout", None)
     mproc_disabled = getattr(config.option, "mproc_disabled")
     mproc_num_cores = getattr(config.option, "mproc_numcores", None)
-    user_output.verbose = config.option.mproc_verbose
-    if "PYTEST_WORKER" in os.environ:
-        config.option.ptmproc_config = PytestMprocConfig(num_cores=1)
-        config.ptmproc_runtime = None
-        worker.pytest_cmdline_main(config)
-        assert config.option.worker
-        return
-    else:
-        config.option.worker = None
-        if config.option.mproc_remote_clients and not config.option.mproc_server_uri:
-            config.option.mproc_server_uri = "delegated://"
-    if not config.option.mproc_remote_clients and not config.option.mproc_server_uri:
-        # pure local so start Global Manager
-        from pytest_mproc.fixtures import Global
-        port = find_free_port()
-        Global.Manager.singleton(('localhost', port), as_client=False)
-        os.environ['PTMPROC_GM_URI'] = f"localhost:{port}"
-        port = find_free_port()
-        config.option.mproc_server_uri = f"localhost:{port}"
-    if not hasattr(config, "ptmproc_runtime"):
-        config.ptmproc_runtime = None
-    config.option.ptmproc_config = PytestMprocConfig()
-    if mproc_connection_timeout:
-        config.option.ptmproc_config.connection_timeout = mproc_connection_timeout
-    reporter = BasicReporter()
-    config.option.ptmproc_config.num_cores = mproc_num_cores
-    config.option.ptmproc_config.max_simultaneous_connections = mproc_max_connections or 10
-    # this is what pycov uses to determine we are distributed:
-    config.option.numprocesses = config.option.ptmproc_config.num_cores
-    if config.option.numprocesses and config.option.numprocesses < 0:
-        raise pytest.UsageError("Number of cores must be greater than or equal to zero when running as a master")
-    if config.option.ptmproc_config.max_simultaneous_connections and \
-            config.option.ptmproc_config.max_simultaneous_connections <= 0:
-        raise pytest.UsageError("max simultaneous connections must be greater than 0; preferably greater than 9")
-    # validation
-    if config.option.ptmproc_config.num_cores is None or is_degraded() or mproc_disabled:
-        if '--as-main' in sys.argv or '--as-worker' in sys.argv:
+    mproc_mgr_ports = getattr(config.option, "mproc_mgr_ports", None)
+    mproc_remote_clients = getattr(config.option, "mproc_remote_clients", None)
+    user_output.is_verbose = config.option.mproc_verbose
+    config.ptmproc_worker = None
+    config.ptmproc_orchestrator = None
+    config.ptmproc_coordinator = None
+    config.ptmproc_http_session = None
+    config.ptmproc_config = PytestMprocConfig(
+        num_cores=mproc_num_cores,
+        connection_timeout=mproc_connection_timeout or 60*30,
+    )
+    if mproc_num_cores is None or is_degraded() or mproc_disabled:
+        if '--as-main' in sys.argv or '--as-worker-node' in sys.argv:
             raise pytest.UsageError(
                 "Refusing to execute on distributed system without also specifying the number of cores to use")
         reporter.write(
-            ">>> no number of cores provided or running in environment unsupportive of parallelized testing, "
+            ">>> no number of cores provided or running in environment that does not support parallelized testing, "
             "not running multiprocessing <<<<<\n", yellow=True)
         return
-    if getattr(config.option, "mproc_client_connect", None):
-        mproc_pytest_cmdline_coordinator(config)
-    else:
-        mproc_pytest_cmdline_main(config, reporter=reporter)
-
-
-def mproc_pytest_cmdline_coordinator(config):
-    config.option.no_summary = True
-    config.option.no_header = True
-    config.option.ptmproc_config = PytestMprocConfig(
-        num_cores=config.option.ptmproc_config.num_cores,
-        server_uri=None,
-        client_connect=getattr(config.option, "mproc_client_connect", None)
-    )
-    if config.option.ptmproc_config.num_cores < 1:
-        raise pytest.UsageError("Number of cores must be 1 or more when running as client")
-    if config.option.ptmproc_config.client_connect and not config.option.worker:
-        assert 'PTMPROC_WORKER' not in os.environ
-        uri = config.option.ptmproc_config.client_connect
-        always_print(f"Running coordinator connecting to {uri} [{os.getpid()}]")
-        config.option.ptmproc_config.server_uri = uri
-        if not config.option.collectonly:
-            coordinator = Coordinator()
-            config.ptmproc_runtime = PytestMprocRuntime(mproc_main=None,
-                                                        coordinator=coordinator)
-            mgr = OrchestrationManager.create(uri=uri, as_client=True, project_name=None)
-            mgr.register_coordinator(coordinator)
-            coordinator.start_workers(uri=uri,
-                                      num_processes=config.option.ptmproc_config.num_cores)
-
-
-# TODO: ############# shutdown ptmproc_runtime in common way
-
-
-def mproc_pytest_cmdline_main(config, reporter: BasicReporter):
-    assert "--as-worker" not in sys.argv
-    config.http_session = None
-    has_remotes = "--remote-worker" in sys.argv
-    config.option.ptmproc_config.server_uri = \
-        getattr(config.option, 'mproc_server_uri') or f'127.0.0.1:{find_free_port()}'
-    local_proj_file = Path("./ptmproc_project.cfg")
-    project_config = getattr(config.option, "project_structure_path", None) or \
-        (local_proj_file if local_proj_file.exists() else None)
-    if has_remotes:
-        remote_clients = config.option.mproc_remote_clients
-        version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
-        mproc_remote_sys_executable = getattr(config.option, "mproc_remote_sys_executable", None) or \
-            f"/usr/bin/python{version}"
-        if bool(project_config) != bool(remote_clients):
-            # basically if only one is None
-            raise pytest.UsageError(f"Must specify both project config and remote clients together or not at all "
-                                    f"{project_config} {remote_clients}")
-        remote_clients = [remote_clients] if isinstance(remote_clients, str) else remote_clients
-        config.option.ptmproc_config.remote_hosts = None if not remote_clients\
-            else RemoteWorkerConfig.from_raw_list(remote_clients)
-        config.http_session = RemoteWorkerConfig.http_session()
-        config.option.ptmproc_config.remote_sys_executable = mproc_remote_sys_executable
-    if config.option.ptmproc_config.num_cores < 1:
-        raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
-    reporter.write(f"Running as main @ {config.option.ptmproc_config.server_uri}\n", green=True)
-    default_proj_config = Path(os.getcwd()) / "ptmproc_project.cfg"
-    if has_remotes:
-        project_config = project_config if (project_config is not None or not default_proj_config.exists())\
-            else default_proj_config
-    else:
-        project_config = None
-
-    orchestrator = Orchestrator(
-        project_config=ProjectConfig.from_file(Path(project_config)) if project_config else None,
-        uri=config.option.ptmproc_config.server_uri)
-    config.ptmproc_runtime = PytestMprocRuntime(mproc_main=orchestrator, coordinator=None)
-    if has_remotes:
-        # this won't run until run loop when even loop is kicked off :-(
-        config.remote_coro = orchestrator.start_remote(remote_workers_config=config.option.ptmproc_config.remote_hosts,
-                                                       deploy_timeout=config.option.ptmproc_config.connection_timeout)
-
-    else:
-        config.remote_coro = None
-        coordinator = orchestrator.start_local(num_processes=config.option.ptmproc_config.num_cores)
-        config.ptmproc_runtime.coordinator = coordinator
+    if mproc_num_cores <= 0:
+        raise pytest.UsageError(f"Invalid value for number of cores: {mproc_num_cores}")
+    config.remote_coro = None
+    # tell xdist not to run
     config.option.dist = "no"
     val = config.getvalue
     if not val("collectonly"):
+        # noinspection SpellCheckingInspection
         usepdb = config.getoption("usepdb")  # a core option
         if val("dist") != "no" and usepdb:
             raise pytest.UsageError(
                 "--pdb is incompatible with distributing tests."
             )  # noqa: E501
+    if "PTMPROC_WORKER" in os.environ:
+        config.ptmproc_config.mode = ModeEnum.MODE_WORKER
+        return mproc_pytest_cmdline_worker(config)
+    else:
+        config.ptmproc_worker = None
+    uri = getattr(config.option, 'mproc_server_uri')
+    is_local = not has_remotes and uri is None
+    if config.ptmproc_config.num_cores < 1:
+        raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
+    if mproc_mgr_ports:
+        config.ptmproc_config.mode = ModeEnum.MODE_COORDINATOR
+        try:
+            host, ports_text = mproc_mgr_ports.split(':') if ':' in mproc_mgr_ports else None, mproc_mgr_ports
+            global_mgr_port, orchestration_port = ports_text.split(',')
+            global_mgr_port = int(global_mgr_port)
+            orchestration_port = int(orchestration_port)
+        except ValueError:
+            raise pytest.UsageError(
+                "Invalid cmd line option for --as-worker-node:  must be in form of host ip or name and "
+                " integer ports: [<host ip/name>:]<global_manager_port>,<orchestration_port>"
+            )
+        return mproc_pytest_cmdline_coordinator(config, host, global_mgr_port, orchestration_port)
+    local_proj_file = Path("./ptmproc_project.cfg")
+    project_config_path = (getattr(config.option, "project_structure_path", None) or
+                           (local_proj_file if local_proj_file.exists() else None))
+    config.ptmproc_config.project_config = \
+        ProjectConfig.from_file(project_config_path) if project_config_path else None
+    if is_local:
+        config.ptmproc_config.mode = ModeEnum.MODE_LOCAL_MAIN
+        # Running locally on local host only:
+        config.ptmproc_orchestrator = LocalOrchestrator(project_config=config.ptmproc_config.project_config)
+        return mproc_pytest_cmdline_main_local(config.ptmproc_config, config.ptmproc_orchestrator, reporter)
+    elif not has_remotes:
+        config.ptmproc_config.mode = ModeEnum.MODE_REMOTE_MAIN
+        # user has specified running distributed but with explicit bring-up of workers
+        # therefore, must specify ports
+        global_mgr_port_text, orchestration_port_text = uri.split(',') if uri is not None else None, None
+        global_mgr_port = None if global_mgr_port_text is None else int(global_mgr_port_text)
+        # noinspection PyTypeChecker
+        orchestration_port = None if orchestration_port_text is None else int(orchestration_port_text)
+        config.ptmproc_orchestrator = RemoteOrchestrator(
+            project_config=config.ptmproc_config.project_config,
+            global_mgr_port=global_mgr_port,
+            orchestration_port=orchestration_port
+        )
+        mproc_pytest_cmdline_main_remote(
+            config.ptmproc_config, reporter=reporter,
+            orchestrator=config.ptmproc_orchestrator,
+            remote_clients=None,
+        )
+        return
+    else:
+        config.ptmproc_config.mode = ModeEnum.MODE_REMOTE_MAIN
+        # running distributed in automated fashion:
+        if config.ptmproc_config.project_config is None:
+            raise pytest.UsageError("When running remote, a project config file must be specified con command line,"
+                                    "or present in current working directory")
+        config.ptmproc_orchestrator = RemoteOrchestrator(project_config=config.ptmproc_config.project_config)
+        config.remote_coro = mproc_pytest_cmdline_main_remote(
+            config.ptmproc_config, reporter=reporter,
+            orchestrator=config.ptmproc_orchestrator,
+            remote_clients=mproc_remote_clients)
+        return
 
 
+def mproc_pytest_cmdline_worker(config):
+    config.ptmproc_config.num_cores = 1
+    config.ptmproc_orchestrator = None
+    worker.pytest_cmdline_main(config)
+    assert config.ptmproc_worker
+
+
+def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_port: int, orchestration_port: int):
+    assert 'PTMPROC_WORKER' not in os.environ
+    config.option.no_summary = True
+    config.option.no_header = True
+    host = host or _get_ip_addr()
+    if host is None:
+        raise SystemError("Unable to determine ip address/hostname of local machine. Aborting")
+    always_print(
+        f"Running as coordinator as host {host} and port {global_mgr_port}, {orchestration_port}[{os.getpid()}]"
+    )
+    config.ptmproc_coordinator = coordinator_main(
+        global_mgr_port=global_mgr_port,
+        orchestration_port=orchestration_port,
+        host=host,
+    )
+    args, addl_env = _determine_cli_args()
+    config.ptmproc_coordinator.start_workers(config.ptmproc_config.num_cores, args=args, addl_env=addl_env)
+
+
+def mproc_pytest_cmdline_main_local(config: PytestMprocConfig, orchestrator: LocalOrchestrator, reporter: BasicReporter
+                                    ) -> None:
+    assert "--as-worker-node" not in sys.argv
+    reporter.write(f"Running locally as main\n", green=True)
+    orchestrator.start(config.num_cores)
+
+
+def mproc_pytest_cmdline_main_remote(config: PytestMprocConfig, reporter: BasicReporter,
+                                     orchestrator: RemoteOrchestrator, remote_clients):
+    assert "--as-worker-node" not in sys.argv
+    config.ptmproc_http_session = None
+    project_config = config.project_config
+    if project_config is None:
+        raise pytest.UsageError("When running remote, a project config file must be specified con command line,"
+                                "or present in current working directory")
+    version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
+    if bool(project_config) != bool(remote_clients):
+        # basically if only one is None
+        raise pytest.UsageError(f"Must specify both project config and remote clients together or not at all "
+                                f"{project_config} {remote_clients}")
+    mproc_remote_sys_executable = config.remote_sys_executable or f"/usr/bin/python{version}"
+    remote_clients = [remote_clients] if isinstance(remote_clients, str) else remote_clients
+    config.remote_hosts = None if not remote_clients\
+        else RemoteWorkerConfig.from_raw_list(remote_clients)
+    config.ptmproc_http_session = RemoteWorkerConfig.http_session()
+    config.remote_sys_executable = mproc_remote_sys_executable
+    reporter.write(f"Running with remotes as main\n", green=True)
+    return orchestrator.start(remote_workers_config=config.remote_hosts,
+                              deploy_timeout=config.connection_timeout,
+                              num_cores=config.num_cores)
+
+
+# noinspection SpellCheckingInspection
 def pytest_sessionstart(session):
     with suppress(Exception):
         reporter = session.config.pluginmanager.getplugin('terminalreporter')
@@ -350,16 +364,30 @@ def pytest_sessionstart(session):
 
 @pytest.mark.trylast
 def pytest_configure(config):
-    if not config.option.worker and \
-            (config.option.ptmproc_config.num_cores is None or getattr(config.option, "mproc_disabled")):
+    if config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
+        return
+    if not config.ptmproc_worker and \
+            (config.ptmproc_config.num_cores is None or getattr(config.option, "mproc_disabled")):
         return  # return of None indicates other hook impls will be executed to do the task at hand
-    # tell xdist not to run, (and BTW setting numprocesses is enough to tell pycov we are distributed)
+    # tell xdist not to run, (and BTW setting num_cores is enough to tell pycov we are distributed)
     config.option.dist = "no"
 
 
-# noinspection PyProtectedMember
+# noinspection PyProtectedMember,SpellCheckingInspection
 def pytest_runtestloop(session):
     if session.config.option.collectonly:
+        return
+    if len(session.items) == 0:
+        return
+    if session.config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
+        return
+    mode = session.config.ptmproc_config.mode
+    worker_ = session.config.ptmproc_worker
+    orchestrator = session.config.ptmproc_orchestrator
+    if not worker_ and session.config.ptmproc_config.num_cores is None \
+            or is_degraded() or getattr(session.config.option, "mproc_disabled"):
+        # return of None indicates other hook impls will be executed to do the task at hand
+        # aka, let the basic hook handle it from here, no distributed processing to be done
         return
     reporter: Optional[BasicReporter, _pytest.terminal.TerminalReporter] = \
         session.config.pluginmanager.getplugin('terminalreporter')
@@ -369,180 +397,169 @@ def pytest_runtestloop(session):
         reporter = BasicReporter()
     if session.testsfailed and not session.config.option.continue_on_collection_errors:
         raise session.Interrupted("%d errors during collection!!" % session.testsfailed)
-
-    if session.config.option.collectonly:
-        return  # should never really get here, but for consistency
-    if len(session.items) == 0:
-        return
-    if not session.config.option.worker and session.config.option.ptmproc_config.num_cores is None \
-            or is_degraded() or getattr(session.config.option, "mproc_disabled"):
-        # return of None indicates other hook impls will be executed to do the task at hand
-        # aka, let the basic hook handle it from here, no distributed processing to be done
-        return
-    if session.shouldfail:
-        if session.config.ptmproc_runtime.coordinator is not None:
-            session.config.ptmproc_runtime.coordinator.kill()
-        if session.config.ptmproc_runtime.mproc_main is not None:
-            session.config.ptmproc_runtime.mproc_main.kill()
-        raise session.Failed(session.shouldfail)
-
-    session.config.generated_fixtures = []
-
-    if not hasattr(session.config.option, "fixtures"):
-        session.config.option.fixtures = {}
-    if not session.config.option.worker \
-            and session.config.ptmproc_runtime \
-            and session.config.ptmproc_runtime.coordinator:
-        for item in session.items:
-            if session.shouldfail:
-                break
-            if hasattr(item, "_request"):
-                for name in item._fixtureinfo.argnames:
-                    try:
-                        fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
-                        if not fixturedef or fixturedef.scope != 'node':
-                            continue
-                        if hasattr(fixturedef.func, "_pytest_group"):
-                            if hasattr(item._pyfuncitem.obj, "_pytest_group"):
-                                group2 = item._pyfuncitem.obj._pytest_group
-                                if group2 == fixturedef.func._pytest_group:
-                                    BasicReporter().write(
-                                        f"WARNING: '{item.nodeid}' specifies a group but also belongs " +
-                                        f"to fixture '{fixturedef.argname}'' which specifies the same group")
-                                else:
-                                    raise raise_usage_error(
-                                        session,
-                                        f"test {item.nodeid} belongs to group '{group2.name}' but also belongs " +
-                                        f"to fixture '{fixturedef.argname}' which specifies " +
-                                        f"group '{fixturedef.func._pytest_group.name}'.  A test cannot" +
-                                        "belong to two distinct groups")
-                            item._pyfuncitem._pytest_group = fixturedef.func._pytest_group
-                    except Exception as e:
-                        session.shouldfail = \
-                            f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}' {format_exc()}"
-                        reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
-                        break
-    if not session.config.option.worker \
-            and session.config.ptmproc_runtime\
-            and session.config.ptmproc_runtime.mproc_main:
-        orchestrator = session.config.ptmproc_runtime.mproc_main
+    for item in session.items:
+        if session.shouldfail:
+            break
+        if hasattr(item, "_request"):
+            for name in item._fixtureinfo.argnames:
+                try:
+                    fixturedef = item._fixtureinfo.name2fixturedefs.get(name, [None])[0]
+                    if not fixturedef or fixturedef.scope != 'node':
+                        continue
+                    if hasattr(fixturedef.func, "_pytest_group"):
+                        if hasattr(item._pyfuncitem.obj, "_pytest_group"):
+                            group2 = item._pyfuncitem.obj._pytest_group
+                            if group2 == fixturedef.func._pytest_group:
+                                BasicReporter().write(
+                                    f"WARNING: '{item.nodeid}' specifies a group but also belongs " +
+                                    f"to fixture '{fixturedef.argname}'' which specifies the same group")
+                            else:
+                                raise pytest.UsageError(
+                                    session,
+                                    f"test {item.nodeid} belongs to group '{group2.name}' but also belongs " +
+                                    f"to fixture '{fixturedef.argname}' which specifies " +
+                                    f"group '{fixturedef.func._pytest_group.name}'.  A test cannot" +
+                                    "belong to two distinct groups")
+                        item._pyfuncitem._pytest_group = fixturedef.func._pytest_group
+                except Exception as e:
+                    session.shouldfail = \
+                        f"Exception in fixture: {e.__class__.__name__} raised with msg '{str(e)}' {format_exc()}"
+                    reporter.write(f">>> Fixture ERROR: {format_exc()}\n", red=True)
+                    break
+    if mode in (ModeEnum.MODE_REMOTE_MAIN, ModeEnum.MODE_LOCAL_MAIN):
+        orchestrator = session.config.ptmproc_orchestrator
         try:
             async def loop():
                 if session.config.remote_coro:
                     await session.config.remote_coro
                 async with orchestrator:
-                    orchestrator.set_items(session.items)
-                    await orchestrator.run_loop(session)
+                    await orchestrator.run_loop(session, session.items)
             asyncio.get_event_loop().run_until_complete(loop())
+        except asyncio.exceptions.CancelledError:
+            pytest.exit("Tests canceled")
         except Exception as e:
             reporter.write(format_exc() + "\n", red=True)
             reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
             raise SystemError() from e
-    elif session.config.option.worker:
-        session.config.option.worker.test_loop(session)
-    elif session.config.ptmproc_runtime.coordinator:
-        session.config.ptmproc_runtime.coordinator.shutdown()
+    elif mode == ModeEnum.MODE_WORKER:
+        with suppress(Exception):
+            session.config.ptmproc_worker.test_loop(session)
+    elif mode == ModeEnum.MODE_COORDINATOR:
+        session.config.ptmproc_coordinator.wait()
     return True
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_collection_finish(session) -> None:
-    config = session.config
-    verbose = config.option.verbose
-    if config.option.worker \
-            or (config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main):
-        config.option.verbose = -2
-    if session.config.option.worker:
-        session.config.option.worker.pytest_collection_finish(session)
-    yield
-    config.option.verbose = verbose
+    if session.config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
+        yield
+    else:
+        config = session.config
+        verbose = config.option.verbose
+        if config.ptmproc_worker:
+            config.option.verbose = -2
+        if session.config.ptmproc_worker:
+            with suppress(Exception):
+                session.config.ptmproc_worker.pytest_collection_finish(session)
+        yield
+        config.option.verbose = verbose
 
 
+# noinspection SpellCheckingInspection
 def pytest_internalerror(excrepr):
-    from pytest_mproc.worker import WorkerSession
     if WorkerSession.singleton():
         return WorkerSession.singleton().pytest_internalerror(excrepr)
 
 
+# noinspection SpellCheckingInspection
 @pytest.mark.tryfirst
 def pytest_runtest_logreport(report):
-    from pytest_mproc.worker import WorkerSession
     if WorkerSession.singleton():
         return WorkerSession.singleton().pytest_runtest_logreport(report)
 
 
-# noinspection PyUnusedLocal
+# noinspection SpellCheckingInspection
+@pytest.mark.tryfirst
+def pytest_runtest_logstart(nodeid, location):
+    if WorkerSession.singleton():
+        return WorkerSession.singleton().pytest_runtest_logstart(nodeid=nodeid, location=location)
+
+
+# noinspection SpellCheckingInspection
+@pytest.mark.tryfirst
+def pytest_runtest_logfinish(nodeid, location):
+    if WorkerSession.singleton():
+        return WorkerSession.singleton().pytest_runtest_logfinish(nodeid=nodeid, location=location)
+
+
+# noinspection PyUnusedLocal,SpellCheckingInspection
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    verbose = config.option.verbose
-    if config.option.worker:
-        config.option.tbstyle = 'no'
-        terminalreporter.reportchars = ""
-    elif config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main:
-        config.option.verbose = -2
-    elif config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main:
-        config.option.tbstyle = 'no'
-        terminalreporter.reportchars = ""
-        if user_output.verbose:
-            terminalreporter.line(">>> This is a satellite processing node. "
-                                  "Please see master node output for actual test summary <<<<<<<<<<<<",
-                                  yellow=True)
-    yield
-    if config.option.worker:
+    if config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
+        yield
+    else:
+        verbose = config.option.verbose
+        if config.ptmproc_worker:
+            config.option.verbose = -2
+            config.option.tbstyle = 'no'
+            terminalreporter.reportchars = ""
+            if user_output.is_verbose:
+                terminalreporter.line(">>> This is a satellite processing node. "
+                                      "Please see master node output for actual test summary <<<<<<<<<<<<",
+                                      yellow=True)
+        yield
+        if config.ptmproc_worker:
+            config.option.verbose = verbose
+
+
+# noinspection PyUnusedLocal,SpellCheckingInspection
+@pytest.hookimpl(hookwrapper=True)
+def pytest_report_header(config, startdir):
+    if config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
+        yield
+    else:
+        verbose = config.option.verbose
+        if config.ptmproc_worker:
+            config.option.verbose = -2
+        yield
         config.option.verbose = verbose
 
 
-# noinspection PyUnusedLocal
-@pytest.hookimpl(hookwrapper=True)
-def pytest_report_header(config, startdir):
-    verbose = config.option.verbose
-    if config.option.worker \
-            or (config.ptmproc_runtime and not config.ptmproc_runtime.mproc_main):
-        config.option.verbose = -2
-    yield
-    config.option.verbose = verbose
-
-
+# noinspection SpellCheckingInspection
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_sessionstart(session) -> None:
-    verbose = session.config.option.verbose
-    if session.config.option.worker\
-            or (session.config.ptmproc_runtime and not session.config.ptmproc_runtime.mproc_main):
-        session.config.option.verbose = -2
-    yield
-    session.config.option.verbose = verbose
+    if session.config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
+        yield
+    else:
+        verbose = session.config.option.verbose
+        if session.config.ptmproc_worker:
+            session.config.option.verbose = -2
+        yield
+        session.config.option.verbose = verbose
 
 
+# noinspection SpellCheckingInspection
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_sessionfinish(session):
-    verbose = session.config.option.verbose
-    with suppress(Exception):
-        fixtures.Node.Manager.shutdown()
-    if session.config.option.worker:
-        session.config.option.verbose = -2
-    if session.config.ptmproc_runtime and not session.config.ptmproc_runtime.mproc_main:
-        session.config.option.verbose = -2
-    if not session.config.option.worker and session.config.ptmproc_runtime\
-            and session.config.ptmproc_runtime.coordinator is not None:
+    if session.config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
+        yield
+    else:
+        verbose = session.config.option.verbose
         with suppress(Exception):
-            session.config.ptmproc_runtime.coordinator.kill()
-    if not session.config.option.worker and session.config.ptmproc_runtime\
-            and session.config.ptmproc_runtime.mproc_main is not None:
-        orchestrator = session.config.ptmproc_runtime.mproc_main
-        orchestrator.output_summary()
-        orchestrator.shutdown()
-        if session.config.http_session is not None:
-            session.config.http_session.end_session_sync()
-    yield
-    session.config.option.verbose = verbose
-    with suppress(Exception):
-        fixtures.Global.Manager.stop()
+            fixtures.Node.Manager.shutdown()
+        if session.config.ptmproc_worker:
+            session.config.option.verbose = -2
+        orchestrator = session.config.ptmproc_orchestrator
+        if orchestrator:
+            orchestrator.output_summary()
+            orchestrator.shutdown()
+            if session.config.ptmproc_http_session is not None:
+                session.config.ptmproc_http_session.end_session_sync()
+        yield
+        session.config.option.verbose = verbose
+        with suppress(Exception):
+            fixtures.Global.Manager.stop()
 
-
-def raise_usage_error(session, msg: str):
-    if session.config.ptmproc_runtime.coordinator is not None:
-        session.config.ptmproc_runtime.coordinator.kill()
-    raise pytest.UsageError(msg)
 
 ################
 # Process-safe temp dir
