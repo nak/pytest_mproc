@@ -8,7 +8,7 @@ jobs:
       - image: circleci/python:3.7.4
         environment:
           PYTHONASYNCIODEBUG: 1
-          PYTHONPATH: ../src:.
+          PYTHONPATH: ../src:.:../testsrc
     steps:
       - checkout
       - restore_cache:
@@ -20,6 +20,13 @@ jobs:
             . venv/bin/activate
             pip install --upgrade pip
             pip install -r requirements.txt
+            pip install pytest_asyncio
+            mkdir -p ~/.ssh
+            chmod go-rwx ~/.ssh
+            ssh-keygen -N "" -f ~/.ssh/id_rsa_pytest
+            eval "$(ssh-agent -s)"
+            ssh-add ~/.ssh/id_rsa_pytest
+            cp ~/.ssh/id_rsa_pytest.pub ~/.ssh/authorized_keys
       - save_cache:
           key: deps1-{{ .Branch }}-{{ checksum "requirements.txt" }}
           paths:
@@ -30,7 +37,7 @@ jobs:
             . venv/bin/activate
             python setup.py install
             cd test
-            ./run_test.sh
+            pytest -s . --ignore test_mproc_runs.py --ignore resources/project_tests/test_em.py
             cd ..
       - run:
           name: docs

@@ -49,7 +49,7 @@ async def test_validate_clients(project_config, mgr):
                                        mgr=mgr)
         count = 0
 
-        def mock_run(args, stdout: Any, timeout: int):
+        def mock_run(args, stdout: Any, stdin: Any=None, stderr: Any= None, timeout: int=0, **_kwargs):
             nonlocal count
             count += 1
             if count >= 3 and 'localhost' in args:
