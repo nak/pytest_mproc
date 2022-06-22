@@ -27,6 +27,7 @@ jobs:
             eval "$(ssh-agent -s)"
             ssh-add ~/.ssh/id_rsa_pytest
             cp ~/.ssh/id_rsa_pytest.pub ~/.ssh/authorized_keys
+            /usr/sbin/sshd
       - save_cache:
           key: deps1-{{ .Branch }}-{{ checksum "requirements.txt" }}
           paths:
