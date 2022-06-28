@@ -206,8 +206,6 @@ class AsyncMPQueue:
                 return item
             except Empty:
                 await asyncio.sleep(self.INTERVAL_POLLING)
-            finally:
-                await asyncio.sleep(0)
 
     async def put(self, item) -> None:
         """

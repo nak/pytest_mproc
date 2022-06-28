@@ -311,7 +311,7 @@ class OrchestrationManager:
     def get_coordinator(self, host) -> Coordinator.ClientProxy:
         # noinspection PyUnresolvedReferences
         q = self._mp_manager.get_coordinator_q(host)
-        return Coordinator.ClientProxy(q)
+        return Coordinator.ClientProxy(q, host)
 
     def get_coordinator_q(self, host) -> JoinableQueue:
         # noinspection PyUnresolvedReferences

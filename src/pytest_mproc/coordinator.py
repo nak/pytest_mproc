@@ -42,8 +42,13 @@ class Coordinator:
         ConnectionError is thrown from the orchestrator when processing the register call)
         """
 
-        def __init__(self, q: JoinableQueue):
+        def __init__(self, q: JoinableQueue, host: str):
             self._q = q
+            self._host = host
+
+        @property
+        def host(self):
+            return self._host
 
         def kill(self):
             self._q.put(('kill',))

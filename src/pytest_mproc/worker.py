@@ -224,12 +224,10 @@ class WorkerSession:
         from pytest_mproc.fixtures import Node
         always_print(f"Starting worker on ports {orchestration_port} {global_mgr_port}", as_error=True)
         Node.Manager.singleton()
-        env = os.environ.copy()
-        env.update(addl_env)
+        env = addl_env
         if root_path is not None:
             site_pkgs = root_path / 'site-packages'
-            env['PYTHONPATH'] = str(site_pkgs) if 'PYTHONPATH' not in os.environ\
-                else f"{str(site_pkgs)}:{os.environ['PYTHONPATH']}"
+            env['PYTHONPATH'] = str(site_pkgs)
         env.update({
             "PTMPROC_WORKER": "1",
             "AUTH_TOKEN_STDIN": "1",
@@ -237,10 +235,10 @@ class WorkerSession:
             'PTMPROC_NODE_MGR_PORT': str(Node.Manager.PORT),
         })
         executable = str(venv_path / 'bin' / 'python3') if venv_path else sys.executable
-        run_dir = root_path / 'run' / f'Worker-{index[0]}-{index[1]}' \
-            if root_path is not None else Path(os.getcwd()) / 'run' / f'Worker-{index[0]}-{index[1]}'
-        run_dir.mkdir(exist_ok=True, parents=True)
         main_run_path = root_path / 'run' if root_path and root_path != Path(os.getcwd()) else Path(os.getcwd())
+        main_run_path.mkdir(exist_ok=True, parents=True)
+        run_dir = (root_path or Path(os.getcwd())) / 'workers' / f'run-Worker-{index[0]}-{index[1]}'
+        run_dir.mkdir(exist_ok=True, parents=True)
         files = glob(str(main_run_path / '*'))
         for f in [Path(f) for f in files if Path(f) != main_run_path]:
             target = run_dir / f.relative_to(main_run_path)
@@ -336,7 +334,6 @@ class WorkerSession:
 
 
 def pytest_cmdline_main(config):
-    assert os.environ.get("PTMPROC_WORKER") == '1'
     config.ptmproc_worker = WorkerSession.singleton()
     config.ptmproc_config.mode = ModeEnum.MODE_WORKER
 

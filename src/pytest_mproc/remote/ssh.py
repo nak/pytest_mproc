@@ -621,13 +621,13 @@ async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_r
     :param remote_root: an explicit location on the remote host (will not be removed on exit of context)
     :return: the remote root created (or reflects the remote root provided explicitly)
     """
-    if not Settings.cache_dir:
+    if Settings.cache_dir is None:
         proc = await ssh_client.execute_remote_cmd('echo \${HOME}', stdout=asyncio.subprocess.PIPE, shell=True)
         stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
         if proc.returncode != 0 or not stdout_text:
             proc = await ssh_client.execute_remote_cmd('pwd', stdout=asyncio.subprocess.PIPE, shell=True)
             stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
-            if proc.returncode != 0 or not stdout_text:
+            if (proc.returncode != 0 or not stdout_text) and remote_root is not None:
                 cache_path = remote_root
             else:
                 cache_path = Path(stdout_text) / '.ptmproc' / 'cache'

@@ -528,8 +528,7 @@ class RemoteOrchestrator(Orchestrator):
         remote_orch_mgr_port = await ssh_client.find_free_port()
         port_fwd_proc1 = await ssh_client.reverse_port_forward(local_global_mgr_port, remote_global_mgr_port)
         port_fwd_proc2 = await ssh_client.reverse_port_forward(local_orchestration_port, remote_orch_mgr_port)
-        python_path = str(site_pkgs_path) if 'PYTHONPATH' not in os.environ \
-            else f"{str(site_pkgs_path)}:{os.environ['PYTHONPATH']}"
+        python_path = str(site_pkgs_path)
         env = {'AUTH_TOKEN_STDIN': '1',
                'PYTHONPATH': python_path}
         proc = await ssh_client.launch_remote_command(

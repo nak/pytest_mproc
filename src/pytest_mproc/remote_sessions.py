@@ -56,12 +56,13 @@ class RemoteSessionManager:
         self._tmp_path.__enter__()
         self._bundle.__enter__()
         self._remote_roots: Dict[str, Path] = {}
+        self._coordinators: Dict[str, Coordinator.ClientProxy] = {}
+        self._ssh_clients: Dict[str, SSHClient] = {}
 
     def shutdown(self):
         for host, remote_root in self._remote_roots.items():
             with suppress(Exception):
-                ssh_client = SSHClient(username=Settings.ssh_username or Settings.ssh_username,
-                                       password=Settings.ssh_password, host=host)
+                ssh_client = self._ssh_clients[host]
                 artifacts_zip = remote_root / ARTIFACTS_ZIP
                 always_print(f"\n>> Pulling {artifacts_zip} from {host}\n")
                 ssh_client.pull_sync(artifacts_zip, Path('.') / ARTIFACTS_ZIP)
@@ -87,9 +88,7 @@ class RemoteSessionManager:
         for host, remote_pids in self._worker_pids.items():
             for remote_pid in remote_pids:
                 with suppress(Exception):
-                    ssh_client = SSHClient(username=Settings.ssh_username or Settings.ssh_username,
-                                           password=Settings.ssh_password, host=host)
-                    ssh_client.signal_sync(remote_pid, signal.SIGKILL)
+                    self._ssh_clients[host].signal_sync(remote_pid, signal.SIGKILL)
         self._worker_pids = {}
 
         async def cleanup():
@@ -121,8 +120,7 @@ class RemoteSessionManager:
     async def _deploy(self, worker_config: RemoteWorkerConfig,
                       remote_root: Path, remote_venv: Path, timeout: Optional[float] = None,):
         host = worker_config.remote_host
-        ssh_client = SSHClient(username=worker_config.ssh_username or Settings.ssh_username,
-                               password=Settings.ssh_password, host=host)
+        ssh_client = self._ssh_clients[worker_config.remote_host]
         await self._bundle.deploy(
             ssh_client=ssh_client,
             remote_root=remote_root,
@@ -142,6 +140,10 @@ class RemoteSessionManager:
             deploy_timeout: Optional[float] = None,
             env: Dict[str, str] = None,
     ):
+        self._ssh_clients[worker_config.remote_host] = SSHClient(
+            username=worker_config.ssh_username or Settings.ssh_username,
+            password=Settings.ssh_password,
+            host=worker_config.remote_host)
         if worker_config.remote_host not in self._deployment_tasks:
             self._deployment_tasks[worker_config.remote_host] = asyncio.create_task(
                 self._deploy(worker_config, timeout=deploy_timeout, remote_root=remote_root, remote_venv=remote_venv)
@@ -150,6 +152,7 @@ class RemoteSessionManager:
         async def start(index: int):
             try:
                 await self._deployment_tasks[worker_config.remote_host]
+                self._coordinators[worker_config.remote_host] = coordinator
                 worker_pid = coordinator.start_worker(index=index, args=args, addl_env=env)
                 self._worker_pids.setdefault(worker_config.remote_host, []).append(worker_pid)
                 if not self._validate_task:
@@ -169,10 +172,11 @@ class RemoteSessionManager:
 
         :param results_q: Used to signal a client died
         """
-        while self._worker_pids:
-            for host in list(self._worker_pids.keys()):
+        while self._coordinators:
+            for host, coordinator in self._coordinators.copy().items():
                 # test if worker is active
                 try:
+
                     completed = subprocess.run(["ping", "-W",  "1", "-c", "1", host],
                                                stdout=subprocess.DEVNULL,
                                                timeout=5)
@@ -183,8 +187,11 @@ class RemoteSessionManager:
                 if not active:
                     always_print(f"Host {host} unreachable!")
                     worker_pids = self._worker_pids.get(host)
-                    ssh_client = SSHClient(username=Settings.ssh_username or Settings.ssh_username,
-                                           password=Settings.ssh_password, host=host)
+                    ssh_client = self._ssh_clients[host]
+                    await ssh_client.execute_remote_cmd("echo", "PONG",
+                                                        stdout=asyncio.subprocess.DEVNULL,
+                                                        stderr=asyncio.subprocess.DEVNULL,
+                                                        timeout=2)
                     for worker_pid in worker_pids:
                         await ssh_client.signal(worker_pid, signal.SIGKILL)
                         # this will attempt to reschedule test

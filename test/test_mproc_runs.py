@@ -52,7 +52,7 @@ def test_some_alg1(global_fix, queue_fixture):
     Something().some_alg1()
 
 
-@pytest.mark.parametrize('data', ['a%s' % i for i in range(100)])
+@pytest.mark.parametrize('data', ['a%s' % i for i in range(400)])
 def test_some_alg2(data, some_fixture, global_fix):
     time.sleep(0.2)
     assert global_fix == 42
