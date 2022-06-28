@@ -152,9 +152,6 @@ async def test_populate_test_queue(project_config: ProjectConfig):
         tests = [TestBatch(['test1.1', 'test1.2'], priority=2)] + \
                 [TestBatch([f'test3.{n}' for n in range(100)], priority=5)] + \
                 [TestBatch([f'test{n}.1'], priority=1) for n in range(100)]
-        orchestrator.mp_mgr.register_worker(
-            ('localhost', 42)  #  WorkerSession(1, False, None, None)))  # we only use count, so any object to register will do
-        )
         try:
             task = asyncio.create_task(orchestrator.populate_test_queue(tests=tests))
             test_batch = await asyncio.wait_for(orchestrator._test_q.get(), timeout=5)

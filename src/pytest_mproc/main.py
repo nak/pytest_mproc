@@ -106,14 +106,14 @@ class Orchestrator(ABC):
         for exit_result in self._exit_results:
             if exit_result.test_count > 0:
                 sys.stdout.write(
-                    f"Process Worker-{exit_result.worker_index} executed " +
+                    f"Process {exit_result.worker_id} executed " +
                     f"{exit_result.test_count} tests in {exit_result.resource_utilization.time_span:.2f} " +
                     f"seconds; User CPU: {exit_result.resource_utilization.user_cpu:.2f}%, " +
                     f"Sys CPU: {exit_result.resource_utilization.system_cpu:.2f}%, " +
                     f"Mem consumed (additional from base): "
                     f"{exit_result.resource_utilization.memory_consumed / 1000.0:.2f}M\n")
             else:
-                sys.stdout.write(f"Process Worker-{exit_result.worker_index} executed 0 tests\n")
+                sys.stdout.write(f"Process {exit_result.worker_id} executed 0 tests\n")
         sys.stdout.write("\n")
         if self._rusage:
             time_span = self._rusage.time_span
@@ -392,7 +392,7 @@ class LocalOrchestrator(Orchestrator):
             orchestration_port=self._orchestration_mgr.port,
             artifacts_dir=project_config.artifcats_path
         )
-        self._orchestration_mgr.register_coordinator(host='localhost', coordinator=self._coordinator)
+        # self._orchestration_mgr.register_coordinator(host='localhost', coordinator=self._coordinator)
 
     def start(self, num_processes: int, env: Optional[Dict[str, str]] = None) -> Coordinator:
         # one core for each worker times num_processes workers
@@ -560,7 +560,6 @@ class RemoteOrchestrator(Orchestrator):
 
     def shutdown(self, normally: bool = False):
         # with suppress(Exception):
-        self._remote_session.shutdown()
         for coordinator in self._coordinators.values():
             try:
                 coordinator.shutdown(timeout=3)
@@ -568,6 +567,7 @@ class RemoteOrchestrator(Orchestrator):
                 if normally:
                     always_print(f"!! EXCEPTION shutting down coordinator: {e}")
         self._coordinators = {}
+        self._remote_session.shutdown()
         for proc in self._port_fwd_procs:
             with suppress(Exception):
                 proc.terminate()

@@ -60,7 +60,8 @@ class RemoteSessionManager:
     def shutdown(self):
         for host, remote_root in self._remote_roots.items():
             with suppress(Exception):
-                ssh_client = SSHClient(username=Settings.ssh_username, password=Settings.ssh_password, host=host)
+                ssh_client = SSHClient(username=Settings.ssh_username or Settings.ssh_username,
+                                       password=Settings.ssh_password, host=host)
                 artifacts_zip = remote_root / ARTIFACTS_ZIP
                 always_print(f"\n>> Pulling {artifacts_zip} from {host}\n")
                 ssh_client.pull_sync(artifacts_zip, Path('.') / ARTIFACTS_ZIP)
@@ -75,33 +76,40 @@ class RemoteSessionManager:
                     os.remove(ARTIFACTS_ZIP)
                 else:
                     always_print(f"\n!! Failed to unzip {Path('.') / ARTIFACTS_ZIP}\n")
+        self._remote_roots = {}
         with suppress(Exception):
             self._validate_task.cancel()
         for task in list(self._deployment_tasks.values()) + self._worker_tasks:
             with suppress(Exception):
                 task.cancel()
+        self._deployment_tasks = {}
+        self._worker_tasks = []
         for host, remote_pids in self._worker_pids.items():
             for remote_pid in remote_pids:
                 with suppress(Exception):
-                    ssh_client = SSHClient(username=Settings.ssh_username, password=Settings.ssh_password, host=host)
+                    ssh_client = SSHClient(username=Settings.ssh_username or Settings.ssh_username,
+                                           password=Settings.ssh_password, host=host)
                     ssh_client.signal_sync(remote_pid, signal.SIGKILL)
         self._worker_pids = {}
 
         async def cleanup():
             for context in self._contexts.values():
-                await context.__aexit__(None, None, None)
+                with suppress(Exception):
+                    await context.__aexit__(None, None, None)
         try:
             if asyncio.get_event_loop().is_running():
                 asyncio.create_task(cleanup())
         except RuntimeError:
             pass
+        self._contexts = {}
         with suppress(Exception):
             self._tmp_path.__exit__(None, None, None)
         with suppress(Exception):
             self._bundle.__exit__(None, None, None)
 
     async def setup_venv(self, worker_config: RemoteWorkerConfig):
-        ssh_client = SSHClient(username=worker_config.ssh_username, password=Settings.ssh_password,
+        ssh_client = SSHClient(username=worker_config.ssh_username or Settings.ssh_username,
+                               password=Settings.ssh_password,
                                host=worker_config.remote_host)
         context = remote_root_context(self._project_name, ssh_client, worker_config.remote_root)
         self._contexts[worker_config.remote_host] = context
@@ -113,7 +121,8 @@ class RemoteSessionManager:
     async def _deploy(self, worker_config: RemoteWorkerConfig,
                       remote_root: Path, remote_venv: Path, timeout: Optional[float] = None,):
         host = worker_config.remote_host
-        ssh_client = SSHClient(username=worker_config.ssh_username, password=Settings.ssh_password, host=host)
+        ssh_client = SSHClient(username=worker_config.ssh_username or Settings.ssh_username,
+                               password=Settings.ssh_password, host=host)
         await self._bundle.deploy(
             ssh_client=ssh_client,
             remote_root=remote_root,
@@ -125,7 +134,7 @@ class RemoteSessionManager:
     async def start_worker(
             self,
             worker_config: RemoteWorkerConfig,
-            coordinator: Coordinator,
+            coordinator: Coordinator.ClientProxy,
             args: List[str],
             results_q: AsyncMPQueue,
             remote_root: Path,
@@ -147,8 +156,8 @@ class RemoteSessionManager:
                     self._validate_task = asyncio.create_task(self.validate_clients(results_q=results_q))
             except Exception as e:
                 import traceback
-                always_print(traceback.format_exc())
-                always_print(f"EXCEPTION in starting worker: {e}")
+                always_print(traceback.format_exc(), as_error=True)
+                always_print(f"EXCEPTION in starting worker: {e}", as_error=True)
                 raise
 
         self._worker_tasks.append(asyncio.create_task(start(len(self._worker_tasks) + 1)))
@@ -174,7 +183,8 @@ class RemoteSessionManager:
                 if not active:
                     always_print(f"Host {host} unreachable!")
                     worker_pids = self._worker_pids.get(host)
-                    ssh_client = SSHClient(username=Settings.ssh_username, password=Settings.ssh_password, host=host)
+                    ssh_client = SSHClient(username=Settings.ssh_username or Settings.ssh_username,
+                                           password=Settings.ssh_password, host=host)
                     for worker_pid in worker_pids:
                         await ssh_client.signal(worker_pid, signal.SIGKILL)
                         # this will attempt to reschedule test

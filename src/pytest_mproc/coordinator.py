@@ -7,6 +7,7 @@ import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from multiprocessing import JoinableQueue
 
 from pathlib import Path
 from subprocess import TimeoutExpired
@@ -15,7 +16,7 @@ from typing import Optional, List, Dict
 from pytest_mproc import user_output
 from pytest_mproc.constants import ARTIFACTS_ZIP
 
-from pytest_mproc.user_output import always_print
+from pytest_mproc.user_output import always_print, debug_print
 from pytest_mproc.fixtures import Global
 from pytest_mproc.worker import WorkerSession
 from pytest_mproc.utils import BasicReporter
@@ -31,6 +32,78 @@ class Coordinator:
     Context manager for kicking off worker Processes to conduct test execution via pytest hooks
     Coordinators are scoped to a node and only handle a collection of workers on that node
     """
+
+    class ClientProxy:
+        """
+        proxy interface for distributed communications;
+
+        NOTE: on either some machine or with VPN/firewall configurations
+        registering the Coordinator class doesn't work (upon registering coordinator with the orchestrator, a
+        ConnectionError is thrown from the orchestrator when processing the register call)
+        """
+
+        def __init__(self, q: JoinableQueue):
+            self._q = q
+
+        def kill(self):
+            self._q.put(('kill',))
+
+        def shutdown(self, timeout: Optional[float] = None):
+            self._q.put(('shutdown', timeout))
+            self._q.join()
+            self._q.get()
+
+        def start_workers(
+            self, num_processes: int,
+            addl_env: Optional[Dict[str, str]] = None,
+            args: Optional[List[str]] = None
+        ):
+            self._q.put(('start_workers', num_processes, addl_env, args))
+
+        def start_worker(self, index: int, args: List[str], addl_env: Dict[str, str]) -> int:
+            self._q.put(('start_worker', index, args, addl_env))
+            self._q.join()
+            pid = self._q.get()
+            self._q.task_done()
+            return pid
+
+        def count(self) -> int:
+            self._q.put(('count',))
+            self._q.join()
+            count = self._q.get()
+            self._q.task_done()
+            return count
+
+    class HostProxy:
+        """
+        Host Proxy to listen for incoming commands (see above discuttion on ClientProxy as to why we need this)
+        """
+
+        def __init__(self, q: JoinableQueue, target: "Coordinator"):
+            self._q = q
+            self._target = target
+
+        def loop(self):
+            cmd = None
+            try:
+                while cmd not in ('shutdown', 'kill'):
+                    cmd, *args = self._q.get()
+                    self._q.task_done()
+                    if cmd == 'kill':
+                        self._target.kill()
+                    elif cmd == 'shutdown':
+                        self._target.shutdown(*args)
+                        self._q.put(None)  # just a signal
+                    elif cmd == 'start_workers':
+                        self._target.start_workers(*args)
+                    elif cmd == 'start_worker':
+                        pid = self._target.start_worker(*args)
+                        self._q.put(pid)
+                    elif cmd == 'count':
+                        count = self._target.count()
+                        self._q.put(count)
+            except (EOFError, KeyboardInterrupt, BrokenPipeError, ConnectionError):
+                self._target.shutdown(timeout=5)
 
     _singleton: Optional["Coordinator"] = None
 
@@ -56,7 +129,6 @@ class Coordinator:
         if remote_root:
             remote_root = Path(os.getcwd())
             prepare_script = remote_root / 'prepare'
-            assert prepare_script.is_file() and os.access(prepare_script, os.X_OK)
             if prepare_script.is_file():
                 if not os.access(prepare_script, os.X_OK):
                     raise PermissionError(f"Prepare script is not executable")
@@ -72,11 +144,11 @@ class Coordinator:
                 if proc.returncode != 0:
                     raise RuntimeError(f"Failed to execute prepare script, return code {proc.returncode}")
 
-    def count(self) -> Value:
+    def count(self) -> int:
         """
         :return: current count of workers
         """
-        return Value(len(self._worker_procs))
+        return len(self._worker_procs)
 
     def start_worker(self, index: int, args: List[str], addl_env: Dict[str, str]) -> int:
         """
@@ -170,7 +242,8 @@ class Coordinator:
                     always_print(f"ERROR!: Unexpected exception in finalize execution: {e}")
         finally:
             if self._remote_root and self._artifacts_path.exists():
-                always_print(f"Zipping artifacts for transfer...")
+                always_print(f"Zipping artifacts to {Path('.') / ARTIFACTS_ZIP} for transfer...")
+                debug_print(f"Executing command  'zip -r {ARTIFACTS_ZIP} {str(self._relative_artifacts_path)}'")
                 completed = subprocess.run(
                     f"zip -r {ARTIFACTS_ZIP} {str(self._relative_artifacts_path)}",
                     shell=True,
@@ -201,21 +274,19 @@ class Coordinator:
 
 def coordinator_main(global_mgr_port: int, orchestration_port: int, host: str, index: int,
                      artifacts_path: Path, remote_root: Optional[Path] = None,
-                     remote_venv: Optional[Path] = None) -> Coordinator:
+                     remote_venv: Optional[Path] = None) -> Coordinator.HostProxy:
     """
     entry point for running as main
     """
-    from pytest_mproc.orchestration import OrchestrationManager, OrchestrationMPManager
+    from pytest_mproc.orchestration import OrchestrationManager
     Global.Manager.singleton(address=('localhost', global_mgr_port), as_client=True)
     mgr = OrchestrationManager.create_client(address=('localhost', orchestration_port))
-    OrchestrationMPManager.register("Value", Value)
-    OrchestrationMPManager.register("Coordinator", Coordinator, exposed=["start_workers", "start_worker",
-                                                                         "kill", "shutdown", "count"])
-    coordinator = mgr._mp_manager.Coordinator(global_mgr_port=global_mgr_port, orchestration_port=orchestration_port,
-                                              coordinator_index=index, artifacts_dir=artifacts_path,
-                                              remote_root=remote_root, remote_venv=remote_venv)
-    mgr.register_coordinator(host=host, coordinator=coordinator)
-    return coordinator
+    coordinator = Coordinator(global_mgr_port=global_mgr_port, orchestration_port=orchestration_port,
+                              coordinator_index=index, artifacts_dir=artifacts_path,
+                              remote_root=remote_root, remote_venv=remote_venv)
+    proxy = Coordinator.HostProxy(q=mgr.get_coordinator_q(host=host),
+                                  target=coordinator)
+    return proxy
 
 
 if __name__ == "__main__":
@@ -228,20 +299,14 @@ if __name__ == "__main__":
         _host, _global_mgr_port, _orchestration_port = uri.split(':')
         _global_mgr_port = int(_global_mgr_port)
         _orchestration_port = int(_orchestration_port)
-        _coordinator = coordinator_main(
+        _proxy = coordinator_main(
             orchestration_port=_orchestration_port, global_mgr_port=_global_mgr_port, host=_host, index=_index,
             artifacts_path=_artifacts_path, remote_root=_remote_root, remote_venv=_remote_venv
         )
         sys.stdout.write("\nSTARTED\n")
         sys.stdout.flush()
-        # block until client sends test on stdin as signal to terminate:
-        line = ""
-        while not line:
-            line = sys.stdin.readline()
-            if not _coordinator.count().value:
-                break
-            time.sleep(1)
-        _coordinator.shutdown(timeout=3)
+        _proxy.loop()
+        always_print(f"Coordinator {_index} completed")
     except Exception as _e:
         import traceback
         always_print(traceback.format_exc(), as_error=True)

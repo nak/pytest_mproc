@@ -232,7 +232,7 @@ class SSHClient:
             rc = await proc.wait()
         if rc != 0:
             stdout = await proc.stdout.read()
-            msg = f"\n!!! Copy from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} [{cmd}]\n"\
+            msg = f"\n!!! Copy failed from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} [{cmd}]\n"\
                   f"\n{stdout.decode('utf-8')}\n\n"
             always_print(msg)
             raise CommandExecutionFailure(msg, rc)
@@ -537,7 +537,7 @@ class SSHClient:
                                    stderr=sys.stderr,
                                    shell=True)
 
-    def signal_sync(self, pid, signal: int) -> None:
+    def signal_sync(self, pid: int, signal: int) -> None:
         """
         Kill process with assigned pid on remote host.
 
@@ -552,7 +552,8 @@ class SSHClient:
                                        timeout=3)
             if completed.returncode != 0:
                 if b'No such process' not in completed.stdout:
-                    always_print(f"Failed to kill remote pid {pid} on {self.destination}", as_error=True)
+                    always_print(f"Failed to kill remote pid {pid} on {self.destination}: {completed.stdout}",
+                                 as_error=True)
         except TimeoutError:
             always_print("Timeout trying to kill remote process")
 
@@ -562,6 +563,7 @@ class SSHClient:
         :param local_port: port on local machine to forward connection requests
         :param remote_port: port on remote machine to accept (forwarded) connections requests
         """
+        debug_print(f"Executing command 'ssh -N -L {local_port}:127.0.0.1:{remote_port} {self.destination}'")
         proc = await asyncio.subprocess.create_subprocess_exec(
             "ssh", "-N", "-L", f"{local_port}:127.0.0.1:{remote_port}", f"{self.destination}",
             stdout=asyncio.subprocess.PIPE,
@@ -579,7 +581,7 @@ class SSHClient:
         :param local_port: port on local machine to accept (reverse forwarded) connection requests
         :param remote_port: port on remote machine to  forward connections requests
         """
-        debug_print(f"Executing command 'ssh -N -R {local_port}:127.0.0.1:{remote_port} {self.destination}'")
+        debug_print(f"Executing command 'ssh -N -R {remote_port}:127.0.0.1:{local_port} {self.destination}'")
         proc = await asyncio.subprocess.create_subprocess_exec(
             "ssh", "-N", "-R", f"{remote_port}:127.0.0.1:{local_port}", f"{self.destination}",
             stdout=asyncio.subprocess.PIPE,

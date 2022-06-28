@@ -104,7 +104,7 @@ class TestState:
 
 @dataclass
 class ResultExit:
-    worker_index: int
+    worker_id: str
     test_count: int
     status: int
     duration: float

@@ -26,10 +26,6 @@ class Protocol(Enum):
     # local host
     REMOTE = 'remote'
     # explicit host ip address
-    SSH = 'ssh'
-    # dynamically launched on fixed remote node via ssh
-    DELEGATED = 'delegated'
-    # delegated to the first worker node available
 
 
 # rough estimate of number of results published for each test run by a worker
@@ -56,7 +52,6 @@ class OrchestrationMPManager(BaseManager):
         self._port = port
         self._host = host
         # only for SSH protocol:
-        self._coordinators: Dict[str, Coordinator] = {}
         self._workers: Dict[str, Tuple[str, int]] = {}
         self._is_server = False
         self._mproc_pid: Optional[int] = None
@@ -64,6 +59,7 @@ class OrchestrationMPManager(BaseManager):
         self._finalize_sem = multiprocessing.Semaphore(0)
         self._test_q = JoinableQueue(50)
         self._results_q = JoinableQueue(50 * _RESPONSES_TO_TEST_RATIO)
+        self._coordinator_q: Dict[str, JoinableQueue] = {}
         self._finalize_sem = Semaphore(0)
         self._all_tests_sent = False
 
@@ -98,9 +94,8 @@ class OrchestrationMPManager(BaseManager):
         OrchestrationMPManager.register("join")
         OrchestrationMPManager.register("finalize")
         OrchestrationMPManager.register("signal_all_tests_sent")
-        OrchestrationMPManager.register("register_coordinator")
         OrchestrationMPManager.register("register_worker")
-        OrchestrationMPManager.register("get_coordinator")
+        OrchestrationMPManager.register("get_coordinator_q")
         OrchestrationMPManager.register("count_raw")
         OrchestrationMPManager.register("completed")
         # noinspection SpellCheckingInspection
@@ -115,9 +110,8 @@ class OrchestrationMPManager(BaseManager):
         OrchestrationMPManager.register("join", self._join)
         OrchestrationMPManager.register("finalize", self._finalize)
         OrchestrationMPManager.register("signal_all_tests_sent", self._signal_all_tests_sent)
-        OrchestrationMPManager.register("register_coordinator", self._register_coordinator)
         OrchestrationMPManager.register("register_worker", self._register_worker)
-        OrchestrationMPManager.register("get_coordinator", self._get_coordinator)
+        OrchestrationMPManager.register("get_coordinator_q", self._get_coordinator_q)
         OrchestrationMPManager.register("count_raw", self._count)
         OrchestrationMPManager.register("completed", self._completed)
         # noinspection SpellCheckingInspection
@@ -126,8 +120,6 @@ class OrchestrationMPManager(BaseManager):
         OrchestrationMPManager.register("Semaphore", Semaphore, exposed=["acquire", "release"])
         OrchestrationMPManager.register("get_test_queue_raw", self._get_test_queue)
         OrchestrationMPManager.register("get_results_queue_raw", self._get_results_queue)
-        OrchestrationMPManager.register("Coordinator", Coordinator,
-                                        exposed=["start", "start_worker", "shutdown", "kill", "count"])
         # we only need these as dicts when running a standalone remote server handling multiple
         # pytest sessions/users
         always_print(f"Starting orchestration on {self._host}:{self._port}")
@@ -142,10 +134,10 @@ class OrchestrationMPManager(BaseManager):
         :param timeout: Optional timeout to wait
         :raises: TimeoutError if timeout is specified and reached before join completes
         """
-        for client in self._coordinators:  # empty if client
+        for client in self._coordinator_q.values():  # empty if client
             with suppress(ConnectionRefusedError, RemoteError):
                 # noinspection PyUnresolvedReferences
-                client.shutdown(timeout=timeout)
+                client.put(('shutdown', timeout))
 
     def shutdown(self) -> None:
         self.join(timeout=5)
@@ -172,20 +164,13 @@ class OrchestrationMPManager(BaseManager):
     def _get_results_queue(self) -> JoinableQueue:
         return self._results_q
 
-    # noinspection PyUnresolvedReferences
-    def _register_coordinator(self, client: Coordinator, host_: str):
-        """
-        Register coordinator for later shutdown
-        :param client: coordinator to register
-        """
-        self._coordinators[host_] = client
-
-    def _get_coordinator(self, host_: str) -> Coordinator:
+    def _get_coordinator_q(self, host_: str) -> JoinableQueue:
         """
         :param host_: host to search under
         :return: coordinator associated with host or None
         """
-        return self._coordinators.get(host_)
+        self._coordinator_q.setdefault(host_, JoinableQueue(10))
+        return self._coordinator_q[host_]
 
     def _register_worker(self, worker: Tuple[str, int]) -> "OrchestrationMPManager.Value":
         """
@@ -323,19 +308,14 @@ class OrchestrationManager:
         # noinspection PyUnresolvedReferences
         return self._mp_manager.signal_all_tests_sent()
 
-    def get_coordinator(self, host):
+    def get_coordinator(self, host) -> Coordinator.ClientProxy:
         # noinspection PyUnresolvedReferences
-        return self._mp_manager.get_coordinator(host)
+        q = self._mp_manager.get_coordinator_q(host)
+        return Coordinator.ClientProxy(q)
 
-    def register_coordinator(self, coordinator: Coordinator, host: str):
-        """
-        Register a coordinator for later shutdown
-
-        :param coordinator: which coordinator
-        :param host: host that is registering, for bookkeeping internally
-        """
+    def get_coordinator_q(self, host) -> JoinableQueue:
         # noinspection PyUnresolvedReferences
-        return self._mp_manager.register_coordinator(coordinator, host)
+        return self._mp_manager.get_coordinator_q(host)
 
     def register_worker(self, worker: Tuple[str, int]) -> int:
         """
