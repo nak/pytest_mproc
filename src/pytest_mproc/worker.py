@@ -259,7 +259,8 @@ class WorkerSession:
         stdout = subprocess.DEVNULL if not user_output.is_verbose else sys.stdout
         stderr = subprocess.STDOUT if user_output.is_verbose else sys.stderr
         proc = subprocess.Popen(
-            f"{executable} -m  {__name__} {orchestration_port} {global_mgr_port} {Node.Manager.PORT} Worker-{index[0]}-{index[1]}"
+            f"{executable} -m  {__name__} {orchestration_port} {global_mgr_port} {Node.Manager.PORT} "
+            f"Worker-{index[0]}-{index[1]} "
             f"{' '.join(args)} 2>&1 | tee {log}",
             env=env,
             stdout=stdout,
