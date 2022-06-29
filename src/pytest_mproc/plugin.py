@@ -201,7 +201,8 @@ def pytest_cmdline_main(config):
     mproc_num_cores = getattr(config.option, "mproc_numcores", None)
     mproc_mgr_ports = getattr(config.option, "mproc_mgr_ports", None)
     mproc_remote_clients = getattr(config.option, "mproc_remote_clients", None)
-    user_output.is_verbose = config.option.mproc_verbose
+    if config.option.mproc_verbose is True:
+        user_output.is_verbose = config.option.mproc_verbose
     config.ptmproc_worker = None
     config.ptmproc_orchestrator = None
     config.ptmproc_coordinator = None

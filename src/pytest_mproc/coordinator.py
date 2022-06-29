@@ -55,8 +55,6 @@ class Coordinator:
 
         def shutdown(self, timeout: Optional[float] = None):
             self._q.put(('shutdown', timeout))
-            self._q.join()
-            self._q.get()
 
         def start_workers(
             self, num_processes: int,

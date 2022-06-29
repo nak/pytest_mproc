@@ -20,7 +20,7 @@ from pytest_mproc.remote.ssh import SSHClient, remote_root_context
 from pytest_mproc.user_output import always_print, debug_print
 
 
-POLLING_INTERVAL_HOST_VALIDATION = 1
+POLLING_INTERVAL_HOST_VALIDATION = 5
 
 
 class RemoteSessionManager:
@@ -175,23 +175,16 @@ class RemoteSessionManager:
         while self._coordinators:
             for host, coordinator in self._coordinators.copy().items():
                 # test if worker is active
+                ssh_client = self._ssh_clients[host]
                 try:
-
-                    completed = subprocess.run(["ping", "-W",  "1", "-c", "1", host],
-                                               stdout=subprocess.DEVNULL,
-                                               timeout=5)
-                    active = completed.returncode == 0
-                except TimeoutError:
-                    active = False
-                # reschedule any tests in progress for tha worker if not
-                if not active:
-                    always_print(f"Host {host} unreachable!")
-                    worker_pids = self._worker_pids.get(host)
-                    ssh_client = self._ssh_clients[host]
                     await ssh_client.execute_remote_cmd("echo", "PONG",
                                                         stdout=asyncio.subprocess.DEVNULL,
                                                         stderr=asyncio.subprocess.DEVNULL,
-                                                        timeout=2)
+                                                        timeout=5)
+                    debug_print(f"Host {host} is alive...")
+                except TimeoutError:
+                    always_print(f"Host {host} unreachable!", as_error=True)
+                    worker_pids = self._worker_pids.get(host)
                     for worker_pid in worker_pids:
                         await ssh_client.signal(worker_pid, signal.SIGKILL)
                         # this will attempt to reschedule test
