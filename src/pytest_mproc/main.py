@@ -11,7 +11,7 @@ import time
 
 from contextlib import suppress
 from queue import Empty
-from typing import List, Optional, Union, Dict, AsyncIterator, Tuple
+from typing import List, Optional, Union, Dict, AsyncIterator, Tuple, Any
 
 from _pytest.reports import TestReport
 from pytest_mproc.remote.ssh import SSHClient
@@ -282,10 +282,18 @@ class Orchestrator(ABC):
 
     # noinspection PyProtectedMember
     @staticmethod
-    def _sorted_tests(tests) -> List[TestBatch]:
+    def _sorted_tests(tests) -> Tuple[List[TestBatch], List[Any]]:
         """
         :param tests: the items containing the pytest hooks to the tests to be run
         """
+        skipped_tests = []
+        valid_tests = []
+        for t in tests:
+            if (t.keywords.get('skipif') and t.keywords.get('skipif').args[0]) or t.keywords.get('skip'):
+                skipped_tests.append(t)
+            else:
+                valid_tests.append(t)
+        tests = valid_tests
 
         # noinspection PyProtectedMember
         def priority(test_) -> int:
@@ -307,7 +315,7 @@ class Orchestrator(ABC):
             groups[tag].restriction = tag.restrict_to
         tests.extend(groups.values())
         tests = sorted(tests, key=lambda x: x.priority)
-        return tests
+        return tests, skipped_tests
 
     async def run_loop(self, session, tests):
         """
@@ -317,7 +325,11 @@ class Orchestrator(ABC):
         :param tests: the items containing the pytest hooks to the tests to be run
         """
         self._target_count = len(tests)
-        test_batches = self._sorted_tests(tests)
+        test_batches, skipped_tests = self._sorted_tests(tests)
+        for item in skipped_tests:
+            item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
+        if not tests:
+            return
         start_rusage = resource.getrusage(resource.RUSAGE_SELF)
         start_time = time.time()
         populate_tests_task = asyncio.create_task(
