@@ -1,7 +1,7 @@
 import asyncio
 import binascii
 import os
-from abc import ABC, abstractmethod
+from abc import ABC
 from pathlib import Path
 
 import pytest
@@ -76,6 +76,7 @@ class Orchestrator(ABC):
         self._orchestration_mgr = OrchestrationManager.create_server(orchestration_address)
         self._test_q = self._orchestration_mgr.get_test_queue()
         self._results_q = self._orchestration_mgr.get_results_queue()
+        self._active = False
 
     @staticmethod
     def _write_sep(s, txt):
@@ -220,13 +221,8 @@ class Orchestrator(ABC):
                     if self.worker_count() <= 0:
                         os.write(sys.stderr.fileno(), b"\nNo more workers;  exiting results processing\n\n")
                 elif isinstance(result_batch, Exception):
-                    while True:
-                        try:
-                            self._test_q.get_nowait()
-                        except Empty:
-                            break
-                    self._test_q.close()
-                    raise result_batch
+                    always_print(f"Exception from remote worker: {result_batch}", as_error=True)
+                    raise
                 elif isinstance(result_batch, ResultExit):
                     self._exit_results.append(result_batch)
                 elif isinstance(result_batch, list):
@@ -252,10 +248,10 @@ class Orchestrator(ABC):
             except Empty:
                 pass
         except KeyboardInterrupt:
-            always_print("Testing interrupted reading of results")
+            always_print("\n!!! Testing interrupted reading of results !!!")
             raise
-        finally:
-            self._results_q.close()
+        except Exception as e:
+            always_print(f"Exception during results processing, shutting down: {e}", as_error=True)
 
     async def populate_test_queue(self, tests: List[TestBatch]) -> None:
         """
@@ -269,16 +265,14 @@ class Orchestrator(ABC):
                 # do lookup on worker side
                 await self._test_q.put(test_batch)
                 count += 1
-            self.signal_all_tests_sent()
+                if not self._active:
+                    break
         except (EOFError, BrokenPipeError, ConnectionError, KeyboardInterrupt) as e:
-            always_print("Testing interrupted;  stopping queue")
-            self.signal_all_tests_sent()
-            if isinstance(e, KeyboardInterrupt):
-                raise
+            always_print("!!! Result processing interrupted;  stopping queue")
         except Exception as e:
-            import traceback
-            always_print(traceback.format_exc())
-            raise e
+            always_print(f"!!! Exception while populating tests; shutting down: {e}")
+        finally:
+            self.signal_all_tests_sent()
 
     # noinspection PyProtectedMember
     @staticmethod
@@ -324,8 +318,9 @@ class Orchestrator(ABC):
         :param session: Pytest test session, to get session or config information
         :param tests: the items containing the pytest hooks to the tests to be run
         """
-        self._target_count = len(tests)
+        self._active = True
         test_batches, skipped_tests = self._sorted_tests(tests)
+        self._target_count = len(tests) - len(skipped_tests)
         for item in skipped_tests:
             item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
         if not tests:
@@ -350,14 +345,18 @@ class Orchestrator(ABC):
             if isinstance(e, KeyboardInterrupt):
                 raise
         finally:
-            populate_tests_task.cancel()
-            if self._http_session is not None:
-                await self._http_session.end_session()
+            self._active = False
             with suppress(Exception):
                 # should never time out since workers are done
                 await asyncio.wait_for(populate_tests_task, timeout=1)
             with suppress(Exception):
                 populate_tests_task.cancel()
+            with suppress(Exception):
+                self.signal_all_tests_sent()
+            if self._http_session is not None:
+                with suppress(Exception):
+                    await self._http_session.end_session()
+                    self._http_session = None
             with suppress(Exception):
                 end_rusage = resource.getrusage(resource.RUSAGE_SELF)
                 time_span = time.time() - start_time
@@ -378,13 +377,20 @@ class Orchestrator(ABC):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.shutdown(normally=True)
 
-    @abstractmethod
     def shutdown(self, normally: bool = False):
         """
         shutdown services
 
         :param normally: if this is part of normal shutdown (or on exception)
         """
+        if self._http_session:
+            self._http_session.end_session()
+            self._http_session = None
+        with suppress(Exception):
+            self._test_q.close()
+        with suppress(Exception):
+            self._results_q.close()
+        self._pending = {}
 
 
 class LocalOrchestrator(Orchestrator):
@@ -420,6 +426,7 @@ class LocalOrchestrator(Orchestrator):
         except Exception as e:
             if normally:
                 raise e
+        super().shutdown()
 
 
 class RemoteOrchestrator(Orchestrator):
@@ -440,7 +447,6 @@ class RemoteOrchestrator(Orchestrator):
         self._port_fwd_procs: List[asyncio.subprocess.Process] = []
         self._remote_venvs: Dict[str, Path] = {}
         self._remote_roots: Dict[str, Path] = {}
-        self._workers_task: Optional[asyncio.Task] = None
         self._coordinator_procs: Dict[str, asyncio.subprocess.Process] = {}
         self._coordinators: Dict[str, Coordinator] = {}
         self._http_session: Optional[HTTPSession] = None
@@ -584,12 +590,7 @@ class RemoteOrchestrator(Orchestrator):
                 proc.terminate()
         self._port_fwd_procs = []
         for proc in self._coordinator_procs.values():
-            proc.stdin.write(b"FINISHED\n")
-            proc.stdin.close()
             with suppress(Exception):
                 proc.terminate()
         self._coordinator_procs = {}
-        with suppress(Exception):
-            self._test_q.close()
-        with suppress(Exception):
-            self._results_q.close()
+        super().shutdown()
