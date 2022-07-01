@@ -255,14 +255,14 @@ class Orchestrator(ABC):
                     break
             # process stragglers left in results queue
             try:
-                result_batch = self._results_q.get(max_tries=6)
+                result_batch = await self._results_q.get(max_tries=6)
                 while result_batch:
                     if isinstance(result_batch, list):
                         for result in result_batch:
                             self._process_worker_message(hook, result)
                     elif isinstance(result_batch, ResultExit):
                         self._exit_results.append(result_batch)
-                    result_batch = await self._results_q.get_nowait()
+                    result_batch = await self._results_q.get(max_tries=6)
             except Empty:
                 pass
         except KeyboardInterrupt:
