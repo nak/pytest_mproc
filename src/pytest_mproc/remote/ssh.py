@@ -9,18 +9,19 @@ import shlex
 import subprocess
 import sys
 import time
-from contextlib import suppress
-from contextlib import asynccontextmanager
+from contextlib import suppress, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     AsyncIterator,
     Callable,
+    ContextManager,
     Dict,
+    List,
     Optional,
     TextIO,
     Tuple,
-    Union, AsyncContextManager, List,
+    Union,
 )
 
 from pytest_mproc import user_output, Settings
@@ -232,7 +233,8 @@ class SSHClient:
             rc = await proc.wait()
         if rc != 0:
             stdout = await proc.stdout.read()
-            msg = f"\n!!! Copy failed from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} [{cmd}]\n"\
+            msg = f"\n!!! Copy failed from  {self.destination}:{str(remote_path)} to "\
+                  f"{str(local_path.absolute())} [{cmd}]\n"\
                   f"\n{stdout.decode('utf-8')}\n\n"
             always_print(msg)
             raise CommandExecutionFailure(msg, rc)
@@ -255,7 +257,7 @@ class SSHClient:
             args = ['-p', f"{self.destination}:{str(remote_path)}", str(local_path.absolute())]
         args = list(self._global_options) + args
         cmd = f"scp {' '.join(args)}"
-        debug_print(f"Executimg '{cmd}'")
+        debug_print(f"Executing '{cmd}'")
         proc = subprocess.run(
             cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -413,14 +415,14 @@ class SSHClient:
             logging.error(f"process '{command} {' '.join(args)}' failed with code {proc.returncode}")
             raise CommandExecutionFailure(command, proc.returncode)
 
-    @asynccontextmanager
-    async def mkdtemp(self, tmp_root: Optional[Path] = None) -> Path:
+    @contextmanager
+    def mkdtemp(self, tmp_root: Optional[Path] = None) -> Path:
         """
         :return: temporary directory created on remote client
         """
         if tmp_root is None:
             # noinspection SpellCheckingInspection
-            proc = await self._remote_execute(
+            proc = self._remote_execute_sync(
                 f"mktemp -d --tmpdir ptmproc-tmp.XXXXXXXXXX",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -428,21 +430,19 @@ class SSHClient:
             )
         else:
             # noinspection SpellCheckingInspection
-            proc = await self._remote_execute(
+            proc = self._remote_execute_sync(
                 f"mktemp -d  {str(tmp_root / 'ptmproc-tmp.XXXXXXXXXX')}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 shell=True
             )
-        await asyncio.wait_for(proc.wait(), timeout=5)
+        stdout, stderr = proc.communicate(timeout=5)
         if proc.returncode != 0:
-            stdout = await proc.stdout.read()
-            stderr = await proc.stderr.read()
             raise SystemError(f"Failed to create tmp dir on remote client: {stdout}\n  {stderr}")
         # noinspection SpellCheckingInspection
-        tmpdir = (await proc.stdout.read()).decode('utf-8').strip()
+        tmpdir = stdout.decode('utf-8').strip()
         yield Path(tmpdir)
-        await self.rmdir(Path(tmpdir))
+        self.rmdir_sync(Path(tmpdir))
 
     async def launch_remote_command(self,  command, *args,
                                     stdin: Union[TextIO, int],
@@ -537,25 +537,27 @@ class SSHClient:
                                    stderr=sys.stderr,
                                    shell=True)
 
-    def signal_sync(self, pid: int, signal: int) -> None:
+    def signal_sync(self, pids: List[int], signo: int) -> None:
         """
-        Kill process with assigned pid on remote host.
+        Kill processes with assigned pids on remote host.
 
-        :raises CommandExecutionFailer: if it fails to kill, with exception if process is no longer active;  in that
+        :raises CommandExecutionFailure: if it fails to kill, with exception if process is no longer active;  in that
            case this function returns normally
         """
-        command = f"kill -{signal} {pid}"
+        pid_texts = [str(pid) for pid in pids]
         try:
-            completed = subprocess.run(["ssh", self.destination, *self._global_options, command],
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT,
-                                       timeout=3)
-            if completed.returncode != 0:
-                if b'No such process' not in completed.stdout:
-                    always_print(f"Failed to kill remote pid {pid} on {self.destination}: {completed.stdout}",
-                                 as_error=True)
+            command = f"kill -{signo} {' '.join(pid_texts)}"
+            completed = subprocess.run(
+                ["ssh", self.destination, *self._global_options, command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=10
+            )
+            if completed.returncode != 0 and b'No such process' not in completed.stdout:
+                always_print(f"Failed to kill one or more worker pids {' '.join(pid_texts)} "
+                             f"on {self.destination}: {completed.stdout}", as_error=True)
         except TimeoutError:
-            always_print("Timeout trying to kill remote process")
+            always_print("Timeout trying to kill remote worker processes")
 
     async def port_forward(self, local_port: int, remote_port: int):
         """
@@ -607,10 +609,149 @@ class SSHClient:
         text = (await proc.stdout.read()).decode('utf-8')
         return int(text.strip())
 
+    def _remote_execute_sync(
+        self, command: str,
+        stdout, stderr, stdin=None,
+        env=None,
+        cwd=None,
+        prefix_cmd: Optional[str] = None,
+        auth_key: Optional[bytes] = None,
+        shell: bool = True
+    ) -> subprocess.Popen:
+        """
+        See equivalent async method docs
+        """
+        env = env or {}
+        if auth_key is not None:
+            env["AUTH_TOKEN_STDIN"] = '1'
+        if env:
+            for key, value in env.items():
+                command = f"{key}=\"{value}\" {command}"
+        if user_output.is_verbose:
+            env["PTMPROC_VERBOSE"] = '1'
+        if cwd is not None:
+            command = f"cd {str(cwd)} && {prefix_cmd or ''} {command}"
+        command = command.replace('"', '\\\"')
+        full_cmd = f"ssh {self.destination} {' '.join(self._global_options)} \"{command}\""
+        debug_print(f"Executing command '%s'", full_cmd)
+        if shell:
+            result = subprocess.Popen(
+                full_cmd,
+                stdout=stdout,
+                stderr=stderr,
+                stdin=stdin,
+                shell=True,
+            )
+            assert result
+            return result
+        else:
+            return subprocess.Popen(
+                ['ssh', self.destination, *self._global_options, f"\"command\""],
+                stdout=stdout,
+                stderr=stderr,
+                stdin=stdin,
+            )
 
-@asynccontextmanager
-async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_root: Optional[Path]) -> \
-        AsyncContextManager[Tuple[Path, Path]]:
+    def mkdir_sync(self, remote_path: Path, exists_ok=True):
+        """
+        See mkdir method docs
+        """
+        options = "-p" if exists_ok is True else ""
+        proc = self._remote_execute_sync(
+            f"mkdir {options} {str(remote_path)}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        rc = proc.wait(timeout=5)
+        if rc != SUCCESS:
+            stdout = proc.stdout.read()
+            if not exists_ok or b'File exists' not in stdout:
+                raise CommandExecutionFailure(f"mkdir -p {remote_path}:\n\n{stdout}", rc)
+
+    def rmdir_sync(self, remote_path: Path):
+        """
+        See equivalent async method docs
+        """
+        proc = self._remote_execute_sync(
+            f"rm -r {remote_path}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = proc.wait(timeout=5)
+        if rc != SUCCESS:
+            raise CommandExecutionFailure(f"rm -rf {remote_path}", rc)
+
+    def launch_remote_command_sync(
+        self,
+        command,
+        *args,
+        stdin: Union[TextIO, int],
+        stdout: Union[TextIO, int],
+        stderr: Union[TextIO, int],
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+        prefix_cmd: Optional[str] = None,
+        auth_key: Optional[bytes] = None,
+        shell: bool = True
+    ) -> subprocess.Popen:
+        """
+        execute command on remote host
+
+        See equivalent async method docs
+        """
+        args = [shlex.quote(str(arg)) if '*' not in arg else arg for arg in args]
+        full_command = str(command) + ' ' + ' '.join(args)
+        return self._remote_execute_sync(
+            full_command,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            cwd=cwd,
+            prefix_cmd=prefix_cmd,
+            auth_key=auth_key,
+            shell=shell
+        )
+
+    def execute_remote_cmd_sync(
+            self,  command, *args,
+            stdout: Union[int, TextIO] = sys.stdout,
+            stderr: Union[int, TextIO] = sys.stderr,
+            stdin: Optional[Union[TextIO, int]] = None,
+            timeout: Optional[float] = None,
+            cwd: Optional[Path] = None,
+            prefix_cmd: Optional[str] = None,
+            env: Optional[Dict[str, str]] = None,
+            auth_key: Optional[bytes] = None,
+            shell: bool = True,
+    ) -> subprocess.Popen:
+        """
+        execute command on remote host
+
+        See equivalent async method docs
+        """
+        proc = self.launch_remote_command_sync(
+            command, *args,
+            stdin=asyncio.subprocess.PIPE if auth_key is not None else stdin,
+            stdout=stdout,
+            stderr=stderr,
+            cwd=cwd,
+            auth_key=auth_key,
+            prefix_cmd=prefix_cmd,
+            shell=shell,
+            env=env)
+        if auth_key is not None:
+            import binascii
+            auth_key = binascii.b2a_hex(auth_key)
+            proc.stdin.write(auth_key + b'\n')
+            proc.stdin.close()
+        proc.wait(timeout=timeout)
+        return proc
+
+
+@contextmanager
+def remote_root_context(project_name: str, ssh_client: SSHClient, remote_root: Optional[Path]) -> \
+        ContextManager[Tuple[Path, Path]]:
     """
     Provide a context representing a directory on the remote host from which to run.  If no explicit
     path is provided as a remote root, a temporary directory is created on remote host and removed
@@ -622,25 +763,20 @@ async def remote_root_context(project_name: str, ssh_client: SSHClient, remote_r
     :return: the remote root created (or reflects the remote root provided explicitly)
     """
     if Settings.cache_dir is None:
-        proc = await ssh_client.execute_remote_cmd('echo \${HOME}', stdout=asyncio.subprocess.PIPE, shell=True)
-        stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
-        if proc.returncode != 0 or not stdout_text:
-            proc = await ssh_client.execute_remote_cmd('pwd', stdout=asyncio.subprocess.PIPE, shell=True)
-            stdout_text = (await proc.stdout.read()).strip().decode('utf-8')
-            if (proc.returncode != 0 or not stdout_text) and remote_root is not None:
-                cache_path = remote_root
-            else:
-                cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
+        proc = ssh_client.execute_remote_cmd_sync('pwd', stdout=asyncio.subprocess.PIPE, shell=True)
+        stdout_text = proc.stdout.read().strip().decode('utf-8')
+        if (proc.returncode != 0 or not stdout_text) and remote_root is not None:
+            cache_path = remote_root
         else:
             cache_path = Path(stdout_text) / '.ptmproc' / 'cache'
     else:
         cache_path = Settings.cache_dir
     venv_root = cache_path / project_name
-    await ssh_client.mkdir(venv_root, exists_ok=True)
+    ssh_client.mkdir_sync(venv_root, exists_ok=True)
     debug_print(f"Using {cache_path / project_name} to cache python venv")
     if remote_root:
         yield remote_root, venv_root or remote_root
     else:
-        async with ssh_client.mkdtemp(Settings.tmp_root) as root:
+        with ssh_client.mkdtemp(Settings.tmp_root) as root:
             debug_print(f"Using dir {venv_root} to set up python venv and {root} as temp staging dir")
             yield root, venv_root or root

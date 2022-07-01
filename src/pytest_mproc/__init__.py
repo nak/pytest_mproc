@@ -195,30 +195,35 @@ class AsyncMPQueue:
     def raw(self) -> multiprocessing.JoinableQueue:
         return self._q
 
-    async def get(self):
+    async def get(self, max_tries: Optional[int] = None):
         """
         :return: next item in queue
         """
-        while True:
+        count = 0
+        while max_tries is None or count < max_tries:
             try:
                 item = self._q.get(block=False)
                 self._q.task_done()
                 return item
             except Empty:
+                count += 1
                 await asyncio.sleep(self.INTERVAL_POLLING)
 
-    async def put(self, item) -> None:
+    async def put(self, item, max_tries: Optional[float] = None) -> bool:
         """
         put an item in the queue
         :param item: item to place
         """
-        while True:
+        count = 0
+        while max_tries is None or count < max_tries:
             try:
                 self._q.put(item, block=False)
                 await asyncio.sleep(0)
-                break
+                return True
             except Full:
+                count += 1
                 await asyncio.sleep(self.INTERVAL_POLLING)
+        return False
 
     def close(self):
         self._q.close()

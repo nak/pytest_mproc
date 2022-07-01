@@ -7,7 +7,7 @@ import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import Optional, Dict, List, AsyncContextManager
+from typing import Optional, Dict, List, Tuple
 
 from pytest_mproc.constants import ARTIFACTS_ZIP
 from pytest_mproc.coordinator import Coordinator
@@ -16,7 +16,7 @@ from pytest_mproc import get_auth_key, Settings, AsyncMPQueue
 from pytest_mproc.data import ClientDied
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
 from pytest_mproc.remote.bundle import Bundle
-from pytest_mproc.remote.ssh import SSHClient, remote_root_context
+from pytest_mproc.remote.ssh import SSHClient
 from pytest_mproc.user_output import always_print, debug_print
 
 
@@ -44,7 +44,6 @@ class RemoteSessionManager:
         self._validate_task = None
         self._session_task: Optional[asyncio.Task] = None
         self._pids: Dict[str, List[int]] = {}
-        self._contexts: Dict[str, AsyncContextManager] = {}
         self._project_name = project_config.project_name
         self._tmp_path = tempfile.TemporaryDirectory()
         self._bundle = Bundle.create(root_dir=Path(self._tmp_path.name),
@@ -60,6 +59,14 @@ class RemoteSessionManager:
         self._ssh_clients: Dict[str, SSHClient] = {}
 
     def shutdown(self):
+        with suppress(Exception):
+            self._validate_task.cancel()
+        for task in list(self._deployment_tasks.values()) + self._worker_tasks:
+            with suppress(Exception):
+                task.cancel()
+        for host, remote_pids in self._worker_pids.items():
+            always_print(f"Ensuring termination of remote worker pids {remote_pids} on {host}...")
+            self._ssh_clients[host].signal_sync(remote_pids, signo=signal.SIGKILL)
         for host, remote_root in self._remote_roots.items():
             with suppress(Exception):
                 ssh_client = self._ssh_clients[host]
@@ -77,45 +84,33 @@ class RemoteSessionManager:
                     os.remove(ARTIFACTS_ZIP)
                 else:
                     always_print(f"\n!! Failed to unzip {Path('.') / ARTIFACTS_ZIP}\n")
-        self._remote_roots = {}
-        with suppress(Exception):
-            self._validate_task.cancel()
-        for task in list(self._deployment_tasks.values()) + self._worker_tasks:
-            with suppress(Exception):
-                task.cancel()
+        self._worker_pids = {}
         self._deployment_tasks = {}
         self._worker_tasks = []
-        for host, remote_pids in self._worker_pids.items():
-            for remote_pid in remote_pids:
-                with suppress(Exception):
-                    self._ssh_clients[host].signal_sync(remote_pid, signal.SIGKILL)
-        self._worker_pids = {}
-
-        async def cleanup():
-            for context in self._contexts.values():
-                with suppress(Exception):
-                    await context.__aexit__(None, None, None)
-        try:
-            if asyncio.get_event_loop().is_running():
-                asyncio.create_task(cleanup())
-        except RuntimeError:
-            pass
-        self._contexts = {}
+        self._remote_roots = {}
         with suppress(Exception):
             self._tmp_path.__exit__(None, None, None)
         with suppress(Exception):
             self._bundle.__exit__(None, None, None)
 
-    async def setup_venv(self, worker_config: RemoteWorkerConfig):
+    async def setup(self, worker_config: RemoteWorkerConfig,
+                    remote_root: Path,
+                    remote_venv_root: Path,
+                    deploy_timeout: Optional[float] = None) -> None:
         ssh_client = SSHClient(username=worker_config.ssh_username or Settings.ssh_username,
                                password=Settings.ssh_password,
                                host=worker_config.remote_host)
-        context = remote_root_context(self._project_name, ssh_client, worker_config.remote_root)
-        self._contexts[worker_config.remote_host] = context
-        (remote_root, remote_venv_root) = await context.__aenter__()
         remote_venv = remote_venv_root / 'venv'
-        await self._bundle.setup_remote_venv(ssh_client=ssh_client, remote_venv=remote_venv)
-        return remote_root, remote_venv
+        futures, _ = await asyncio.wait(
+            [self._bundle.setup_remote_venv(ssh_client=ssh_client, remote_venv=remote_venv),
+             self._deploy(worker_config, timeout=deploy_timeout, remote_root=remote_root, remote_venv=remote_venv)],
+            timeout=deploy_timeout,
+            return_when=asyncio.ALL_COMPLETED
+        )
+        results = [f.result() for f in futures]
+        for r in results:
+            if isinstance(r, Exception):
+                raise r
 
     async def _deploy(self, worker_config: RemoteWorkerConfig,
                       remote_root: Path, remote_venv: Path, timeout: Optional[float] = None,):
@@ -136,17 +131,20 @@ class RemoteSessionManager:
             args: List[str],
             results_q: AsyncMPQueue,
             remote_root: Path,
-            remote_venv: Path,
+            remote_venv_root: Path,
             deploy_timeout: Optional[float] = None,
             env: Dict[str, str] = None,
-    ):
+    ) -> Tuple[Path, Path]:
         self._ssh_clients[worker_config.remote_host] = SSHClient(
             username=worker_config.ssh_username or Settings.ssh_username,
             password=Settings.ssh_password,
             host=worker_config.remote_host)
         if worker_config.remote_host not in self._deployment_tasks:
             self._deployment_tasks[worker_config.remote_host] = asyncio.create_task(
-                self._deploy(worker_config, timeout=deploy_timeout, remote_root=remote_root, remote_venv=remote_venv)
+                self.setup(worker_config,
+                           remote_root=remote_root,
+                           remote_venv_root=remote_venv_root,
+                           deploy_timeout=deploy_timeout)
             )
 
         async def start(index: int):
@@ -164,6 +162,7 @@ class RemoteSessionManager:
                 raise
 
         self._worker_tasks.append(asyncio.create_task(start(len(self._worker_tasks) + 1)))
+        return remote_root, remote_venv_root
 
     async def validate_clients(self, results_q: AsyncMPQueue,) -> None:
         """

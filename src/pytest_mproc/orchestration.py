@@ -211,8 +211,6 @@ class OrchestrationMPManager(BaseManager):
         no more tests remain once the queue is drained
         """
         self._all_tests_sent = True
-        for _ in self._workers:
-            self._test_q.put(None)
 
     def _finalize(self):
         self._finalize_sem.release()

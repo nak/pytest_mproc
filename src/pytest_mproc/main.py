@@ -11,10 +11,10 @@ import time
 
 from contextlib import suppress
 from queue import Empty
-from typing import List, Optional, Union, Dict, AsyncIterator, Tuple, Any
+from typing import List, Optional, Union, Dict, AsyncIterator, Tuple, Any, ContextManager
 
 from _pytest.reports import TestReport
-from pytest_mproc.remote.ssh import SSHClient
+from pytest_mproc.remote.ssh import SSHClient, remote_root_context
 
 from pytest_mproc import (
     FatalError,
@@ -77,6 +77,8 @@ class Orchestrator(ABC):
         self._test_q = self._orchestration_mgr.get_test_queue()
         self._results_q = self._orchestration_mgr.get_results_queue()
         self._active = False
+        self._contexts: Dict[str, ContextManager] = {}
+        self._test_end_signalled = False
 
     @staticmethod
     def _write_sep(s, txt):
@@ -92,11 +94,20 @@ class Orchestrator(ABC):
         out = '%s %s %s\n' % (s * sep_len, txt, s * (sep_len + sep_extra))
         sys.stdout.write(out)
 
-    def signal_all_tests_sent(self):
+    async def signal_all_tests_sent(self, max_tries: Optional[float] = None):
         """
         signal through orchestration manager all tests are sent
         """
         self._orchestration_mgr.signal_all_tests_sent()
+        count = 0
+        target = self._orchestration_mgr.count()
+        for _ in range(target):
+            if await self._test_q.put(None, max_tries=max_tries):
+                count += 1
+        if count != target:
+            always_print(f"!!! Failed to signal {target - count} workers tests are complete !!!", as_error=True)
+        else:
+            self._test_end_signalled = True
 
     def _output_summary(self):
         """
@@ -195,8 +206,11 @@ class Orchestrator(ABC):
                             del self._pending[test_id]
                             if len(test_state.test_batch.test_ids) == 1 \
                                     or test_state.test_id == test_state.test_batch.test_ids[0]:
-                                # reschedule by putting back in test queue
-                                await self._test_q.put(test_state.test_batch)
+                                if not self._test_end_signalled:
+                                    # reschedule by putting back in test queue
+                                    await self._test_q.put(test_state.test_batch)
+                                else:
+                                    always_print(f"!!! Unable to reschedule test {test_id} !!!")
                             else:
                                 error_count += 1
                                 always_print(f"Skipping test batch '{test_state.test_batch.test_ids}'"
@@ -232,19 +246,23 @@ class Orchestrator(ABC):
                         else:
                             test_count += 1
                             self._process_worker_message(hook,  result)
-                if self.worker_count() <= 0:
+                result_batch = None
+                if self.worker_count() <= 0 or self._count > self._target_count:
                     break
-                result_batch = await self._results_q.get()
+                while result_batch is None and self.worker_count() > 0:
+                    result_batch = await self._results_q.get(max_tries=10)
+                if result_batch is None:
+                    break
             # process stragglers left in results queue
             try:
-                result_batch = self._results_q.get_nowait()
+                result_batch = self._results_q.get(max_tries=6)
                 while result_batch:
                     if isinstance(result_batch, list):
                         for result in result_batch:
                             self._process_worker_message(hook, result)
                     elif isinstance(result_batch, ResultExit):
                         self._exit_results.append(result_batch)
-                    result_batch = self._results_q.get_nowait()
+                    result_batch = await self._results_q.get_nowait()
             except Empty:
                 pass
         except KeyboardInterrupt:
@@ -252,6 +270,8 @@ class Orchestrator(ABC):
             raise
         except Exception as e:
             always_print(f"Exception during results processing, shutting down: {e}", as_error=True)
+        finally:
+            await self.signal_all_tests_sent()
 
     async def populate_test_queue(self, tests: List[TestBatch]) -> None:
         """
@@ -272,7 +292,7 @@ class Orchestrator(ABC):
         except Exception as e:
             always_print(f"!!! Exception while populating tests; shutting down: {e}")
         finally:
-            self.signal_all_tests_sent()
+            await self.signal_all_tests_sent()
 
     # noinspection PyProtectedMember
     @staticmethod
@@ -283,7 +303,7 @@ class Orchestrator(ABC):
         skipped_tests = []
         valid_tests = []
         for t in tests:
-            if (t.keywords.get('skipif') and t.keywords.get('skipif').args[0]) or t.keywords.get('skip'):
+            if ((t.keywords.get('skipif') and t.keywords.get('skipif').args[0])) or t.keywords.get('skip'):
                 skipped_tests.append(t)
             else:
                 valid_tests.append(t)
@@ -347,12 +367,15 @@ class Orchestrator(ABC):
         finally:
             self._active = False
             with suppress(Exception):
+                self._results_q.close()
+            with suppress(Exception):
                 # should never time out since workers are done
                 await asyncio.wait_for(populate_tests_task, timeout=1)
             with suppress(Exception):
-                populate_tests_task.cancel()
+                if not self._test_end_signalled:
+                    await self.signal_all_tests_sent(max_tries=3)
             with suppress(Exception):
-                self.signal_all_tests_sent()
+                populate_tests_task.cancel()
             if self._http_session is not None:
                 with suppress(Exception):
                     await self._http_session.end_session()
@@ -445,7 +468,7 @@ class RemoteOrchestrator(Orchestrator):
         super().__init__(project_config, global_mgr_port=global_mgr_port, orchestration_port=orchestration_port)
         # for internal handling of requests
         self._port_fwd_procs: List[asyncio.subprocess.Process] = []
-        self._remote_venvs: Dict[str, Path] = {}
+        self._remote_venv_roots: Dict[str, Path] = {}
         self._remote_roots: Dict[str, Path] = {}
         self._coordinator_procs: Dict[str, asyncio.subprocess.Process] = {}
         self._coordinators: Dict[str, Coordinator] = {}
@@ -471,41 +494,42 @@ class RemoteOrchestrator(Orchestrator):
             args, addl_env = _determine_cli_args(worker_config=config)
             addl_env.update(env or {})
             if config.remote_host not in self._coordinators:
-                remote_root, remote_venv = await self._remote_session.setup_venv(worker_config=config)
-                self._remote_venvs[config.remote_host] = remote_venv
-                self._remote_roots[config.remote_host] = remote_root
                 coordinator_index = len(self._coordinator_procs) + 1
-                self._coordinator_procs[config.remote_host], proc1, proc2 = await self.launch_coordinator(
+                remote_root, remote_venv_root = await self.launch_coordinator(
                     config,
                     coordinator_index=coordinator_index,
                     local_orchestration_port=self._orchestration_mgr.port,
                     local_global_mgr_port=self._global_mgr.port,
                     remote_host=config.remote_host,
-                    remote_venv=remote_venv,
-                    remote_root=remote_root,
                     artifacts_dir=self._project_config.artifcats_path,
                 )
-                self._port_fwd_procs += [proc1, proc2]
+                self._remote_roots[config.remote_host] = remote_root
+                self._remote_venv_roots[config.remote_host] = remote_venv_root
                 self._coordinators[config.remote_host] = self._orchestration_mgr.get_coordinator(config.remote_host)
                 if self._coordinators[config.remote_host] is None:
                     raise SystemError("INTERNAL ERROR: Coordinator started but not found!")
-            tasks = [self._remote_session.start_worker(
-                        config,
-                        coordinator=self._coordinators[config.remote_host],
-                        results_q=self._orchestration_mgr.get_results_queue(),
-                        deploy_timeout=deploy_timeout,
-                        args=args,
-                        env=addl_env,
-                        remote_root=self._remote_roots[config.remote_host],
-                        remote_venv=self._remote_venvs[config.remote_host],
-                    ) for _ in range(num_cores)]
-            results, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+            # noinspection PyTypeChecker
+            tasks = {
+                config.remote_host: self._remote_session.start_worker(
+                    config,
+                    coordinator=self._coordinators[config.remote_host],
+                    results_q=self._orchestration_mgr.get_results_queue(),
+                    deploy_timeout=deploy_timeout,
+                    args=args,
+                    env=addl_env,
+                    remote_root=self._remote_roots[config.remote_host],
+                    remote_venv_root=self._remote_venv_roots[config.remote_host]
+                ) for _ in range(num_cores)
+            }
+            results, _ = await asyncio.wait(tasks.values(), return_when=asyncio.ALL_COMPLETED)
             count = 0
             for r in results:
                 r = r.result()
                 if isinstance(r, Exception):
                     always_print(f"A worker has failed to start: {type(r)}: {r}", as_error=True)
                     count += 1
+                else:
+                    self._remote_roots[config.remote_host], self._remote_venv_roots[config.remote_host] = r
             if count == len(results):
                 raise SystemError("All workers failed to start")
 
@@ -527,25 +551,27 @@ class RemoteOrchestrator(Orchestrator):
                               remote_path=site_pkgs_path / 'pytest_mproc' / 'remote' / '.')
         return site_pkgs_path
 
-    @classmethod
-    async def launch_coordinator(cls, config: RemoteWorkerConfig,
+    async def launch_coordinator(self, config: RemoteWorkerConfig,
                                  coordinator_index: int,
                                  local_orchestration_port: int,
                                  local_global_mgr_port: int,
                                  remote_host: str,
-                                 remote_venv: Path,
-                                 remote_root: Path,
                                  artifacts_dir: Path)\
-            -> Tuple[asyncio.subprocess.Process, asyncio.subprocess.Process, asyncio.subprocess.Process]:
-        remote_sys_executable = str(remote_venv / 'bin' / 'python3')
+            -> Tuple[Path, Path]:
         ssh_client = SSHClient(host=config.remote_host,
                                username=config.ssh_username or Settings.ssh_username,
                                password=Settings.ssh_password)
-        site_pkgs_path = await cls.create_site_pkgs(ssh_client, remote_root)
+        context = remote_root_context(self._project_config.project_name, ssh_client, config.remote_root)
+        self._contexts[config.remote_host] = context
+        (remote_root, remote_venv_root) = context.__enter__()
+        remote_venv = remote_venv_root / 'venv'
+        remote_sys_executable = str(remote_venv / 'bin' / 'python3')
+        site_pkgs_path = await self.create_site_pkgs(ssh_client, remote_root)
         remote_global_mgr_port = await ssh_client.find_free_port()
         remote_orch_mgr_port = await ssh_client.find_free_port()
         port_fwd_proc1 = await ssh_client.reverse_port_forward(local_global_mgr_port, remote_global_mgr_port)
         port_fwd_proc2 = await ssh_client.reverse_port_forward(local_orchestration_port, remote_orch_mgr_port)
+        self._port_fwd_procs += [port_fwd_proc1, port_fwd_proc2]
         python_path = str(site_pkgs_path)
         env = {'AUTH_TOKEN_STDIN': '1',
                'PYTHONPATH': python_path}
@@ -573,7 +599,8 @@ class RemoteOrchestrator(Orchestrator):
             if time.monotonic() - start_time > 30:
                 raise SystemError(f"Coordinator on host {config.remote_host} did not start in time")
         always_print(f"Coordinator launched successfully on {config.remote_host}")
-        return proc, port_fwd_proc1, port_fwd_proc2
+        self._coordinator_procs[config.remote_host] = proc
+        return remote_root, remote_venv_root
 
     def shutdown(self, normally: bool = False):
         # with suppress(Exception):
@@ -584,6 +611,9 @@ class RemoteOrchestrator(Orchestrator):
                 if normally:
                     always_print(f"!! EXCEPTION shutting down coordinator: {e}")
         self._coordinators = {}
+        for context in self._contexts.values():
+            with suppress(Exception):
+                context.__exit__(None, None, None)
         self._remote_session.shutdown()
         for proc in self._port_fwd_procs:
             with suppress(Exception):

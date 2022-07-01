@@ -378,7 +378,7 @@ def main(orchestration_port: int, global_mgr_port: int, node_mgr_port: int, args
         with suppress(Exception):  # if other end died, result_q is gone, so suppress exceptions
             result_q.put(ClientDied(os.getpid(), get_ip_addr(), errored=True, message=msg))
     finally:
-        signal.alarm(3)
+        signal.alarm(10)
         with suppress(Exception):
             mgr.completed(get_ip_addr(), os.getpid())
         with suppress(Exception):
