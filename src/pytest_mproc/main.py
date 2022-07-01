@@ -509,27 +509,25 @@ class RemoteOrchestrator(Orchestrator):
                 if self._coordinators[config.remote_host] is None:
                     raise SystemError("INTERNAL ERROR: Coordinator started but not found!")
             # noinspection PyTypeChecker
-            tasks = {
-                config.remote_host: self._remote_session.start_worker(
-                    config,
-                    coordinator=self._coordinators[config.remote_host],
-                    results_q=self._orchestration_mgr.get_results_queue(),
-                    deploy_timeout=deploy_timeout,
-                    args=args,
-                    env=addl_env,
-                    remote_root=self._remote_roots[config.remote_host],
-                    remote_venv_root=self._remote_venv_roots[config.remote_host]
-                ) for _ in range(num_cores)
-            }
-            results, _ = await asyncio.wait(tasks.values(), return_when=asyncio.ALL_COMPLETED)
+            tasks = [
+                    self._remote_session.start_worker(
+                        config,
+                        coordinator=self._coordinators[config.remote_host],
+                        results_q=self._orchestration_mgr.get_results_queue(),
+                        deploy_timeout=deploy_timeout,
+                        args=args,
+                        env=addl_env,
+                        remote_root=self._remote_roots[config.remote_host],
+                        remote_venv_root=self._remote_venv_roots[config.remote_host]
+                    ) for _ in range(num_cores)
+            ]
+            results, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
             count = 0
             for r in results:
                 r = r.result()
                 if isinstance(r, Exception):
                     always_print(f"A worker has failed to start: {type(r)}: {r}", as_error=True)
                     count += 1
-                else:
-                    self._remote_roots[config.remote_host], self._remote_venv_roots[config.remote_host] = r
             if count == len(results):
                 raise SystemError("All workers failed to start")
 

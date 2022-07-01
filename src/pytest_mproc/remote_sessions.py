@@ -134,7 +134,7 @@ class RemoteSessionManager:
             remote_venv_root: Path,
             deploy_timeout: Optional[float] = None,
             env: Dict[str, str] = None,
-    ) -> Tuple[Path, Path]:
+    ) -> None:
         self._ssh_clients[worker_config.remote_host] = SSHClient(
             username=worker_config.ssh_username or Settings.ssh_username,
             password=Settings.ssh_password,
@@ -162,7 +162,6 @@ class RemoteSessionManager:
                 raise
 
         self._worker_tasks.append(asyncio.create_task(start(len(self._worker_tasks) + 1)))
-        return remote_root, remote_venv_root
 
     async def validate_clients(self, results_q: AsyncMPQueue,) -> None:
         """
