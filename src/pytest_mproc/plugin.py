@@ -310,7 +310,7 @@ def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_por
     config.option.no_header = True
     host = host or _get_ip_addr()
     if host is None:
-        raise SystemError("Unable to determine ip address/hostname of local machine. Aborting")
+        raise Exception("Unable to determine ip address/hostname of local machine. Aborting")
     always_print(
         f"Running as coordinator as host {host} and port {global_mgr_port}, {orchestration_port}[{os.getpid()}]"
     )
@@ -351,7 +351,6 @@ def mproc_pytest_cmdline_main_remote(config: PytestMprocConfig, reporter: BasicR
     config.remote_sys_executable = mproc_remote_sys_executable
     reporter.write(f"Running with remotes as main\n", green=True)
     return orchestrator.start(remote_workers_config=config.remote_hosts,
-                              deploy_timeout=config.connection_timeout,
                               num_cores=config.num_cores)
 
 
@@ -383,6 +382,7 @@ def pytest_runtestloop(session):
     if session.config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
         return
     mode = session.config.ptmproc_config.mode
+
     worker_ = session.config.ptmproc_worker
     orchestrator = session.config.ptmproc_orchestrator
     if not worker_ and session.config.ptmproc_config.num_cores is None \
@@ -429,19 +429,22 @@ def pytest_runtestloop(session):
                     break
     if mode in (ModeEnum.MODE_REMOTE_MAIN, ModeEnum.MODE_LOCAL_MAIN):
         orchestrator = session.config.ptmproc_orchestrator
-        try:
-            async def loop():
+
+        async def loop():
+            try:
                 if session.config.remote_coro:
                     await session.config.remote_coro
                 async with orchestrator:
                     await orchestrator.run_loop(session, session.items)
-            asyncio.get_event_loop().run_until_complete(loop())
-        except asyncio.exceptions.CancelledError:
-            pytest.exit("Tests canceled")
-        except Exception as e:
-            reporter.write(format_exc() + "\n", red=True)
-            reporter.write(f"\n>>> ERROR in run loop;  unexpected Exception\n {str(e)}\n\n", red=True)
-            raise SystemError() from e
+            except asyncio.exceptions.CancelledError:
+                pytest.exit("Tests canceled")
+            except Exception as exc:
+                reporter.write(f"{exc.__class__.__qualname__}: {exc}", red=True)
+                # noinspection SpellCheckingInspection
+                session.shouldfail = True
+            finally:
+                orchestrator.shutdown()
+        asyncio.get_event_loop().run_until_complete(loop())
     elif mode == ModeEnum.MODE_WORKER:
         with suppress(Exception):
             session.config.ptmproc_worker.test_loop(session)

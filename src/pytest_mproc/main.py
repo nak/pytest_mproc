@@ -14,12 +14,10 @@ from queue import Empty
 from typing import List, Optional, Union, Dict, AsyncIterator, Tuple, Any, ContextManager
 
 from _pytest.reports import TestReport
-from pytest_mproc.remote.ssh import SSHClient, remote_root_context
 
 from pytest_mproc import (
     FatalError,
-    find_free_port,
-    Settings, user_output, get_auth_key, )
+    find_free_port)
 from pytest_mproc.constants import DEFAULT_PRIORITY
 from pytest_mproc.coordinator import Coordinator
 from pytest_mproc.data import (
@@ -77,7 +75,6 @@ class Orchestrator(ABC):
         self._test_q = self._orchestration_mgr.get_test_queue()
         self._results_q = self._orchestration_mgr.get_results_queue()
         self._active = False
-        self._contexts: Dict[str, ContextManager] = {}
         self._test_end_signalled = False
 
     @staticmethod
@@ -278,6 +275,7 @@ class Orchestrator(ABC):
         Populate test queue (asynchronously) given the set of tests
         :param tests: complete set of tests
         """
+        always_print("POPULATING TESTS")
         try:
             count = 0
             for test_batch in tests:
@@ -361,7 +359,7 @@ class Orchestrator(ABC):
             raise session.Failed(True)
         except (EOFError, ConnectionError, BrokenPipeError, KeyboardInterrupt) as e:
             always_print("Testing interrupted; shutting down")
-            self.shutdown()
+            await self.shutdown()
             if isinstance(e, KeyboardInterrupt):
                 raise
         finally:
@@ -398,9 +396,9 @@ class Orchestrator(ABC):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.shutdown(normally=True)
+        self.shutdown()
 
-    def shutdown(self, normally: bool = False):
+    def shutdown(self):
         """
         shutdown services
 
@@ -443,12 +441,11 @@ class LocalOrchestrator(Orchestrator):
         self._coordinator.start_workers(num_processes=num_processes, addl_env=addl_env, args=args)
         return self._coordinator
 
-    def shutdown(self, normally: bool = False):
+    def shutdown(self):
         try:
             self._coordinator.shutdown(timeout=10)
         except Exception as e:
-            if normally:
-                raise e
+            always_print(f"!!! coordinator failed to shutdown properly")
         super().shutdown()
 
 
@@ -466,12 +463,6 @@ class RemoteOrchestrator(Orchestrator):
         :param project_config: user-defined project parameters
         """
         super().__init__(project_config, global_mgr_port=global_mgr_port, orchestration_port=orchestration_port)
-        # for internal handling of requests
-        self._port_fwd_procs: List[asyncio.subprocess.Process] = []
-        self._remote_venv_roots: Dict[str, Path] = {}
-        self._remote_roots: Dict[str, Path] = {}
-        self._coordinator_procs: Dict[str, asyncio.subprocess.Process] = {}
-        self._coordinators: Dict[str, Coordinator] = {}
         self._http_session: Optional[HTTPSession] = None
         remote_sys_executable = 'python{}.{}'.format(*sys.version_info)
         self._remote_session = RemoteSessionManager(remote_sys_executable=remote_sys_executable,
@@ -482,7 +473,6 @@ class RemoteOrchestrator(Orchestrator):
             self,
             remote_workers_config: AsyncIterator[RemoteWorkerConfig],
             num_cores: int,
-            deploy_timeout: Optional[int] = None,
             env: Optional[Dict[str, str]] = None,
          ):
         if self._project_config is None:
@@ -493,32 +483,17 @@ class RemoteOrchestrator(Orchestrator):
         async for config in remote_workers_config:
             args, addl_env = _determine_cli_args(worker_config=config)
             addl_env.update(env or {})
-            if config.remote_host not in self._coordinators:
-                coordinator_index = len(self._coordinator_procs) + 1
-                remote_root, remote_venv_root = await self.launch_coordinator(
-                    config,
-                    coordinator_index=coordinator_index,
-                    local_orchestration_port=self._orchestration_mgr.port,
-                    local_global_mgr_port=self._global_mgr.port,
-                    remote_host=config.remote_host,
-                    artifacts_dir=self._project_config.artifcats_path,
-                )
-                self._remote_roots[config.remote_host] = remote_root
-                self._remote_venv_roots[config.remote_host] = remote_venv_root
-                self._coordinators[config.remote_host] = self._orchestration_mgr.get_coordinator(config.remote_host)
-                if self._coordinators[config.remote_host] is None:
-                    raise SystemError("INTERNAL ERROR: Coordinator started but not found!")
             # noinspection PyTypeChecker
             tasks = [
                     self._remote_session.start_worker(
-                        config,
-                        coordinator=self._coordinators[config.remote_host],
+                        artifacts_dir=self._project_config.artifcats_path,
+                        worker_config=config,
+                        coordinator_q=self._orchestration_mgr.get_coordinator_q(config.remote_host),
                         results_q=self._orchestration_mgr.get_results_queue(),
-                        deploy_timeout=deploy_timeout,
                         args=args,
+                        local_global_mgr_port=self._global_mgr.port,
+                        local_orchestration_port=self._orchestration_mgr.port,
                         env=addl_env,
-                        remote_root=self._remote_roots[config.remote_host],
-                        remote_venv_root=self._remote_venv_roots[config.remote_host]
                     ) for _ in range(num_cores)
             ]
             results, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
@@ -539,86 +514,6 @@ class RemoteOrchestrator(Orchestrator):
     def port(self):
         return self._orchestration_mgr.port
 
-    @classmethod
-    async def create_site_pkgs(cls, ssh_client: SSHClient, remote_root: Path):
-        root = Path(__file__).parent.parent
-        site_pkgs_path = remote_root / 'site-packages'
-        await ssh_client.mkdir(site_pkgs_path / 'pytest_mproc' / 'remote', exists_ok=True)
-        await ssh_client.push(root / 'pytest_mproc' / '*.py', site_pkgs_path / 'pytest_mproc' / '.')
-        await ssh_client.push(local_path=root / 'pytest_mproc' / 'remote' / '*.py',
-                              remote_path=site_pkgs_path / 'pytest_mproc' / 'remote' / '.')
-        return site_pkgs_path
-
-    async def launch_coordinator(self, config: RemoteWorkerConfig,
-                                 coordinator_index: int,
-                                 local_orchestration_port: int,
-                                 local_global_mgr_port: int,
-                                 remote_host: str,
-                                 artifacts_dir: Path)\
-            -> Tuple[Path, Path]:
-        ssh_client = SSHClient(host=config.remote_host,
-                               username=config.ssh_username or Settings.ssh_username,
-                               password=Settings.ssh_password)
-        context = remote_root_context(self._project_config.project_name, ssh_client, config.remote_root)
-        self._contexts[config.remote_host] = context
-        (remote_root, remote_venv_root) = context.__enter__()
-        remote_venv = remote_venv_root / 'venv'
-        remote_sys_executable = str(remote_venv / 'bin' / 'python3')
-        site_pkgs_path = await self.create_site_pkgs(ssh_client, remote_root)
-        remote_global_mgr_port = await ssh_client.find_free_port()
-        remote_orch_mgr_port = await ssh_client.find_free_port()
-        port_fwd_proc1 = await ssh_client.reverse_port_forward(local_global_mgr_port, remote_global_mgr_port)
-        port_fwd_proc2 = await ssh_client.reverse_port_forward(local_orchestration_port, remote_orch_mgr_port)
-        self._port_fwd_procs += [port_fwd_proc1, port_fwd_proc2]
-        python_path = str(site_pkgs_path)
-        env = {'AUTH_TOKEN_STDIN': '1',
-               'PYTHONPATH': python_path}
-        proc = await ssh_client.launch_remote_command(
-            f"{remote_sys_executable} -m pytest_mproc.coordinator "
-            f"{remote_host}:{remote_global_mgr_port}:{remote_orch_mgr_port} {coordinator_index} {str(artifacts_dir)} "
-            f"{remote_root or ''} {remote_venv or ''}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=sys.stderr,
-            stdin=asyncio.subprocess.PIPE,
-            shell=True,
-            env=env,
-            auth_key=get_auth_key()
-        )
-        proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
-        proc.stdin.close()
-        text = ""
-        start_time = time.monotonic()
-        while text != 'STARTED':
-            text = (await proc.stdout.readline()).decode('utf-8').strip()
-            if text.startswith("FAILED"):
-                raise SystemError(f"Failed to launch coordinator: {text}")
-            if user_output.is_verbose and text and text != "STARTED":
-                print(text.strip())
-            if time.monotonic() - start_time > 30:
-                raise SystemError(f"Coordinator on host {config.remote_host} did not start in time")
-        always_print(f"Coordinator launched successfully on {config.remote_host}")
-        self._coordinator_procs[config.remote_host] = proc
-        return remote_root, remote_venv_root
-
     def shutdown(self, normally: bool = False):
-        # with suppress(Exception):
-        for coordinator in self._coordinators.values():
-            try:
-                coordinator.shutdown(timeout=3)
-            except Exception as e:
-                if normally:
-                    always_print(f"!! EXCEPTION shutting down coordinator: {e}")
-        self._coordinators = {}
-        for context in self._contexts.values():
-            with suppress(Exception):
-                context.__exit__(None, None, None)
         self._remote_session.shutdown()
-        for proc in self._port_fwd_procs:
-            with suppress(Exception):
-                proc.terminate()
-        self._port_fwd_procs = []
-        for proc in self._coordinator_procs.values():
-            with suppress(Exception):
-                proc.terminate()
-        self._coordinator_procs = {}
         super().shutdown()

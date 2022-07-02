@@ -11,7 +11,7 @@ from multiprocessing import JoinableQueue
 
 from pathlib import Path
 from subprocess import TimeoutExpired
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from pytest_mproc import user_output
 from pytest_mproc.constants import ARTIFACTS_ZIP
@@ -277,7 +277,7 @@ class Coordinator:
 
 def coordinator_main(global_mgr_port: int, orchestration_port: int, host: str, index: int,
                      artifacts_path: Path, remote_root: Optional[Path] = None,
-                     remote_venv: Optional[Path] = None) -> Coordinator.HostProxy:
+                     remote_venv: Optional[Path] = None) -> Tuple[Coordinator.HostProxy, Coordinator]:
     """
     entry point for running as main
     """
@@ -289,7 +289,7 @@ def coordinator_main(global_mgr_port: int, orchestration_port: int, host: str, i
                               remote_root=remote_root, remote_venv=remote_venv)
     proxy = Coordinator.HostProxy(q=mgr.get_coordinator_q(host=host),
                                   target=coordinator)
-    return proxy
+    return proxy, coordinator
 
 
 if __name__ == "__main__":
@@ -302,13 +302,14 @@ if __name__ == "__main__":
         _host, _global_mgr_port, _orchestration_port = uri.split(':')
         _global_mgr_port = int(_global_mgr_port)
         _orchestration_port = int(_orchestration_port)
-        _proxy = coordinator_main(
+        _proxy, _coordinator = coordinator_main(
             orchestration_port=_orchestration_port, global_mgr_port=_global_mgr_port, host=_host, index=_index,
             artifacts_path=_artifacts_path, remote_root=_remote_root, remote_venv=_remote_venv
         )
         sys.stdout.write("\nSTARTED\n")
         sys.stdout.flush()
         _proxy.loop()
+        _coordinator.kill()
         always_print(f"Coordinator {_index} completed")
     except Exception as _e:
         import traceback

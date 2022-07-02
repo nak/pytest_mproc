@@ -137,7 +137,7 @@ class WorkerSession:
                         raise
                     except Exception as e:
                         import traceback
-                        raise Exception(f"Exception running test: {e}: {traceback.format_exc()}")
+                        raise Exception(f"Exception running test: {e}: {traceback.format_exc()}") from e
 
                     finally:
                         if not has_error:
@@ -257,17 +257,22 @@ class WorkerSession:
                 worker_artifacts_path.symlink_to(artifacts_path)
         log = artifacts_path / 'pytest_run.log'
         stdout = subprocess.DEVNULL if not user_output.is_verbose else sys.stdout
-        stderr = subprocess.STDOUT if user_output.is_verbose else sys.stderr
+        tee_proc = subprocess.Popen(['tee', log],
+                                    stdout=stdout,
+                                    stderr=sys.stderr,
+                                    stdin=subprocess.PIPE)
+        cmd = [
+            executable, '-m', __name__, str(orchestration_port), str(global_mgr_port), str(Node.Manager.PORT),
+            f"Worker-{index[0]}-{index[1]}", *args
+        ]
         proc = subprocess.Popen(
-            f"{executable} -m  {__name__} {orchestration_port} {global_mgr_port} {Node.Manager.PORT} "
-            f"Worker-{index[0]}-{index[1]} "
-            f"{' '.join(args)} 2>&1 | tee {log}",
-            env=env,
-            stdout=stdout,
-            stderr=stderr,
+            cmd,
+            stdout=tee_proc.stdin,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE,
             cwd=str(run_dir),
-            shell=True,
+            env=env,
+            shell=False,
         )
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.close()
@@ -369,6 +374,7 @@ def main(orchestration_port: int, global_mgr_port: int, node_mgr_port: int, args
     status = None
     # noinspection PyBroadException
     try:
+        args += ['--as-worker-node', f'localhost:{global_mgr_port},{orchestration_port}']
         status = pytest.main(args)
         if isinstance(status, pytest.ExitCode):
             status = status.value

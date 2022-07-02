@@ -183,29 +183,51 @@ class Bundle:
         """
         stdout = sys.stdout if user_output.is_verbose else asyncio.subprocess.DEVNULL
         proc = await ssh_client.execute_remote_cmd(
-            'ls', '-d', str(remote_venv / 'bin' / 'python3'), stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
+            'ls',  str(remote_venv) + '.success',
+            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
         )
-
         if proc.returncode != 0:
+            with suppress(Exception):
+                await ssh_client.rmdir(remote_venv)
             always_print(f"Installing python virtual environment to {remote_venv}")
-            proc = await ssh_client.execute_remote_cmd(
-                self._remote_executable, '-m', 'venv', str(remote_venv),
-                stdout=stdout,
-                stderr=asyncio.subprocess.PIPE
-            )
+            try:
+                proc = await ssh_client.execute_remote_cmd(
+                    self._remote_executable, '-m', 'venv', str(remote_venv),
+                    stdout=stdout,
+                    stderr=asyncio.subprocess.PIPE
+                )
+            except Exception:  # mostly keboard error?
+                with suppress(Exception):
+                    await ssh_client.rmdir(remote_venv)
             if proc.returncode != 0:
+                with suppress(Exception):
+                    await ssh_client.rmdir(remote_venv)
                 data = await proc.stderr.read()
                 raise CommandExecutionFailure(
                     f"{self._remote_executable} -m venv {str(remote_venv)} failed:\n\n  {data}",
                     proc.returncode)
+            else:
+                await ssh_client.execute_remote_cmd(
+                    f'touch {str(remote_venv)}.success',
+                    stdout=stdout,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    shell=True
+                )
+
             await ssh_client.install_packages(
                 'pytest', 'pytest_mproc',
-                venv=remote_venv,
-                cwd=remote_venv.parent,
+                remote_executable=str(remote_venv / 'bin' / 'python3'),
                 stdout=stdout,
                 stderr=sys.stderr)
-
+        else:
+            always_print(f"Using cached remote virtual environment at {remote_venv} for execution")
+        proc = await ssh_client.execute_remote_cmd(
+            'ls', '-d', str(remote_venv / 'bin' / 'python3'),
+            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+        )
+        assert proc.returncode == 0
         return remote_venv
 
     async def deploy(self, ssh_client: SSHClient,
@@ -239,17 +261,17 @@ class Bundle:
             if proc.returncode != 0:
                 text = ('\n' + (await proc.stdout.read()).decode('utf-8')) if proc.stdout else ""
                 raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
-            if self._requirements_path:
-                always_print(f"Installing requirements on remote worker {ssh_client.host} to {remote_venv}...")
-                await ssh_client.install(
-                    venv=remote_venv,
-                    remote_root=remote_root,
-                    requirements_path=f'run{os.sep}requirements.txt',
-                    cwd=remote_root,
-                    stdout=stdout,
-                    stderr=sys.stderr
-                )
             await ssh_client.mkdir(remote_root / "run" / self._relative_run_path, exists_ok=True)
         except Exception as e:
             always_print(f"!!! Failed to deploy to {ssh_client.host}: {e}")
             raise
+
+    async def install_requirements(self, ssh_client: SSHClient, remote_root: Path, remote_venv: Path, ):
+        if self._requirements_path:
+            always_print(f"Installing requirements on remote worker {ssh_client.host} to {remote_venv}...")
+            await ssh_client.install(
+                venv=remote_venv,
+                full_requirements_path=remote_root / 'run' / self._requirements_path,
+                stdout=sys.stdout,
+                stderr=sys.stderr
+            )

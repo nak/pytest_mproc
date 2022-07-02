@@ -107,7 +107,6 @@ class SSHClient:
                 stderr=stderr,
                 stdin=stdin,
             )
-            assert result
             return result
         else:
             return await asyncio.subprocess.create_subprocess_exec(
@@ -134,7 +133,7 @@ class SSHClient:
         if rc != SUCCESS:
             stdout = await proc.stdout.read()
             if not exists_ok or b'File exists' not in stdout:
-                raise CommandExecutionFailure(f"mkdir -p {remote_path}:\n\n{stdout}", rc)
+                raise CommandExecutionFailure(f"mkdir -p {remote_path}:\n\n{stdout.decode('utf-8')}", rc)
 
     async def rmdir(self, remote_path: Path):
         """
@@ -197,8 +196,8 @@ class SSHClient:
         else:
             rc = await proc.wait()
         if rc != SUCCESS:
-            stdout = await proc.stdout.read()
-            stderr = await proc.stderr.read()
+            stdout = (await proc.stdout.read()).decode('utf-8')
+            stderr = (await proc.stderr.read()).decode('utf-8')
             raise CommandExecutionFailure(f"Copy from {str(local_path)} to {str(remote_path)} "
                                           f"[scp {' '.join(args)}] \n\n{stdout}\n\n {stderr}\n\n",
                                           rc=rc)
@@ -232,7 +231,7 @@ class SSHClient:
         else:
             rc = await proc.wait()
         if rc != 0:
-            stdout = await proc.stdout.read()
+            stdout = (await proc.stdout.read()).decode('utf-8')
             msg = f"\n!!! Copy failed from  {self.destination}:{str(remote_path)} to "\
                   f"{str(local_path.absolute())} [{cmd}]\n"\
                   f"\n{stdout.decode('utf-8')}\n\n"
@@ -266,7 +265,7 @@ class SSHClient:
             timeout=timeout
         )
         if proc.returncode != 0:
-            stdout = proc.stdout
+            stdout = proc.stdout.decode('utf-8')
             msg = f"\n!!! Copy from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} [{cmd}]\n"\
                   f"\n{stdout.decode('utf-8')}\n\n"
             always_print(msg)
@@ -292,54 +291,46 @@ class SSHClient:
 
     async def install_packages(
             self,  *pkgs,
-            venv: Path,
-            cwd: Optional[Path] = None,
+            remote_executable: str,
             stdout: Optional[Union[int, TextIO]] = None,
             stderr: Optional[Union[int, TextIO]] = sys.stderr):
-        remote_py_executable = venv / 'bin' / 'python3'
-        cmd = f"{str(remote_py_executable)} -m pip install --upgrade {' '.join(pkgs)}"
+        cmd = f"{remote_executable} -m pip install --upgrade {' '.join(pkgs)}"
         proc = await self._remote_execute(
             cmd,
             stdout=stdout,
             stderr=stderr,
-            cwd=str(cwd) if cwd is not None else None
         )
         stdout, _ = await proc.communicate()
         assert proc.returncode is not None
         if proc.returncode != 0:
-            os.write(sys.stderr.fileno(), f"Command {cmd} from {cwd}failed to install on remote".encode('utf-8'))
+            always_print(f"Command {cmd} from {cwd}failed to install on remote", as_error=True)
             raise CommandExecutionFailure(cmd, proc.returncode)
 
     async def install(self,
                       venv: Path,
-                      remote_root: Path,
-                      requirements_path: str,
-                      cwd: Optional[Path] = None,
+                      full_requirements_path: Path,
                       stdout: Optional[Union[int, TextIO]] = None,
                       stderr: Optional[Union[int, TextIO]] = sys.stderr):
         """
         install Python requirements  on remote client
 
-        :param cwd: directory to run from on remote host
         :param venv: path to python virtual environment on remote host
-        :param remote_root: root directory on remote client
-        :param requirements_path: path, relative to remote_root, where requirements file is to be found
+        :param full_requirements_path: path, relative to remote_root, where requirements file is to be found
         :param stdout: as per subprocess.Popen
         :param stderr: as per subprocess.Popen
         :raises: CommandExecutionFailure if install failed on remote client
         """
         remote_py_executable = venv / 'bin' / 'python3'
-        cmd = f"{str(remote_py_executable)} -m pip install --upgrade -r {str(remote_root / requirements_path)}"
+        cmd = f"{str(remote_py_executable)} -m pip install --upgrade -r {str(full_requirements_path)}"
         proc = await self._remote_execute(
             cmd,
             stdout=stdout,
             stderr=stderr,
-            cwd=str(cwd) if cwd is not None else None
         )
         stdout, _ = await proc.communicate()
         assert proc.returncode is not None
         if proc.returncode != 0:
-            os.write(sys.stderr.fileno(), f"Command {cmd} failed to install on remote".encode('utf-8'))
+            always_print(f"Command {cmd} failed to install on remote", as_error=True)
             raise CommandExecutionFailure(cmd, proc.returncode)
 
     async def monitor_remote_execution(self, command, *args,
@@ -555,7 +546,7 @@ class SSHClient:
             )
             if completed.returncode != 0 and b'No such process' not in completed.stdout:
                 always_print(f"Failed to kill one or more worker pids {' '.join(pid_texts)} "
-                             f"on {self.destination}: {completed.stdout}", as_error=True)
+                             f"on {self.destination}: {completed.stdout.decode('utf-8')}", as_error=True)
         except TimeoutError:
             always_print("Timeout trying to kill remote worker processes")
 
@@ -666,7 +657,7 @@ class SSHClient:
         if rc != SUCCESS:
             stdout = proc.stdout.read()
             if not exists_ok or b'File exists' not in stdout:
-                raise CommandExecutionFailure(f"mkdir -p {remote_path}:\n\n{stdout}", rc)
+                raise CommandExecutionFailure(f"mkdir -p {remote_path}:\n\n{stdout.decode('utf-8')}", rc)
 
     def rmdir_sync(self, remote_path: Path):
         """
