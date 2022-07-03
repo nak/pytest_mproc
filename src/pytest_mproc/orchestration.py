@@ -141,10 +141,13 @@ class OrchestrationMPManager(BaseManager):
 
     def shutdown(self) -> None:
         self.join(timeout=5)
+        pid_map = {}
         for (host, pid) in self._workers.values():
-            ssh = SSHClient(host=host, username=Settings.ssh_username, password=Settings.ssh_password)
+            pid_map.setdefault(host, []).append(pid)
+        for host, pids in pid_map.items():
+            ssh_client = SSHClient(host=host, username=Settings.ssh_username, password=Settings.ssh_password)
             with suppress(Exception):
-                ssh.execute_remote_cmd("kill", "-9", str(pid))
+                ssh_client.signal_sync(pids, signal.SIGINT)
         if self._remote_pid is not None:
             with suppress(Exception):
                 os.kill(self._remote_pid, signal.SIGINT)

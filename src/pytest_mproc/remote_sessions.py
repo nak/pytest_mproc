@@ -196,25 +196,17 @@ class RemoteSessionManager:
             for host, coordinator in self._coordinators.copy().items():
                 # test if worker is active
                 ssh_client = self._ssh_clients[host]
-                try:
-                    await ssh_client.execute_remote_cmd("echo", "PONG",
-                                                        stdout=asyncio.subprocess.DEVNULL,
-                                                        stderr=asyncio.subprocess.DEVNULL,
-                                                        timeout=5)
+                if await ssh_client.ping(timeout=5):
                     debug_print(f"Host {host} is alive...")
-                except TimeoutError:
+                else:
                     always_print(f"Host {host} unreachable!", as_error=True)
-                    worker_pids = self._worker_pids.get(host)
+                    worker_pids = self._worker_pids.get(host) or []
+                    ssh_client.signal_sync(worker_pids, signal.SIGINT)
                     for worker_pid in worker_pids:
-                        await ssh_client.signal(worker_pid, signal.SIGKILL)
                         # this will attempt to reschedule test
                         result = ClientDied(worker_pid, host, True)
                         await results_q.put(result)
-                        self._worker_pids[host].remove(worker_pid)
-                        if not self._worker_pids[host]:
-                            del self._worker_pids[host]
-                else:
-                    debug_print(f"{host} is alive")
+                    del self._worker_pids[host]
             await asyncio.sleep(POLLING_INTERVAL_HOST_VALIDATION)
 
     @classmethod

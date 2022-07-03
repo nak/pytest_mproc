@@ -523,12 +523,6 @@ class SSHClient:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
         return proc
 
-    async def signal(self, pid, signal: int):
-        await self._remote_execute(f"kill -{signal} {pid}",
-                                   stdout=asyncio.subprocess.DEVNULL,
-                                   stderr=sys.stderr,
-                                   shell=True)
-
     def signal_sync(self, pgids: List[int], sig_number: int) -> None:
         """
         Kill processes with assigned pids on remote host.
@@ -739,6 +733,60 @@ class SSHClient:
             proc.stdin.close()
         proc.wait(timeout=timeout)
         return proc
+
+    async def ping(self, timeout: float) -> bool:
+        try:
+            await self.execute_remote_cmd(
+                "echo", "PONG",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                timeout=timeout,
+                shell=True,
+            )
+            return True
+        except (TimeoutError, asyncio.TimeoutError):
+            return False
+
+    async def unzip(self, remote_zip_location: Union[Path, str], remote_target_dir: Path,
+                    timeout: Optional[float] = None):
+        proc = await self._remote_execute(
+            f"cd {str(remote_target_dir)} && unzip -o {str(remote_zip_location)}",
+            stdout=sys.stdout if user_output.is_verbose else asyncio.subprocess.DEVNULL,
+            stderr=sys.stderr
+        )
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        if proc.returncode != 0:
+            text = ('\n' + (await proc.stdout.read()).decode('utf-8')) if proc.stdout else ""
+            raise CommandExecutionFailure(f"Failed to unzip tests on remote client {text}", proc.returncode)
+
+    async def remote_file_exists(self, remote_path: Path):
+        proc = await self.execute_remote_cmd(
+            'ls', str(remote_path),
+            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+        )
+        return proc.returncode == 0
+
+    async def create_remote_venv(self, remote_py_executable: Union[Path, str], remote_venv_path: Path):
+        proc = await self.execute_remote_cmd(
+            str(remote_py_executable), '-m', 'venv', str(remote_venv_path),
+            stdout=sys.stdout if user_output.is_verbose else asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE
+        )
+        if proc.returncode != 0:
+            text = ('\n' + (await proc.stderr.read()).decode('utf-8')) if proc.stderr else ""
+            raise CommandExecutionFailure(f"Failed to unzip tests on remote client {text}", proc.returncode)
+
+    async def touch(self, remote_file_path: Union[Path, str]):
+        proc = await self.execute_remote_cmd(
+            f'touch {str(remote_file_path)}',
+            stdout=sys.stdout if user_output.is_verbose else asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            shell=True
+        )
+        if proc.returncode != 0:
+            text = ('\n' + (await proc.stderr.read()).decode('utf-8')) if proc.stderr else ""
+            raise CommandExecutionFailure(f"Failed to unzip tests on remote client {text}", proc.returncode)
 
 
 @contextmanager

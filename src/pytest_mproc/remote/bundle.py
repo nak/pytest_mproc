@@ -182,39 +182,21 @@ class Bundle:
         setup the remote base virtual environment (Python + pytest + pytest_mproc)
         """
         stdout = sys.stdout if user_output.is_verbose else asyncio.subprocess.DEVNULL
-        proc = await ssh_client.execute_remote_cmd(
-            'ls',  str(remote_venv) + '.success',
-            stderr=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-        )
-        if proc.returncode != 0:
+        file_exists = await ssh_client.remote_file_exists(Path(str(remote_venv) + '.success'))
+        if not file_exists:
             with suppress(Exception):
                 await ssh_client.rmdir(remote_venv)
             always_print(f"Installing python virtual environment to {remote_venv}")
             # noinspection PyBroadException
             try:
-                proc = await ssh_client.execute_remote_cmd(
-                    self._remote_executable, '-m', 'venv', str(remote_venv),
-                    stdout=stdout,
-                    stderr=asyncio.subprocess.PIPE
-                )
+                proc = await ssh_client.create_remote_venv(remote_py_executable=self._remote_executable,
+                                                           remote_venv_path=remote_venv)
             except Exception:  # mostly keyboard error?
                 with suppress(Exception):
                     await ssh_client.rmdir(remote_venv)
-            if proc.returncode != 0:
-                with suppress(Exception):
-                    await ssh_client.rmdir(remote_venv)
-                data = await proc.stderr.read()
-                raise CommandExecutionFailure(
-                    f"{self._remote_executable} -m venv {str(remote_venv)} failed:\n\n  {data}",
-                    proc.returncode)
+                raise
             else:
-                await ssh_client.execute_remote_cmd(
-                    f'touch {str(remote_venv)}.success',
-                    stdout=stdout,
-                    stderr=asyncio.subprocess.DEVNULL,
-                    shell=True
-                )
+                await ssh_client.touch(remote_file_path=f"{str(remote_venv)}.success")
 
             await ssh_client.install_packages(
                 'pytest', 'pytest_mproc',
@@ -223,12 +205,12 @@ class Bundle:
                 stderr=sys.stderr)
         else:
             always_print(f"Using cached remote virtual environment at {remote_venv} for execution")
-        proc = await ssh_client.execute_remote_cmd(
-            'ls', '-d', str(remote_venv / 'bin' / 'python3'),
-            stderr=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-        )
-        assert proc.returncode == 0
+        python_venv_exists = await ssh_client.remote_file_exists(remote_path=remote_venv / 'bin' / 'python3')
+        if not python_venv_exists:
+            with suppress(Exception):
+                await ssh_client.rmdir(remote_venv)
+            raise SystemError("!!! Creationg of python venv failed to create python3 executable in "
+                              f"{remote_venv / 'bin' / 'python3'}")
         return remote_venv
 
     async def deploy(self, ssh_client: SSHClient, remote_root: Path, timeout: Optional[float] = None) -> None:
@@ -239,27 +221,18 @@ class Bundle:
         :param remote_root: remote path to where bundle is deployed
         """
         always_print("Deploying bundle to remote worker %s...", ssh_client.host)
-        stdout = sys.stdout if user_output.is_verbose else asyncio.subprocess.DEVNULL
         try:
             await ssh_client.mkdir(self.remote_run_dir(remote_root), exists_ok=True)
             debug_print(f">>> Pushing contents to remote worker {ssh_client.host}...")
             await ssh_client.push(self._zip_path, remote_root / self._zip_path.name)
             always_print(f">>> Unpacking tests on remote worker {ssh_client.host}...")
-            # noinspection PyProtectedMember
-            proc = await ssh_client._remote_execute(
-                f"cd {str(remote_root)} && unzip -o {str(self._zip_path.name)}",
-                stdout=stdout,
-                stderr=sys.stderr
-            )
-            await asyncio.wait_for(proc.wait(), timeout=timeout)
-            if proc.returncode != 0:
-                text = ('\n' + (await proc.stdout.read()).decode('utf-8')) if proc.stdout else ""
-                raise CommandExecutionFailure(f"Failed to unzip tests on remote client {text}", proc.returncode)
-            with suppress(Exception):
-                await ssh_client.remove(remote_root / self._zip_path.name)
-            if proc.returncode != 0:
-                text = ('\n' + (await proc.stdout.read()).decode('utf-8')) if proc.stdout else ""
-                raise CommandExecutionFailure(f"Failed to unzip requirements on remote client {text}", proc.returncode)
+            try:
+                await ssh_client.unzip(remote_target_dir=remote_root,
+                                       remote_zip_location=self._zip_path.name,
+                                       timeout=timeout)
+            finally:
+                with suppress(Exception):
+                    await ssh_client.remove(remote_root / self._zip_path.name)
             await ssh_client.mkdir(remote_root / "run" / self._relative_run_path, exists_ok=True)
         except Exception as e:
             always_print(f"!!! Failed to deploy to {ssh_client.host}: {e}")
