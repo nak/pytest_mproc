@@ -358,9 +358,9 @@ class Orchestrator(ABC):
             raise session.Failed(True)
         except (EOFError, ConnectionError, BrokenPipeError, KeyboardInterrupt) as e:
             always_print("Testing interrupted; shutting down")
+            populate_tests_task.cancel()
+            self._test_q.close()
             self.shutdown()
-            if isinstance(e, KeyboardInterrupt):
-                raise
         finally:
             self._active = False
             with suppress(Exception):

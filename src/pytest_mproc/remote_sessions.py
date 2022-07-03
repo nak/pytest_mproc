@@ -73,6 +73,10 @@ class RemoteSessionManager:
                 except asyncio.TimeoutError:
                     always_print(f"!!! Failed to stop coordinator on host {host}")
         self._coordinators = {}
+        for host, remote_pids in self._worker_pids.items():
+            always_print(f"Ensuring termination of remote worker pids {remote_pids} on {host}...")
+            self._ssh_clients[host].signal_sync(remote_pids, sig_number=signal.SIGINT)
+        self._worker_pids = {}
         with suppress(Exception):
             self._validate_task.cancel()
         for proc in self._port_fwd_procs:
@@ -81,11 +85,10 @@ class RemoteSessionManager:
         for proc in self._coordinator_procs.values():
             with suppress(Exception):
                 proc.kill()
+        for task in self._worker_tasks:
+            with suppress(Exception):
+                task.cancel()
         self._worker_tasks = []
-        for host, remote_pids in self._worker_pids.items():
-            always_print(f"Ensuring termination of remote worker pids {remote_pids} on {host}...")
-            self._ssh_clients[host].signal_sync(remote_pids, sig_number=signal.SIGKILL)
-        self._worker_pids = {}
         for host, remote_root in self._remote_roots.items():
             with suppress(Exception):
                 ssh_client = self._ssh_clients[host]

@@ -261,10 +261,8 @@ class WorkerSession:
                                     stdout=stdout,
                                     stderr=sys.stderr,
                                     stdin=subprocess.PIPE)
-        cmd = [
-            executable, '-m', __name__, str(orchestration_port), str(global_mgr_port), str(Node.Manager.PORT),
-            f"Worker-{index[0]}-{index[1]}", *args
-        ]
+        cmd = f"{executable} -m {__name__} {orchestration_port} {global_mgr_port} {Node.Manager.PORT} "\
+            f"Worker-{index[0]}-{index[1]} {' '.join(args)}"
         proc = subprocess.Popen(
             cmd,
             stdout=tee_proc.stdin,
@@ -272,7 +270,7 @@ class WorkerSession:
             stdin=subprocess.PIPE,
             cwd=str(run_dir),
             env=env,
-            shell=False,
+            shell=True,
         )
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.close()
@@ -393,7 +391,7 @@ def main(orchestration_port: int, global_mgr_port: int, node_mgr_port: int, args
 
 
 if __name__ == "__main__":
-    sys.stdout.write(f"PID: {os.getpid()}")
+    sys.stdout.write(f"PID: {os.getpgid(os.getpid())}")
     _orchestration_port = int(sys.argv[1])
     _global_mgr_port = int(sys.argv[2])
     _node_mgr_port = int(sys.argv[3])

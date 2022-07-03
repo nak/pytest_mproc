@@ -529,14 +529,14 @@ class SSHClient:
                                    stderr=sys.stderr,
                                    shell=True)
 
-    def signal_sync(self, pids: List[int], sig_number: int) -> None:
+    def signal_sync(self, pgids: List[int], sig_number: int) -> None:
         """
         Kill processes with assigned pids on remote host.
 
         :raises CommandExecutionFailure: if it fails to kill, with exception if process is no longer active;  in that
            case this function returns normally
         """
-        pid_texts = [str(pid) for pid in pids]
+        pid_texts = [str(-pgid) for pgid in pgids]
         try:
             command = f"kill -{sig_number} {' '.join(pid_texts)}"
             completed = subprocess.run(
