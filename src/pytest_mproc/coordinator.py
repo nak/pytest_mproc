@@ -79,7 +79,7 @@ class Coordinator:
 
     class HostProxy:
         """
-        Host Proxy to listen for incoming commands (see above discuttion on ClientProxy as to why we need this)
+        Host Proxy to listen for incoming commands (see above discussion on ClientProxy as to why we need this)
         """
 
         def __init__(self, q: JoinableQueue, target: "Coordinator"):
@@ -122,7 +122,7 @@ class Coordinator:
         self._orchestration_port = orchestration_port
         self._session_start_time = time.time()
         self._reporter = BasicReporter()
-        self._worker_procs: List[subprocess.Popen] = []
+        self._worker_procs: List[Tuple[subprocess.Popen, subprocess.Popen]] = []
         self._remote_run_path: Optional[Path] = None
         self._remote_root = remote_root
         self._remote_venv = remote_venv
@@ -167,7 +167,7 @@ class Coordinator:
             index = len(self._worker_procs) + 1
             root_path = self._remote_root if self._remote_root else Path(os.getcwd())
             root_path.mkdir(exist_ok=True, parents=True)
-            proc = WorkerSession.start(
+            proc, tee_proc = WorkerSession.start(
                 index=(self._index, index),
                 orchestration_port=self._orchestration_port,
                 global_mgr_port=self._global_mgr_port,
@@ -178,7 +178,7 @@ class Coordinator:
                 worker_artifacts_dir=self._relative_artifacts_path,
                 artifacts_root=self._artifacts_path
             )
-            self._worker_procs.append(proc)
+            self._worker_procs.append((proc, tee_proc))
             if proc.returncode is not None:
                 raise SystemError(f"Worker-{index} failed to start")
             return proc.pid
@@ -200,18 +200,24 @@ class Coordinator:
         for index in range(num_processes):
             pids.append(self.start_worker(index, args=args, addl_env=addl_env))
         time.sleep(0.5)
-        for index, proc in enumerate(self._worker_procs):
+        for index, (proc, tee_proc) in enumerate(self._worker_procs):
             if proc.returncode is not None:
                 always_print(f"Worker-{index} failed to start")
-                self._worker_procs.remove(proc)
+                self._worker_procs.remove((proc, tee_proc))
                 pids.remove(pids[index])
+                with suppress(Exception):
+                    tee_proc.kill()
         if not self._worker_procs:
             raise SystemError("All workers failed to start")
         return pids
 
     def wait(self, timeout: Optional[float] = None):
-        for proc in self._worker_procs:
-            proc.wait(timeout=timeout)
+        for proc, tee_proc in self._worker_procs:
+            try:
+                proc.wait(timeout=timeout)
+            finally:
+                proc.terminate()
+                tee_proc.terminate()
 
     def shutdown(self, timeout: Optional[float] = None) -> None:
         """
@@ -257,21 +263,28 @@ class Coordinator:
                 if completed.returncode != 0:
                     always_print(f"Failed to zip {self._relative_artifacts_path} from {self._remote_root}",
                                  as_error=True)
-            for proc in self._worker_procs:
+            for proc, tee_proc in self._worker_procs:
                 try:
                     proc.terminate()
                     proc.wait(timeout=timeout)
                 except (TimeoutExpired, KeyboardInterrupt):
                     with suppress(OSError):
                         proc.kill()
+                try:
+                    tee_proc.terminate()
+                    tee_proc.wait(timeout=timeout)
+                except (TimeoutExpired, KeyboardInterrupt):
+                    with suppress(OSError):
+                        tee_proc.kill()
             self._worker_procs = []
 
     def kill(self) -> None:
         """
         Abruptly kill all worker processes
         """
-        for proc in self._worker_procs:
+        for proc, tee_proc in self._worker_procs:
             proc.kill()
+            tee_proc.kill()
         self._worker_procs = []
 
 

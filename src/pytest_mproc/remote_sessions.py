@@ -84,7 +84,7 @@ class RemoteSessionManager:
         self._worker_tasks = []
         for host, remote_pids in self._worker_pids.items():
             always_print(f"Ensuring termination of remote worker pids {remote_pids} on {host}...")
-            self._ssh_clients[host].signal_sync(remote_pids, signo=signal.SIGKILL)
+            self._ssh_clients[host].signal_sync(remote_pids, sig_number=signal.SIGKILL)
         self._worker_pids = {}
         for host, remote_root in self._remote_roots.items():
             with suppress(Exception):
@@ -120,8 +120,7 @@ class RemoteSessionManager:
 
         futures, _ = await asyncio.wait(
             [self._bundle.setup_remote_venv(ssh_client=ssh_client, remote_venv=remote_venv),
-             self._deploy(ssh_client, worker_config, timeout=deploy_timeout, remote_root=remote_root,
-                          remote_venv=remote_venv)],
+             self._deploy(ssh_client, worker_config, timeout=deploy_timeout, remote_root=remote_root)],
             timeout=deploy_timeout,
             return_when=asyncio.ALL_COMPLETED
         )
@@ -132,12 +131,11 @@ class RemoteSessionManager:
         await self._bundle.install_requirements(ssh_client, remote_root=remote_root, remote_venv=remote_venv)
 
     async def _deploy(self, ssh_client: SSHClient, worker_config: RemoteWorkerConfig,
-                      remote_root: Path, remote_venv: Path, timeout: Optional[float] = None,):
+                      remote_root: Path, timeout: Optional[float] = None,):
         host = worker_config.remote_host
         await self._bundle.deploy(
             ssh_client=ssh_client,
             remote_root=remote_root,
-            remote_venv=remote_venv,
             timeout=timeout
         )
         self._remote_roots[host] = remote_root

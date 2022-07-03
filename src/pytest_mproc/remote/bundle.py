@@ -191,13 +191,14 @@ class Bundle:
             with suppress(Exception):
                 await ssh_client.rmdir(remote_venv)
             always_print(f"Installing python virtual environment to {remote_venv}")
+            # noinspection PyBroadException
             try:
                 proc = await ssh_client.execute_remote_cmd(
                     self._remote_executable, '-m', 'venv', str(remote_venv),
                     stdout=stdout,
                     stderr=asyncio.subprocess.PIPE
                 )
-            except Exception:  # mostly keboard error?
+            except Exception:  # mostly keyboard error?
                 with suppress(Exception):
                     await ssh_client.rmdir(remote_venv)
             if proc.returncode != 0:
@@ -230,11 +231,9 @@ class Bundle:
         assert proc.returncode == 0
         return remote_venv
 
-    async def deploy(self, ssh_client: SSHClient,
-                     remote_venv: Path, remote_root: Path, timeout: Optional[float] = None) -> None:
+    async def deploy(self, ssh_client: SSHClient, remote_root: Path, timeout: Optional[float] = None) -> None:
         """
         Deploy this bundle to a remote ssh client
-        :param remote_venv: location of Python virtual environment on remote host
         :param ssh_client: where to deploy
         :param timeout: raise TimeoutError if deployment takes too long
         :param remote_root: remote path to where bundle is deployed

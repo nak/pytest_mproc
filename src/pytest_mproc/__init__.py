@@ -65,17 +65,17 @@ class TestError(Exception):
 
 def priority(level: int):
 
-    def decorator_priority(object):
-        if inspect.isclass(object):
-            for method in [getattr(object, m) for m in dir(object) if
-                           inspect.isfunction(getattr(object, m)) and m.startswith('test')]:
+    def decorator_priority(obj_):
+        if inspect.isclass(obj_):
+            for method in [getattr(obj_, m) for m in dir(obj_) if
+                           inspect.isfunction(getattr(obj_, m)) and m.startswith('test')]:
                 if not hasattr(method, "_pytest_priority"):
                     method._pytest_priority = level
-        elif inspect.isfunction(object):
-            object._pytest_priority = level
+        elif inspect.isfunction(obj_):
+            obj_._pytest_priority = level
         else:
             raise Exception("group decorator can only decorate class or function object")
-        return object
+        return obj_
 
     return decorator_priority
 
@@ -109,6 +109,7 @@ def find_free_port():
         return s.getsockname()[1]
 
 
+# noinspection SpellCheckingInspection
 def fixture(fixturefunction, *, scope, **kargs):
     from _pytest.fixtures import fixture
     return fixture(fixturefunction, scope=scope, **kargs)
@@ -155,7 +156,7 @@ class Settings:
         Set SSH credentials
 
         :param username:  username for ssh (remote end username)
-        :param password: optional password, if no password provided, sets password to None and assume passowrless
+        :param password: optional password, if no password provided, sets password to None and assume password-less
             login
         """
         cls.ssh_username = username
@@ -164,7 +165,7 @@ class Settings:
     @classmethod
     def set_cache_dir(cls, cache_dir: Optional[Path]):
         """
-        Set persistent cache dir where cahced files will be stored
+        Set persistent cache dir where cached files will be stored
 
         :param cache_dir: path to use for files cached run to run
         """
@@ -182,7 +183,7 @@ class Settings:
 
 class AsyncMPQueue:
     """
-    wraps mp Queue to provide an async (albeit plling) interface
+    wraps mp Queue to provide an async (albeit polling) interface
     """
 
     INTERVAL_POLLING = 0.5  # seconds
@@ -212,7 +213,9 @@ class AsyncMPQueue:
     async def put(self, item, max_tries: Optional[float] = None) -> bool:
         """
         put an item in the queue
+
         :param item: item to place
+        :param max_tries: maximum number of tries before returning False, or None for no restriction on tries
         """
         count = 0
         while max_tries is None or count < max_tries:

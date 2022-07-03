@@ -241,6 +241,11 @@ def pytest_cmdline_main(config):
     is_local = not has_remotes and uri is None
     if config.ptmproc_config.num_cores < 1:
         raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
+    local_proj_file = Path("./ptmproc_project.cfg")
+    project_config_path = (getattr(config.option, "project_structure_path", None) or
+                           (local_proj_file if local_proj_file.exists() else None))
+    config.ptmproc_config.project_config = \
+        ProjectConfig.from_file(project_config_path) if project_config_path else None
     if mproc_mgr_ports:
         config.ptmproc_config.mode = ModeEnum.MODE_COORDINATOR
         try:
@@ -253,12 +258,8 @@ def pytest_cmdline_main(config):
                 "Invalid cmd line option for --as-worker-node:  must be in form of host ip or name and "
                 " integer ports: [<host ip/name>:]<global_manager_port>,<orchestration_port>"
             )
-        return mproc_pytest_cmdline_coordinator(config, host, global_mgr_port, orchestration_port)
-    local_proj_file = Path("./ptmproc_project.cfg")
-    project_config_path = (getattr(config.option, "project_structure_path", None) or
-                           (local_proj_file if local_proj_file.exists() else None))
-    config.ptmproc_config.project_config = \
-        ProjectConfig.from_file(project_config_path) if project_config_path else None
+        return mproc_pytest_cmdline_coordinator(config, host, global_mgr_port, orchestration_port,
+                                                config.ptmproc_config.project_config)
     if is_local:
         config.ptmproc_config.mode = ModeEnum.MODE_LOCAL_MAIN
         # Running locally on local host only:
@@ -304,7 +305,8 @@ def mproc_pytest_cmdline_worker(config):
     assert config.ptmproc_worker
 
 
-def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_port: int, orchestration_port: int):
+def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_port: int, orchestration_port: int,
+                                     proj_config: ProjectConfig):
     assert 'PTMPROC_WORKER' not in os.environ
     config.option.no_summary = True
     config.option.no_header = True
@@ -314,10 +316,12 @@ def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_por
     always_print(
         f"Running as coordinator as host {host} and port {global_mgr_port}, {orchestration_port}[{os.getpid()}]"
     )
-    config.ptmproc_coordinator = coordinator_main(
+    _, config.ptmproc_coordinator = coordinator_main(
         global_mgr_port=global_mgr_port,
         orchestration_port=orchestration_port,
         host=host,
+        artifacts_path=proj_config.artifcats_path,
+        index=1
     )
     args, addl_env = _determine_cli_args()
     config.ptmproc_coordinator.start_workers(config.ptmproc_config.num_cores, args=args, addl_env=addl_env)

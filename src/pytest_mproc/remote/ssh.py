@@ -28,6 +28,7 @@ from pytest_mproc import user_output, Settings
 from pytest_mproc.user_output import debug_print, always_print
 
 SUCCESS = 0
+TIMEOUT_SIMPLE_CMD = 15
 
 
 class CommandExecutionFailure(Exception):
@@ -129,7 +130,7 @@ class SSHClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
         )
-        rc = await asyncio.wait_for(proc.wait(), timeout=5)
+        rc = await asyncio.wait_for(proc.wait(), timeout=TIMEOUT_SIMPLE_CMD)
         if rc != SUCCESS:
             stdout = await proc.stdout.read()
             if not exists_ok or b'File exists' not in stdout:
@@ -146,7 +147,7 @@ class SSHClient:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        rc = await asyncio.wait_for(proc.wait(), timeout=5)
+        rc = await asyncio.wait_for(proc.wait(), timeout=TIMEOUT_SIMPLE_CMD)
         if rc != SUCCESS:
             raise CommandExecutionFailure(f"rm -rf {remote_path}", rc)
 
@@ -162,7 +163,7 @@ class SSHClient:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        rc = await asyncio.wait_for(proc.wait(), timeout=5)
+        rc = await asyncio.wait_for(proc.wait(), timeout=TIMEOUT_SIMPLE_CMD)
         if rc != SUCCESS:
             raise CommandExecutionFailure(f"rm -rf {remote_path}", rc)
 
@@ -234,7 +235,7 @@ class SSHClient:
             stdout = (await proc.stdout.read()).decode('utf-8')
             msg = f"\n!!! Copy failed from  {self.destination}:{str(remote_path)} to "\
                   f"{str(local_path.absolute())} [{cmd}]\n"\
-                  f"\n{stdout.decode('utf-8')}\n\n"
+                  f"\n{stdout}\n\n"
             always_print(msg)
             raise CommandExecutionFailure(msg, rc)
 
@@ -267,7 +268,7 @@ class SSHClient:
         if proc.returncode != 0:
             stdout = proc.stdout.decode('utf-8')
             msg = f"\n!!! Copy from  {self.destination}:{str(remote_path)} to {str(local_path.absolute())} [{cmd}]\n"\
-                  f"\n{stdout.decode('utf-8')}\n\n"
+                  f"\n{stdout}\n\n"
             always_print(msg)
             raise CommandExecutionFailure(msg, proc.returncode)
 
@@ -280,7 +281,7 @@ class SSHClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_SIMPLE_CMD)
         if proc.returncode != 0:
             raise CommandExecutionFailure("Getting platform info through uname", proc.returncode)
         system, machine = stdout.strip().splitlines()
@@ -303,7 +304,7 @@ class SSHClient:
         stdout, _ = await proc.communicate()
         assert proc.returncode is not None
         if proc.returncode != 0:
-            always_print(f"Command {cmd} from {cwd}failed to install on remote", as_error=True)
+            always_print(f"Command {cmd} failed to install on remote", as_error=True)
             raise CommandExecutionFailure(cmd, proc.returncode)
 
     async def install(self,
@@ -394,7 +395,7 @@ class SSHClient:
             with suppress(OSError):
                 proc.terminate()
             with suppress(TimeoutError, KeyboardInterrupt):
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                await asyncio.wait_for(proc.wait(), timeout=TIMEOUT_SIMPLE_CMD)
             if proc.returncode is None:
                 with suppress(OSError):
                     proc.kill()
@@ -427,7 +428,7 @@ class SSHClient:
                 stderr=asyncio.subprocess.PIPE,
                 shell=True
             )
-        stdout, stderr = proc.communicate(timeout=5)
+        stdout, stderr = proc.communicate(timeout=TIMEOUT_SIMPLE_CMD)
         if proc.returncode != 0:
             raise SystemError(f"Failed to create tmp dir on remote client: {stdout}\n  {stderr}")
         # noinspection SpellCheckingInspection
@@ -528,7 +529,7 @@ class SSHClient:
                                    stderr=sys.stderr,
                                    shell=True)
 
-    def signal_sync(self, pids: List[int], signo: int) -> None:
+    def signal_sync(self, pids: List[int], sig_number: int) -> None:
         """
         Kill processes with assigned pids on remote host.
 
@@ -537,12 +538,12 @@ class SSHClient:
         """
         pid_texts = [str(pid) for pid in pids]
         try:
-            command = f"kill -{signo} {' '.join(pid_texts)}"
+            command = f"kill -{sig_number} {' '.join(pid_texts)}"
             completed = subprocess.run(
                 ["ssh", self.destination, *self._global_options, command],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                timeout=10
+                timeout=TIMEOUT_SIMPLE_CMD
             )
             if completed.returncode != 0 and b'No such process' not in completed.stdout:
                 always_print(f"Failed to kill one or more worker pids {' '.join(pid_texts)} "
@@ -653,7 +654,7 @@ class SSHClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
         )
-        rc = proc.wait(timeout=5)
+        rc = proc.wait(timeout=TIMEOUT_SIMPLE_CMD)
         if rc != SUCCESS:
             stdout = proc.stdout.read()
             if not exists_ok or b'File exists' not in stdout:
@@ -668,7 +669,7 @@ class SSHClient:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        rc = proc.wait(timeout=5)
+        rc = proc.wait(timeout=TIMEOUT_SIMPLE_CMD)
         if rc != SUCCESS:
             raise CommandExecutionFailure(f"rm -rf {remote_path}", rc)
 

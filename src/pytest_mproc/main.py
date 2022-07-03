@@ -1,8 +1,6 @@
 import asyncio
-import binascii
 import os
 from abc import ABC
-from pathlib import Path
 
 import pytest
 import resource
@@ -11,7 +9,7 @@ import time
 
 from contextlib import suppress
 from queue import Empty
-from typing import List, Optional, Union, Dict, AsyncIterator, Tuple, Any, ContextManager
+from typing import List, Optional, Union, Dict, AsyncIterator, Tuple, Any
 
 from _pytest.reports import TestReport
 
@@ -286,9 +284,9 @@ class Orchestrator(ABC):
                 if not self._active:
                     break
         except (EOFError, BrokenPipeError, ConnectionError, KeyboardInterrupt) as e:
-            always_print("!!! Result processing interrupted;  stopping queue")
+            always_print(f"!!! Result processing interrupted;  stopping queue !!!: {e}")
         except Exception as e:
-            always_print(f"!!! Exception while populating tests; shutting down: {e}")
+            always_print(f"!!! Exception while populating tests; shutting down: {e} !!!")
         finally:
             await self.signal_all_tests_sent()
 
@@ -301,7 +299,8 @@ class Orchestrator(ABC):
         skipped_tests = []
         valid_tests = []
         for t in tests:
-            if ((t.keywords.get('skipif') and t.keywords.get('skipif').args[0])) or t.keywords.get('skip'):
+            # noinspection SpellCheckingInspection
+            if (t.keywords.get('skipif') and t.keywords.get('skipif').args[0]) or t.keywords.get('skip'):
                 skipped_tests.append(t)
             else:
                 valid_tests.append(t)
@@ -359,7 +358,7 @@ class Orchestrator(ABC):
             raise session.Failed(True)
         except (EOFError, ConnectionError, BrokenPipeError, KeyboardInterrupt) as e:
             always_print("Testing interrupted; shutting down")
-            await self.shutdown()
+            self.shutdown()
             if isinstance(e, KeyboardInterrupt):
                 raise
         finally:
@@ -401,8 +400,6 @@ class Orchestrator(ABC):
     def shutdown(self):
         """
         shutdown services
-
-        :param normally: if this is part of normal shutdown (or on exception)
         """
         if self._http_session:
             self._http_session.end_session()
@@ -445,7 +442,7 @@ class LocalOrchestrator(Orchestrator):
         try:
             self._coordinator.shutdown(timeout=10)
         except Exception as e:
-            always_print(f"!!! coordinator failed to shutdown properly")
+            always_print(f"!!! coordinator failed to shutdown properly !!: {e}")
         super().shutdown()
 
 

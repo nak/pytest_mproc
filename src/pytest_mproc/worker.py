@@ -208,7 +208,7 @@ class WorkerSession:
               root_path: Optional[Path],
               worker_artifacts_dir: Path,
               artifacts_root: Path,
-              venv_path: Optional[Path]) -> subprocess.Popen:
+              venv_path: Optional[Path]) -> Tuple[subprocess.Popen, subprocess.Popen]:
         """
         :param index: worker index unique to host machine
         :param global_mgr_port: (forwarded) localhost port of global manager
@@ -276,7 +276,7 @@ class WorkerSession:
         )
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.close()
-        return proc
+        return proc, tee_proc
 
     # noinspection SpellCheckingInspection
     def pytest_internalerror(self, __excrepr):
@@ -358,7 +358,7 @@ def main(orchestration_port: int, global_mgr_port: int, node_mgr_port: int, args
     Global.Manager.singleton(address=('localhost', global_mgr_port), as_client=True)
     mgr = OrchestrationManager.create_client(address=('localhost', orchestration_port))
     # noinspection PyUnresolvedReferences
-    index = mgr.register_worker((get_ip_addr(), os.getpid()))
+    mgr.register_worker((get_ip_addr(), os.getpid()))
     # noinspection PyUnresolvedReferences
     test_q = mgr.get_test_queue().raw()
     # noinspection PyUnresolvedReferences
