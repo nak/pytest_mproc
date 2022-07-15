@@ -814,9 +814,6 @@ def remote_root_context(project_name: str, ssh_client: SSHClient, remote_root: O
     venv_root = cache_path / project_name
     ssh_client.mkdir_sync(venv_root, exists_ok=True)
     debug_print(f"Using {cache_path / project_name} to cache python venv")
-    if remote_root:
-        yield remote_root, venv_root or remote_root
-    else:
-        with ssh_client.mkdtemp(Settings.tmp_root) as root:
-            debug_print(f"Using dir {venv_root} to set up python venv and {root} as temp staging dir")
-            yield root, venv_root or root
+    with ssh_client.mkdtemp(remote_root or Settings.tmp_root) as root:
+        always_print(f"Using dir {venv_root} to set up python venv and {root} as temp staging dir")
+        yield root, venv_root or root
