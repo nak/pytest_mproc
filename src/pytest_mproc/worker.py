@@ -285,10 +285,11 @@ class WorkerSession:
 
     # noinspection SpellCheckingInspection
     def pytest_runtest_logstart(self, nodeid, location):
-        try:
-            self._put(ReportStarted(nodeid, location))
-        except Exception as e:
-            always_print(f"{self._name} failed to post start of report: {e}")
+        if "PTMPROC_REPORT_TEST_START" in os.environ:
+            try:
+                self._put(ReportStarted(nodeid, location))
+            except Exception as e:
+                always_print(f"{self._name} failed to post start of report: {e}")
 
     # noinspection SpellCheckingInspection
     def pytest_runtest_logfinish(self, nodeid, location):
