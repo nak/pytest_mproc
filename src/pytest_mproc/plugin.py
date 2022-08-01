@@ -451,7 +451,7 @@ def pytest_runtestloop(session):
         http_session = RemoteWorkerConfig.http_session()
         if http_session:
             always_print("Shutting down HTTP session...")
-            http_session.end_session()
+            http_session.end_session_sync()
     elif mode == ModeEnum.MODE_WORKER:
         with suppress(Exception):
             session.config.ptmproc_worker.test_loop(session)
@@ -559,7 +559,7 @@ def pytest_sessionfinish(session):
         http_session = RemoteWorkerConfig.http_session()
         if http_session:
             always_print("Shutting down HTTP session...")
-            http_session.end_session()
+            http_session.end_session_sync()
         with suppress(Exception):
             fixtures.Node.Manager.shutdown()
         if session.config.ptmproc_worker:

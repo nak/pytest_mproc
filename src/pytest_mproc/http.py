@@ -33,6 +33,9 @@ class HTTPSession:
         async with aiohttp.ClientSession() as session:
             while True:
                 async with session.get(heartbeat_url) as resp:
+                    if resp.status == 404:
+                        always_print(f"Session no longer found.  Terminating heartbeat")
+                        break
                     if not self._check_http_status(resp):
                         always_print(f"http call to {heartbeat_url} to provide heartbeat failed: {resp.reason}"
                                      f" [session_id: {self._session_id}")
