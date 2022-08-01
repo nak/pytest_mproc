@@ -28,7 +28,6 @@ from pytest_mproc.data import (
 )
 from pytest_mproc.data import ResultException, ResultTestStatus, ResultType
 from pytest_mproc.fixtures import Global
-from pytest_mproc.http import HTTPSession
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig, _determine_cli_args
 from pytest_mproc.remote_sessions import RemoteSessionManager
@@ -61,8 +60,6 @@ class Orchestrator(ABC):
         # for information output:
         self._reporter = BasicReporter()
         self._rusage = None
-        # for internal handling of requests
-        self._http_session: Optional[HTTPSession] = None
         # for information output:
         self._reporter = BasicReporter()
         self._rusage = None
@@ -357,7 +354,7 @@ class Orchestrator(ABC):
         except FatalError:
             raise session.Failed(True)
         except (EOFError, ConnectionError, BrokenPipeError, KeyboardInterrupt) as e:
-            always_print("Testing interrupted; shutting down")
+            always_print(f"Testing interrupted; shutting down: {type(e)}")
             populate_tests_task.cancel()
             self._test_q.close()
             self.shutdown()
@@ -373,10 +370,6 @@ class Orchestrator(ABC):
                     await self.signal_all_tests_sent(max_tries=3)
             with suppress(Exception):
                 populate_tests_task.cancel()
-            if self._http_session is not None:
-                with suppress(Exception):
-                    await self._http_session.end_session()
-                    self._http_session = None
             with suppress(Exception):
                 end_rusage = resource.getrusage(resource.RUSAGE_SELF)
                 time_span = time.time() - start_time
@@ -401,9 +394,6 @@ class Orchestrator(ABC):
         """
         shutdown services
         """
-        if self._http_session:
-            self._http_session.end_session()
-            self._http_session = None
         with suppress(Exception):
             self._test_q.close()
         with suppress(Exception):
@@ -460,7 +450,6 @@ class RemoteOrchestrator(Orchestrator):
         :param project_config: user-defined project parameters
         """
         super().__init__(project_config, global_mgr_port=global_mgr_port, orchestration_port=orchestration_port)
-        self._http_session: Optional[HTTPSession] = None
         remote_sys_executable = 'python{}.{}'.format(*sys.version_info)
         self._remote_session = RemoteSessionManager(remote_sys_executable=remote_sys_executable,
                                                     project_config=self._project_config,

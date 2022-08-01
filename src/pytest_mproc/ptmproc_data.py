@@ -137,7 +137,7 @@ class RemoteWorkerConfig:
                     always_print(f"Failed to find available workers from {http_uri}; "
                                  "attempting next fallback if present")
         if count == 0:
-            pytest.fail("Failed to yield any viable remote workers. aborting")
+            pytest.exit("Failed to yield any viable remote workers. aborting")
 
     @classmethod
     def from_list(cls, value: Iterable[str]) -> List["RemoteWorkerConfig"]:
@@ -218,7 +218,7 @@ class RemoteWorkerConfig:
         return arg_list, env_list
 
     @classmethod
-    def http_session(cls):
+    def http_session(cls) -> HTTPSession:
         return cls._http_session
 
 
@@ -238,7 +238,6 @@ class PytestMprocConfig:
     remote_sys_executable: Optional[Path] = None
     http_session: Optional[HTTPSession] = None
     project_config: Optional[ProjectConfig] = None
-    #orchestrator: Optional["pytest_mproc.main.Orchestrator"] = None
 
 
 def _determine_cli_args(worker_config: Optional[RemoteWorkerConfig] = None, force_num_cores: Optional[int] = None):

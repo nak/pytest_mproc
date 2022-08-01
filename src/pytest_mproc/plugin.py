@@ -192,6 +192,7 @@ def pytest_cmdline_main(config):
     """
     global cmdline_main_called
     reporter = BasicReporter()
+    config.ptmproc_http_session = None
     if cmdline_main_called:
         return
     has_remotes = "--remote-worker" in sys.argv
@@ -206,7 +207,6 @@ def pytest_cmdline_main(config):
     config.ptmproc_worker = None
     config.ptmproc_orchestrator = None
     config.ptmproc_coordinator = None
-    config.ptmproc_http_session = None
     config.ptmproc_config = PytestMprocConfig(
         num_cores=mproc_num_cores,
         connection_timeout=mproc_connection_timeout or 60*30,
@@ -337,7 +337,6 @@ def mproc_pytest_cmdline_main_local(config: PytestMprocConfig, orchestrator: Loc
 def mproc_pytest_cmdline_main_remote(config: PytestMprocConfig, reporter: BasicReporter,
                                      orchestrator: RemoteOrchestrator, remote_clients):
     assert "--as-worker-node" not in sys.argv
-    config.ptmproc_http_session = None
     project_config = config.project_config
     if project_config is None:
         raise pytest.UsageError("When running remote, a project config file must be specified con command line,"
@@ -449,6 +448,10 @@ def pytest_runtestloop(session):
             finally:
                 orchestrator.shutdown()
         asyncio.get_event_loop().run_until_complete(loop())
+        http_session = RemoteWorkerConfig.http_session()
+        if http_session:
+            always_print("Shutting down HTTP session...")
+            http_session.end_session()
     elif mode == ModeEnum.MODE_WORKER:
         with suppress(Exception):
             session.config.ptmproc_worker.test_loop(session)
@@ -553,6 +556,10 @@ def pytest_sessionfinish(session):
         yield
     else:
         verbose = session.config.option.verbose
+        http_session = RemoteWorkerConfig.http_session()
+        if http_session:
+            always_print("Shutting down HTTP session...")
+            http_session.end_session()
         with suppress(Exception):
             fixtures.Node.Manager.shutdown()
         if session.config.ptmproc_worker:
@@ -561,8 +568,6 @@ def pytest_sessionfinish(session):
         if orchestrator:
             orchestrator.output_summary()
             orchestrator.shutdown()
-            if session.config.ptmproc_http_session is not None:
-                session.config.ptmproc_http_session.end_session_sync()
         yield
         session.config.option.verbose = verbose
         with suppress(Exception):

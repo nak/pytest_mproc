@@ -23,7 +23,7 @@ from pytest_mproc.coordinator import Coordinator
 
 from pytest_mproc import user_output
 from pytest_mproc.ptmproc_data import ProjectConfig
-from pytest_mproc.remote.ssh import SSHClient, CommandExecutionFailure
+from pytest_mproc.remote.ssh import SSHClient
 from pytest_mproc.user_output import debug_print, always_print
 
 _root = os.path.dirname(__file__)
@@ -189,8 +189,8 @@ class Bundle:
             always_print(f"Installing python virtual environment to {remote_venv}")
             # noinspection PyBroadException
             try:
-                proc = await ssh_client.create_remote_venv(remote_py_executable=self._remote_executable,
-                                                           remote_venv_path=remote_venv)
+                await ssh_client.create_remote_venv(remote_py_executable=self._remote_executable,
+                                                    remote_venv_path=remote_venv)
             except Exception:  # mostly keyboard error?
                 with suppress(Exception):
                     await ssh_client.rmdir(remote_venv)

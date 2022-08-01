@@ -274,6 +274,7 @@ class WorkerSession:
         )
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
         proc.stdin.close()
+        always_print(f"Launched command '{cmd}' with pid {proc.pid}")
         return proc, tee_proc
 
     # noinspection SpellCheckingInspection
