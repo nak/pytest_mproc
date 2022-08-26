@@ -466,31 +466,41 @@ class RemoteOrchestrator(Orchestrator):
                 "You must supply both a project configuration and a remotes client configuration together when "
                 f"requesting automated distributed test execution"
             )
+        always_print("Gathering remote workers...")
+        num_cores = num_cores or 1
+        tasks = []
         async for config in remote_workers_config:
+            always_print(f"Got remote worker {config.remote_host}")
             args, addl_env = _determine_cli_args(worker_config=config)
             addl_env.update(env or {})
             # noinspection PyTypeChecker
-            tasks = [
-                    self._remote_session.start_worker(
-                        artifacts_dir=self._project_config.artifcats_path,
-                        worker_config=config,
-                        coordinator_q=self._orchestration_mgr.get_coordinator_q(config.remote_host),
-                        results_q=self._orchestration_mgr.get_results_queue(),
-                        args=args,
-                        local_global_mgr_port=self._global_mgr.port,
-                        local_orchestration_port=self._orchestration_mgr.port,
-                        env=addl_env,
-                    ) for _ in range(num_cores)
+            tasks += [
+                asyncio.create_task(self._remote_session.start_worker(
+                    artifacts_dir=self._project_config.artifcats_path,
+                    worker_config=config,
+                    coordinator_q=self._orchestration_mgr.get_coordinator_q(config.remote_host),
+                    results_q=self._orchestration_mgr.get_results_queue(),
+                    args=args,
+                    local_global_mgr_port=self._global_mgr.port,
+                    local_orchestration_port=self._orchestration_mgr.port,
+                    env=addl_env,
+                )) for _ in range(num_cores)
             ]
-            results, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
-            count = 0
-            for r in results:
-                r = r.result()
-                if isinstance(r, Exception):
-                    always_print(f"A worker has failed to start: {type(r)}: {r}", as_error=True)
-                    count += 1
-            if count == len(results):
-                raise SystemError("All workers failed to start")
+            always_print(f"Created worker(s) for {config.remote_host}")
+        excs = []
+        worker_count = 0
+        completed, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+        for task in completed:
+            try:
+                result = task.result()
+                if isinstance(result, Exception):
+                    excs.append(result)
+                else:
+                    worker_count += 1
+            except Exception as e:
+                excs.append(e)
+        if worker_count == 0:
+            raise SystemError("All workers failed to start")
 
     @property
     def host(self):

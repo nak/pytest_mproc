@@ -244,6 +244,7 @@ def pytest_cmdline_main(config):
     local_proj_file = Path("./ptmproc_project.cfg")
     project_config_path = (getattr(config.option, "project_structure_path", None) or
                            (local_proj_file if local_proj_file.exists() else None))
+    project_config_path = Path(project_config_path)
     config.ptmproc_config.project_config = \
         ProjectConfig.from_file(project_config_path) if project_config_path else None
     if mproc_mgr_ports:
@@ -434,9 +435,9 @@ def pytest_runtestloop(session):
         orchestrator = session.config.ptmproc_orchestrator
 
         async def loop():
+            if session.config.remote_coro:
+                session.config.remote_task = asyncio.create_task(session.config.remote_coro)
             try:
-                if session.config.remote_coro:
-                    await session.config.remote_coro
                 async with orchestrator:
                     await orchestrator.run_loop(session, session.items)
             except asyncio.exceptions.CancelledError:
@@ -446,6 +447,8 @@ def pytest_runtestloop(session):
                 # noinspection SpellCheckingInspection
                 session.shouldfail = True
             finally:
+                with suppress(Exception):
+                    session.config.remote_task.cancel()
                 orchestrator.shutdown()
         asyncio.get_event_loop().run_until_complete(loop())
         http_session = RemoteWorkerConfig.http_session()

@@ -73,6 +73,7 @@ class HTTPSession:
             async with session.get(self._start_url)as resp:
                 if not self._check_http_status(resp):
                     raise SystemError(f"Request to {self._start_url} failed: {resp.reason}")
+                debug_print("Call to start session successful, awaiting devices to be preped and ready...")
                 try:
                     async for data, _ in resp.content.iter_chunks():
                         data = data.decode('utf-8')
@@ -101,6 +102,8 @@ class HTTPSession:
                 except Exception as e:
                     always_print(f"Error getting any worker: {e} [{type(e)}]", as_error=True)
                     raise
+                finally:
+                    always_print(f"Got all workers from {self._start_url}")
 
     async def end_session(self):
         self._heartbeat_task.cancel()
@@ -124,6 +127,7 @@ class HTTPSession:
         resp = requests.get(http_uri)
         if not cls._check_http_status(resp):
             raise Exception(f"Unable to create session from given URL {http_uri}")
+        resp.raise_for_status()
         json_data = json.loads(resp.content)
         return HTTPSession(session_id=json_data['session_id'],
                            end_url=json_data['end_session_url'],

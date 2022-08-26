@@ -256,10 +256,11 @@ class WorkerSession:
             with suppress(Exception):
                 worker_artifacts_path.symlink_to(artifacts_path)
         log = artifacts_path / 'pytest_run.log'
-        stdout = subprocess.DEVNULL if not user_output.is_verbose else sys.stdout
+        stdout = subprocess.DEVNULL if not user_output.is_verbose else sys.stderr
         tee_proc = subprocess.Popen(['tee', log],
                                     stdout=stdout,
                                     stderr=sys.stderr,
+                                    bufsize=0,
                                     stdin=subprocess.PIPE)
         cmd = f"{executable} -m {__name__} {orchestration_port} {global_mgr_port} {Node.Manager.PORT} "\
             f"Worker-{index[0]}-{index[1]} {' '.join(args)}"
@@ -270,6 +271,7 @@ class WorkerSession:
             stdin=subprocess.PIPE,
             cwd=str(run_dir),
             env=env,
+            bufsize=0,
             shell=True,
         )
         proc.stdin.write(binascii.b2a_hex(get_auth_key()) + b'\n')
