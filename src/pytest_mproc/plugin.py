@@ -244,7 +244,7 @@ def pytest_cmdline_main(config):
     local_proj_file = Path("./ptmproc_project.cfg")
     project_config_path = (getattr(config.option, "project_structure_path", None) or
                            (local_proj_file if local_proj_file.exists() else None))
-    project_config_path = Path(project_config_path)
+    project_config_path = Path(project_config_path) if project_config_path is not None else None
     config.ptmproc_config.project_config = \
         ProjectConfig.from_file(project_config_path) if project_config_path else None
     if mproc_mgr_ports:
