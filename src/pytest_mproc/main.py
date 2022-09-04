@@ -469,24 +469,31 @@ class RemoteOrchestrator(Orchestrator):
         always_print("Gathering remote workers...")
         num_cores = num_cores or 1
         tasks = []
-        async for config in remote_workers_config:
-            always_print(f"Got remote worker {config.remote_host}")
-            args, addl_env = _determine_cli_args(worker_config=config)
-            addl_env.update(env or {})
-            # noinspection PyTypeChecker
-            tasks += [
-                asyncio.create_task(self._remote_session.start_worker(
-                    artifacts_dir=self._project_config.artifcats_path,
-                    worker_config=config,
-                    coordinator_q=self._orchestration_mgr.get_coordinator_q(config.remote_host),
-                    results_q=self._orchestration_mgr.get_results_queue(),
-                    args=args,
-                    local_global_mgr_port=self._global_mgr.port,
-                    local_orchestration_port=self._orchestration_mgr.port,
-                    env=addl_env,
-                )) for _ in range(num_cores)
-            ]
-            always_print(f"Created worker(s) for {config.remote_host}")
+        try:
+            async for config in remote_workers_config:
+                always_print(f"Got remote worker {config.remote_host}")
+                args, addl_env = _determine_cli_args(worker_config=config)
+                addl_env.update(env or {})
+                # noinspection PyTypeChecker
+                tasks += [
+                    asyncio.create_task(self._remote_session.start_worker(
+                        artifacts_dir=self._project_config.artifcats_path,
+                        worker_config=config,
+                        coordinator_q=self._orchestration_mgr.get_coordinator_q(config.remote_host),
+                        results_q=self._orchestration_mgr.get_results_queue(),
+                        args=args,
+                        local_global_mgr_port=self._global_mgr.port,
+                        local_orchestration_port=self._orchestration_mgr.port,
+                        env=addl_env,
+                    )) for _ in range(num_cores)
+                ]
+                always_print(f"Created worker(s) for {config.remote_host}")
+        except Exception as e:
+            import traceback
+            always_print(traceback.format_exc(), as_error=True)
+            always_print(f"Failed to start a worker, aborting: {e}")
+            self.shutdown()
+            raise RuntimeError(f"Failed to start worker, aborting: {e}") from e
         excs = []
         worker_count = 0
         completed, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)

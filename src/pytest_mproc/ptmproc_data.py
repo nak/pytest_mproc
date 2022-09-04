@@ -92,7 +92,7 @@ class RemoteWorkerConfig:
         file_list = []
         count = 0
         for v in values:
-            if v.startswith('https://') or v.startswith('http://'):
+            if v.startswith(('https://', 'http://')):
                 http_end_points.append(v)
             elif v.startswith('file://'):
                 file_list.append(v)

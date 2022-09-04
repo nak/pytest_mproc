@@ -2,13 +2,14 @@
 This file contains some standard pytest_* plugin hooks to implement multiprocessing runs
 """
 import asyncio
+import configparser
 import os
 import sys
 
 import _pytest.terminal
 from pytest_mproc.worker import WorkerSession
 
-from pytest_mproc import worker, user_output, Constants
+from pytest_mproc import worker, user_output, Constants, Settings
 from pytest_mproc.coordinator import coordinator_main
 from pytest_mproc.main import LocalOrchestrator, RemoteOrchestrator
 from pytest_mproc.user_output import always_print
@@ -106,6 +107,14 @@ def pytest_addoption(parser):
     group = parser.getgroup("pytest_mproc", "better distributed testing through multiprocessing")
     _add_option(
         group,
+        "--ptmproc_config",
+        dest="mproc_config",
+        action="store",
+        typ=str,
+        help_text="Optional location of ini file to load config values"
+    )
+    _add_option(
+        group,
         "--cores",
         dest="mproc_numcores",
         action="store",
@@ -197,6 +206,35 @@ def pytest_cmdline_main(config):
         return
     has_remotes = "--remote-worker" in sys.argv
     cmdline_main_called = True
+    config_path = getattr(config.option, "mproc_config", None)
+    if config_path:
+        if os.path.exists(config_path):
+            # noinspection PyBroadException
+            try:
+                parser = configparser.ConfigParser()
+                parser.read(config_path)
+                username = parser.get('SSH', 'username') if parser.has_option('SSH', 'username') else None
+                password = parser.get('SSH', 'password') if parser.has_option('SSH', 'password') else None
+                if username is not None:
+                    Settings.set_ssh_credentials(username, password)
+                else:
+                    always_print("No ssh configuration to process in config.")
+                cache_root = parser.get('Directories', 'cache') if parser.has_option('Directories', 'cache') else None
+                if cache_root is not None:
+                    Settings.set_cache_dir(Path(cache_root))
+                temp_root = parser.get('Directories', 'temp') if parser.has_option('Directories', 'temp') else None
+                if temp_root is not None:
+                    Settings.set_tmp_root(Path(temp_root))
+            except Exception:
+                always_print(
+                    f"File {config_path} improperly formatted and cannot read as ini file",
+                    as_error=True
+                )
+        else:
+            always_print(
+                f"File {config_path} specified on command line does not exist.  Ignoring read of configuration",
+                as_error=True
+            )
     mproc_connection_timeout = getattr(config.option, "mproc_connection_timeout", None)
     mproc_disabled = getattr(config.option, "mproc_disabled")
     mproc_num_cores = getattr(config.option, "mproc_numcores", None)
