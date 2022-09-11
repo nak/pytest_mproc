@@ -416,7 +416,7 @@ class LocalOrchestrator(Orchestrator):
             coordinator_index=1,
             global_mgr_port=self._global_mgr.port,
             orchestration_port=self._orchestration_mgr.port,
-            artifacts_dir=project_config.artifcats_path
+            artifacts_dir=project_config.artifacts_dir if project_config else "artifacts"
         )
         # self._orchestration_mgr.register_coordinator(host='localhost', coordinator=self._coordinator)
 
@@ -477,7 +477,7 @@ class RemoteOrchestrator(Orchestrator):
                 # noinspection PyTypeChecker
                 tasks += [
                     asyncio.create_task(self._remote_session.start_worker(
-                        artifacts_dir=self._project_config.artifcats_path,
+                        artifacts_dir=self._project_config.artifacts_path,
                         worker_config=config,
                         coordinator_q=self._orchestration_mgr.get_coordinator_q(config.remote_host),
                         results_q=self._orchestration_mgr.get_results_queue(),

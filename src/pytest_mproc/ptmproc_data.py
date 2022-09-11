@@ -25,7 +25,7 @@ class ProjectConfig:
     project_name: str
     project_root: Path
     test_files: List[Path]
-    artifcats_path: Optional[Path] = Path('./artifacts')
+    artifacts_path: Optional[Path] = Path('./artifacts')
     prepare_script: Optional[Path] = None
     finalize_script: Optional[Path] = None
 
@@ -61,7 +61,7 @@ class ProjectConfig:
                     project_root=path.parent,
                     test_files=[Path(p) for p in data[TEST_FILES]],
                     prepare_script=data.get('prepare_script'),
-                    artifcats_path=data.get('artifacts_path', Path("./artifacts")),
+                    artifacts_path=data.get('artifacts_path', Path("./artifacts")),
                     finalize_script=data.get('finalize_script'),
                 )
             except json.JSONDecodeError:

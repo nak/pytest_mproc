@@ -359,7 +359,7 @@ def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_por
         global_mgr_port=global_mgr_port,
         orchestration_port=orchestration_port,
         host=host,
-        artifacts_path=proj_config.artifcats_path,
+        artifacts_path=proj_config.artifacts_path,
         index=1
     )
     args, addl_env = _determine_cli_args()

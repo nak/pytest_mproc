@@ -154,7 +154,7 @@ class Bundle:
                              f"{str(project_config.project_root)} or a subdirectory thereof")
         bundle = Bundle(root_dir=root_dir,
                         project_name=project_config.project_name,
-                        artifacts_path=project_config.artifcats_path,
+                        artifacts_path=project_config.artifacts_path,
                         project_root=project_config.project_root,
                         test_files=project_config.test_files,
                         prepare_script=project_config.prepare_script,
