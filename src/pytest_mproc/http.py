@@ -39,6 +39,7 @@ class HTTPSession:
                     if not self._check_http_status(resp):
                         always_print(f"http call to {heartbeat_url} to provide heartbeat failed: {resp.reason}"
                                      f" [session_id: {self._session_id}")
+                        break
                     await asyncio.sleep(1)
 
     async def start(self) -> AsyncGenerator[Dict[str, Any], Dict[str, Any]]:

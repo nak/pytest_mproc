@@ -18,7 +18,7 @@ from typing import Union, Callable, Optional, Any, Dict
 from pytest_mproc.data import GroupTag
 
 is_main = '--as-main' in sys.argv or '--remote-worker' in sys.argv
-is_worker = '--as-worker' in sys.argv
+is_worker = '--as-worker' in sys.argv or 'pytest_mproc.worker' in sys.argv
 
 _auth_key = None
 _user_defined_port_alloc: Optional[Callable[[], int]] = None
