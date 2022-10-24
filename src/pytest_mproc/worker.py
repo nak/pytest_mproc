@@ -70,6 +70,7 @@ class WorkerSession:
         self._result_q = result_q
         self._ip_addr = get_ip_addr()
         self._pid = os.getpid()
+        self._current = None
 
     def _put(self, result: Union[TestStateEnum, ResultType, ResultExit, ClientDied,
                                  ReportStarted, ReportFinished], timeout=None):
@@ -122,23 +123,20 @@ class WorkerSession:
                 # test item comes through as a unique string nodeid of the test
                 # We use the pytest-collected mapping we squirrelled away to look up the
                 # actual _pytest.python.Function test callable
-                # NOTE: session.items is an iterator, as wet upon construction of WorkerSession
+                # NOTE: session.items is an iterator, as set upon construction of WorkerSession
                 for test_id in test_batch.test_ids:
                     has_error = False
                     bare_test_id = test_id.split(os.sep)[-1]
                     item = session._named_items[bare_test_id]
                     self._put(TestState(TestStateEnum.STARTED, self._this_host, self._pid, test_id, test_batch))
+                    self._current = (test_id, test_batch)
                     try:
                         item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
-                    except TestError:
-                        has_error = True
-                        self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id, test_batch))
                     except KeyboardInterrupt:
                         raise
                     except Exception as e:
                         import traceback
                         raise Exception(f"Exception running test: {e}: {traceback.format_exc()}") from e
-
                     finally:
                         if not has_error:
                             with suppress(Exception):
@@ -310,6 +308,16 @@ class WorkerSession:
 
         :param report: report to draw info from
         """
+        with suppress(Exception):
+            if hasattr(report.longexpr, "type") and issubclass(report.longexpr.type, TestError) and self._current:
+                te: TestError = report.longexpr.value
+                test_id, test_batch = self._current
+                if te.retry:
+                    self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id, test_batch))
+                else:
+                    self._put(TestState(TestStateEnum.FINISHED, self._this_host, self._pid, test_id, test_batch))
+                if te.fatal:
+                    pytest.exit("Test system fault detected.  Aborting worker test exeuction")
         try:
             self._put(ResultTestStatus(report))
         except Exception as e:

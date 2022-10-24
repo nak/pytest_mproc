@@ -56,11 +56,28 @@ def get_auth_key_hex():
     return binascii.b2a_hex(get_auth_key()).decode('utf-8')
 
 
-class TestError(Exception):
+class TestError(BaseException):
     """
     To be thrown when a test setup/test environment issue occurs preventing test execution from even happening
+
+    :param retry: whether to retry the test when raised in the context of pytest-mproc distributed execution.
+       if not specified, default is True
+    :param fatal: whether error is fatal when raised in the context of pytest-mproc distributed executions;  errors
+       marked fatal, meaning that all further processing for the work-node on which exception was raised will be
+       stopped. Default is False if not specified
     """
-    pass
+
+    def __init__(self, retry: bool = True, fatal: bool = False):
+        self._retry = retry
+        self._fatal = fatal
+
+    @property
+    def retry(self) -> bool:
+        return self._retry
+
+    @property
+    def fatal(self) -> bool:
+        return self._fatal
 
 
 def priority(level: int):
