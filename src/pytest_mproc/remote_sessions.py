@@ -176,7 +176,7 @@ class RemoteSessionManager:
                 env['PYTHONPATH'] = str(self._site_pkgs_path[worker_config.remote_host])
                 debug_print(f"Calling coordinator to start worker {index} ...")
                 worker_pid = coordinator.start_worker(index=index, args=args, addl_env=env)
-                debug_print(f"Coordinator started worker @ {index} worke pid is {worker_pid}")
+                debug_print(f"Coordinator started worker @ {index} worker pid is {worker_pid}")
                 self._worker_pids.setdefault(worker_config.remote_host, []).append(worker_pid)
                 if not self._validate_task:
                     self._validate_task = asyncio.create_task(self.validate_clients(results_q=results_q))
@@ -199,7 +199,7 @@ class RemoteSessionManager:
             for host, coordinator in self._coordinators.copy().items():
                 # test if worker is active
                 ssh_client = self._ssh_clients[host]
-                if await ssh_client.ping(timeout=5):
+                if await ssh_client.ping(timeout=20):
                     debug_print(f"Host {host} is alive...")
                 else:
                     always_print(f"Host {host} unreachable!", as_error=True)
