@@ -315,6 +315,7 @@ class WorkerSession:
                 if te.retry:
                     self._put(TestState(TestStateEnum.RETRY, self._this_host, self._pid, test_id, test_batch))
                 else:
+                    self._put(ResultTestStatus(report))
                     self._put(TestState(TestStateEnum.FINISHED, self._this_host, self._pid, test_id, test_batch))
                 if te.fatal:
                     pytest.exit("Test system fault detected.  Aborting worker test exeuction")
