@@ -67,7 +67,8 @@ class TestError(BaseException):
        stopped. Default is False if not specified
     """
 
-    def __init__(self, retry: bool = True, fatal: bool = False):
+    def __init__(self, msg: str, retry: bool = True, fatal: bool = False):
+        super().__init__(msg)
         self._retry = retry
         self._fatal = fatal
 
