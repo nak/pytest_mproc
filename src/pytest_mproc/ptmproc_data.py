@@ -1,4 +1,3 @@
-import os
 import sys
 from contextlib import suppress
 
@@ -23,51 +22,10 @@ TEST_FILES = 'test_files'
 @dataclass
 class ProjectConfig:
     project_name: str
-    project_root: Path
-    test_files: List[Path]
-    artifacts_path: Optional[Path] = Path('./artifacts')
+    artifacts_path: Optional[Path] = Path('.')
+    test_files: List[Path] = field(default_factory=list)
     prepare_script: Optional[Path] = None
     finalize_script: Optional[Path] = None
-
-    @classmethod
-    def from_file(cls, path: Path) -> "ProjectConfig":
-        with open(path, 'rb') as in_stream:
-            try:
-                data = json.load(in_stream)
-                if 'artifacts_path' in data:
-                    if Path(data['artifacts_path']).is_absolute():
-                        raise pytest.UsageError(
-                            f"'artifacts_dir' in project config '{str(path)}' must be a relative path")
-                if 'project_name' not in data:
-                    raise pytest.UsageError(f"project config {str(path)} does not define 'project_name'")
-                if not data['project_name'].strip():
-                    raise pytest.UsageError(f"project_name in {str(path)} cannot be empty string")
-                if 'finalize_script' in data and (not Path(data['finalize_script']).exists or
-                                                  not os.access(data['finalize_script'], os.X_OK)):
-                    raise pytest.UsageError(
-                        f"finalize script {data['finalize_script']} either does not exist or is not executable")
-                if 'prepare_script' in data and (not Path(data['prepare_script']).exists or
-                                                 not os.access(data['prepare_script'], os.X_OK)):
-                    raise pytest.UsageError(
-                        f"prepare script {data['prepare_script']} either does not exist or is not executable")
-                if TEST_FILES not in data:
-                    raise pytest.UsageError(f"'{TEST_FILES}' is not in project config '{path}'")
-                if type(data[TEST_FILES]) != list:
-                    raise pytest.UsageError(f"{TEST_FILES} in project config '{path}' is not a list of paths")
-                if any([type(f) != str for f in data[TEST_FILES]]):
-                    raise pytest.UsageError(f"'test_path' must be a single string path in '{path}'")
-                return ProjectConfig(
-                    project_name=data['project_name'],
-                    project_root=path.parent,
-                    test_files=[Path(p) for p in data[TEST_FILES]],
-                    prepare_script=data.get('prepare_script'),
-                    artifacts_path=data.get('artifacts_path', Path("./artifacts")),
-                    finalize_script=data.get('finalize_script'),
-                )
-            except json.JSONDecodeError:
-                raise pytest.UsageError(f"Invalid json format in project config '{path}'")
-            except (KeyError, ValueError)as e:
-                raise pytest.UsageError(f"Invalid json data in project config '{path}': {e}")
 
 
 @dataclass

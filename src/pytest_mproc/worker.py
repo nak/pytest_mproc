@@ -224,8 +224,15 @@ class WorkerSession:
         Node.Manager.singleton()
         env = addl_env
         if root_path is not None:
+            root_path = Path(root_path)
             site_pkgs = root_path / 'site-packages'
-            env['PYTHONPATH'] = str(site_pkgs)
+            if 'PYTHONPATH' in os.environ:
+                env['PYTHONPATH'] = f"{site_pkgs}:{os.environ['PYTHONPATH']}"
+            else:
+                env['PYTHONPATH'] = str(site_pkgs)
+        else:
+            env = os.environ.copy()
+
         env.update({
             "PTMPROC_WORKER": "1",
             "AUTH_TOKEN_STDIN": "1",
@@ -233,10 +240,14 @@ class WorkerSession:
             'PTMPROC_NODE_MGR_PORT': str(Node.Manager.PORT),
         })
         executable = str(venv_path / 'bin' / 'python3') if venv_path else sys.executable
-        main_run_path = root_path / 'run' if root_path and root_path != Path(os.getcwd()) else Path(os.getcwd())
-        main_run_path.mkdir(exist_ok=True, parents=True)
-        run_dir = (root_path or Path(os.getcwd())) / 'workers' / f'run-Worker-{index[0]}-{index[1]}'
-        run_dir.mkdir(exist_ok=True, parents=True)
+        if root_path is not None:
+            main_run_path = root_path / 'run' if root_path and root_path != Path(os.getcwd()) else Path(os.getcwd())
+            main_run_path.mkdir(exist_ok=True, parents=True)
+            run_dir = (root_path or Path(os.getcwd())) / 'workers' / f'run-Worker-{index[0]}-{index[1]}'
+            run_dir.mkdir(exist_ok=True, parents=True)
+        else:
+            main_run_path = Path('.')
+            run_dir = Path('.')
         files = glob(str(main_run_path / '*'))
         for f in [Path(f) for f in files if Path(f) != main_run_path]:
             target = run_dir / f.relative_to(main_run_path)

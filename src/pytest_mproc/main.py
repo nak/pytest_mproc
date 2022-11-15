@@ -1,6 +1,7 @@
 import asyncio
 import os
 from abc import ABC
+from pathlib import Path
 
 import pytest
 import resource
@@ -43,14 +44,13 @@ class Orchestrator(ABC):
     class that acts as Main point of orchestration
     """
 
-    def __init__(self, project_config: Optional[ProjectConfig] = None,
+    def __init__(self,
                  global_mgr_port: Optional[int] = None,
                  orchestration_port: Optional[int] = None,
                  ):
         """
         :param project_config: user-defined project parameters
         """
-        self._project_config = project_config
         # for accumulating tests and exit status:
         self._pending: Dict[str, TestState] = {}
         self._exit_results: List[ResultExit] = []
@@ -406,17 +406,17 @@ class LocalOrchestrator(Orchestrator):
     class that acts as Main point of orchestration
     """
 
-    def __init__(self, project_config: Optional[ProjectConfig] = None):
+    def __init__(self, artifacts_path: Path):
         """
         :param project_config: user-defined project parameters
         """
-        super().__init__(project_config)
+        super().__init__()
         # noinspection PyUnresolvedReferences
         self._coordinator = Coordinator(
             coordinator_index=1,
             global_mgr_port=self._global_mgr.port,
             orchestration_port=self._orchestration_mgr.port,
-            artifacts_dir=project_config.artifacts_dir if project_config else "artifacts"
+            artifacts_dir=artifacts_path
         )
         # self._orchestration_mgr.register_coordinator(host='localhost', coordinator=self._coordinator)
 
@@ -445,14 +445,17 @@ class RemoteOrchestrator(Orchestrator):
                  project_config: Optional[ProjectConfig] = None,
                  global_mgr_port: Optional[int] = None,
                  orchestration_port: Optional[int] = None,
+                 autonomous: bool = True
                  ):
         """
         :param project_config: user-defined project parameters
         """
-        super().__init__(project_config, global_mgr_port=global_mgr_port, orchestration_port=orchestration_port)
+        super().__init__(global_mgr_port=global_mgr_port, orchestration_port=orchestration_port)
+        self._project_config = project_config
         remote_sys_executable = 'python{}.{}'.format(*sys.version_info)
         self._remote_session = RemoteSessionManager(remote_sys_executable=remote_sys_executable,
                                                     project_config=self._project_config,
+                                                    autonomous=autonomous
                                                     )
 
     async def start(

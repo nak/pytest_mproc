@@ -148,14 +148,16 @@ class Bundle:
         :return: created Bundle
         """
         try:
-            relative_run_dir = Path(os.getcwd()).relative_to(project_config.project_root.absolute())
+            relative_run_dir = Path(os.getcwd()).relative_to(root_dir.absolute())
         except ValueError:
             raise ValueError("You must execute pytest in the directory containing the project config, "
-                             f"{str(project_config.project_root)} or a subdirectory thereof")
+                             f"{str(root_dir.absolute())} or a subdirectory thereof")
+        if not project_config.test_files:
+            raise ValueError(f"Empty or no specification for 'test_files' in project config file")
         bundle = Bundle(root_dir=root_dir,
                         project_name=project_config.project_name,
                         artifacts_path=project_config.artifacts_path,
-                        project_root=project_config.project_root,
+                        project_root=root_dir,
                         test_files=project_config.test_files,
                         prepare_script=project_config.prepare_script,
                         finalize_script=project_config.finalize_script,
@@ -165,11 +167,11 @@ class Bundle:
         always_print(">>> Zipping contents for remote worker...")
         with zipfile.ZipFile(bundle.zip_path, mode='w') as zip_file:
             for path in bundle._test_files:
-                zip_file.write(project_config.project_root / path, f"run{os.sep}{str(path)}")
+                zip_file.write(root_dir / path, f"run{os.sep}{str(path)}")
             if bundle.prepare_script:
-                zip_file.write(project_config.project_root / bundle.prepare_script, 'prepare')
+                zip_file.write(root_dir / bundle.prepare_script, 'prepare')
             if bundle.finalize_script:
-                zip_file.write(project_config.project_root / bundle.finalize_script, 'finalize')
+                zip_file.write(root_dir / bundle.finalize_script, 'finalize')
             with tempfile.NamedTemporaryFile(mode='a+') as out:
                 out.write(bundle._system)
                 out.write(bundle._machine)

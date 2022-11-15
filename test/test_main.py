@@ -82,11 +82,13 @@ async def test_start_workers(mgr: OrchestrationManager, project_config: ProjectC
     files = glob(str(root / 'pytest_mproc' / '*.py')) + glob(str(root / 'pytest_mproc' / 'remote' / '*.py'))
     project_config.test_files = [Path(f).relative_to(root) for f in files] + \
         [Path('test_one.py')]
-    os.mkdir(project_config.project_root / 'pytest_mproc')
-    os.mkdir(project_config.project_root / 'pytest_mproc' / 'remote')
+    project_root = Path("./root")
+    project_root.mkdir(exist_ok=True)
+    os.mkdir(project_root / 'pytest_mproc')
+    os.mkdir(project_root / 'pytest_mproc' / 'remote')
     for f in files:
-        shutil.copy(f, project_config.project_root / Path(f).relative_to(root))
-    with open(project_config.project_root / 'test_one.py', 'w') as out_stream:
+        shutil.copy(f, project_root / Path(f).relative_to(root))
+    with open(project_root / 'test_one.py', 'w') as out_stream:
         out_stream.write("""
 def test_one():
     pass
@@ -101,11 +103,10 @@ def test_one():
     await test_q.put(None)
     mgr.signal_all_tests_sent()
     argv = sys.argv
-    assert project_config.project_root.exists()
     task = None
     try:
         sys.argv = ['-s', 'test_one.py']
-        os.chdir(project_config.project_root)
+        os.chdir(project_root)
         await host_q.put(RemoteWorkerConfig(remote_host='localhost', arguments={}))
         await host_q.put(None)
 
@@ -179,7 +180,7 @@ async def test_populate_test_queue(project_config: ProjectConfig):
     "delegated://pi@",
 ])
 async def test_start_remote(project_config: ProjectConfig, uri: str, request):
-    project_config.project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent
     project_config.test_files += [Path('test') / 'test_mproc_runs.py',
                                   Path('testsrc') / 'testcode' / '*.py',
                                   Path('testsrc') / 'testcode' / '**' / '*.py']
@@ -190,12 +191,12 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
     async with orchestrator:
         try:
             sys.argv = [sys.argv[0]] + ['test/test_mproc_runs.py', '-s', '--cores', '1']
-            assert project_config.project_root.exists()
-            os.chdir(project_config.project_root)
+            assert project_root.exists()
+            os.chdir(project_root)
             await orchestrator.start_remote(
                 remote_workers_config=[
-                    RemoteWorkerConfig(remote_host='localhost', remote_root=project_config.project_root),
-                    RemoteWorkerConfig(remote_host='127.0.0.1', remote_root=project_config.project_root)
+                    RemoteWorkerConfig(remote_host='localhost', remote_root=project_root),
+                    RemoteWorkerConfig(remote_host='127.0.0.1', remote_root=project_root)
                 ],
                 deploy_timeout=20,
                 env=env)

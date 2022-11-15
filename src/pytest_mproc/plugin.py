@@ -50,6 +50,16 @@ def _get_ip_addr():
         return None
 
 
+def proj_config_from(config) -> ProjectConfig:
+    return ProjectConfig(
+        artifacts_path=Path(config.artifacts_dir if hasattr(config, 'artifacts_dir') else '.'),
+        project_name=config.project_name if hasattr(config, 'project_name') else 'pytest_run',
+        test_files=config.test_files.split(',') if hasattr(config, 'test_files') else [],
+        prepare_script=Path(config.prepare_script) if hasattr(config, 'prepare_script') else None,
+        finalize_script=Path(config.finalize_script) if hasattr(config, 'finalize_script') else None,
+    )
+
+
 # noinspection SpellCheckingInspection
 def parse_numprocesses(s: str) -> int:
     """
@@ -104,6 +114,12 @@ def pytest_addoption(parser):
     """
     add options to given parser for this plugin
     """
+    parser.addini('artifacts_dir', "Location to store generated artifacts from pytest_mproc, defaults to cwd")
+    parser.addini('project_name', "Name of project being run, deafults to 'pytest_run' if not specified")
+    parser.addini('test_files', "When autonomos remote session is requested, specifies the test files to bundle to send"
+                  "to remote workers")
+    parser.addini('prepare_script', "Optional script to run to prepare system before test session begins")
+    parser.addini('finalize_script', "Optional script to run to finalize system after test session ends")
     group = parser.getgroup("pytest_mproc", "better distributed testing through multiprocessing")
     _add_option(
         group,
@@ -280,15 +296,15 @@ def pytest_cmdline_main(config):
     if config.ptmproc_config.num_cores < 1:
         raise pytest.UsageError("Number of cores must be 1 or more when running on single host")
     local_proj_file = Path("./ptmproc_project.cfg")
-    project_config_path = (getattr(config.option, "project_structure_path", None) or
-                           (local_proj_file if local_proj_file.exists() else None))
-    project_config_path = Path(project_config_path) if project_config_path is not None else None
-    config.ptmproc_config.project_config = \
-        ProjectConfig.from_file(project_config_path) if project_config_path else None
+    # project_config_path = (getattr(config.option, "project_structure_path", None) or
+    #                       (local_proj_file if local_proj_file.exists() else None))
+    # project_config_path = Path(project_config_path) if project_config_path is not None else None
+    # config.ptmproc_config.project_config = \
+    #    ProjectConfig.from_file(project_config_path) if project_config_path else None
     if mproc_mgr_ports:
         config.ptmproc_config.mode = ModeEnum.MODE_COORDINATOR
         try:
-            host, ports_text = mproc_mgr_ports.split(':') if ':' in mproc_mgr_ports else None, mproc_mgr_ports
+            host, ports_text = mproc_mgr_ports.split(':') if ':' in mproc_mgr_ports else (None, mproc_mgr_ports)
             global_mgr_port, orchestration_port = ports_text.split(',')
             global_mgr_port = int(global_mgr_port)
             orchestration_port = int(orchestration_port)
@@ -297,25 +313,26 @@ def pytest_cmdline_main(config):
                 "Invalid cmd line option for --as-worker-node:  must be in form of host ip or name and "
                 " integer ports: [<host ip/name>:]<global_manager_port>,<orchestration_port>"
             )
-        return mproc_pytest_cmdline_coordinator(config, host, global_mgr_port, orchestration_port,
-                                                config.ptmproc_config.project_config)
+        return mproc_pytest_cmdline_coordinator(config, host, global_mgr_port, orchestration_port)
     if is_local:
         config.ptmproc_config.mode = ModeEnum.MODE_LOCAL_MAIN
         # Running locally on local host only:
-        config.ptmproc_orchestrator = LocalOrchestrator(project_config=config.ptmproc_config.project_config)
+        artifacts_path = proj_config_from(config).artifacts_path
+        config.ptmproc_orchestrator = LocalOrchestrator(artifacts_path=artifacts_path)
         return mproc_pytest_cmdline_main_local(config.ptmproc_config, config.ptmproc_orchestrator, reporter)
     elif not has_remotes:
         config.ptmproc_config.mode = ModeEnum.MODE_REMOTE_MAIN
         # user has specified running distributed but with explicit bring-up of workers
         # therefore, must specify ports
-        global_mgr_port_text, orchestration_port_text = uri.split(',') if uri is not None else None, None
+        global_mgr_port_text, orchestration_port_text = uri.split(',') if uri is not None else (None, None)
         global_mgr_port = None if global_mgr_port_text is None else int(global_mgr_port_text)
         # noinspection PyTypeChecker
         orchestration_port = None if orchestration_port_text is None else int(orchestration_port_text)
         config.ptmproc_orchestrator = RemoteOrchestrator(
-            project_config=config.ptmproc_config.project_config,
+            project_config=proj_config_from(config),
             global_mgr_port=global_mgr_port,
-            orchestration_port=orchestration_port
+            orchestration_port=orchestration_port,
+            autonomous=False
         )
         mproc_pytest_cmdline_main_remote(
             config.ptmproc_config, reporter=reporter,
@@ -326,10 +343,7 @@ def pytest_cmdline_main(config):
     else:
         config.ptmproc_config.mode = ModeEnum.MODE_REMOTE_MAIN
         # running distributed in automated fashion:
-        if config.ptmproc_config.project_config is None:
-            raise pytest.UsageError("When running remote, a project config file must be specified con command line,"
-                                    "or present in current working directory")
-        config.ptmproc_orchestrator = RemoteOrchestrator(project_config=config.ptmproc_config.project_config)
+        config.ptmproc_orchestrator = RemoteOrchestrator(project_config=proj_config_from(config))
         config.remote_coro = mproc_pytest_cmdline_main_remote(
             config.ptmproc_config, reporter=reporter,
             orchestrator=config.ptmproc_orchestrator,
@@ -344,8 +358,7 @@ def mproc_pytest_cmdline_worker(config):
     assert config.ptmproc_worker
 
 
-def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_port: int, orchestration_port: int,
-                                     proj_config: ProjectConfig):
+def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_port: int, orchestration_port: int):
     assert 'PTMPROC_WORKER' not in os.environ
     config.option.no_summary = True
     config.option.no_header = True
@@ -359,7 +372,7 @@ def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_por
         global_mgr_port=global_mgr_port,
         orchestration_port=orchestration_port,
         host=host,
-        artifacts_path=proj_config.artifacts_path,
+        artifacts_path=Path(config.artifacts_dir if hasattr(config, 'artifacts_dir') else '.'),
         index=1
     )
     args, addl_env = _determine_cli_args()
@@ -376,15 +389,7 @@ def mproc_pytest_cmdline_main_local(config: PytestMprocConfig, orchestrator: Loc
 def mproc_pytest_cmdline_main_remote(config: PytestMprocConfig, reporter: BasicReporter,
                                      orchestrator: RemoteOrchestrator, remote_clients):
     assert "--as-worker-node" not in sys.argv
-    project_config = config.project_config
-    if project_config is None:
-        raise pytest.UsageError("When running remote, a project config file must be specified con command line,"
-                                "or present in current working directory")
     version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
-    if bool(project_config) != bool(remote_clients):
-        # basically if only one is None
-        raise pytest.UsageError(f"Must specify both project config and remote clients together or not at all "
-                                f"{project_config} {remote_clients}")
     mproc_remote_sys_executable = config.remote_sys_executable or f"/usr/bin/python{version}"
     remote_clients = [remote_clients] if isinstance(remote_clients, str) else remote_clients
     config.remote_hosts = None if not remote_clients\

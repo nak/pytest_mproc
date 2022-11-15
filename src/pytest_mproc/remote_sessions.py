@@ -34,12 +34,14 @@ class RemoteSessionManager:
     def __init__(self,
                  project_config: ProjectConfig,
                  remote_sys_executable: Optional[str],
+                 autonomous: bool = True
                  ):
         """
         :param project_config: user defined project parameters needed for creating the bundle to send
         :param remote_sys_executable: optional string path to remote executable for Python to use (must version-match)
         """
         super().__init__()
+        self._autonomous = autonomous
         self._site_pkgs_path: Dict[str, Path] = {}
         self._coordinator_sems: Dict[str, asyncio.Semaphore] = {}
         self._coordinator_tasks: Dict[str, asyncio.Task] = {}
@@ -52,15 +54,18 @@ class RemoteSessionManager:
         self._validate_task = None
         self._session_task: Optional[asyncio.Task] = None
         self._pids: Dict[str, List[int]] = {}
-        self._project_name = project_config.project_name
-        self._tmp_path = tempfile.TemporaryDirectory()
-        self._bundle = Bundle.create(root_dir=Path(self._tmp_path.name),
-                                     project_config=self._project_config,
-                                     system_executable=self._remote_sys_executable)
+        self._project_name = project_config.project_name if project_config else "pytest_run"
+        if autonomous:
+            self._tmp_path = tempfile.TemporaryDirectory()
+            self._tmp_path.__enter__()
+            self._bundle = Bundle.create(root_dir=Path('.').absolute(),
+                                         project_config=self._project_config,
+                                         system_executable=self._remote_sys_executable)
+            self._bundle.__enter__()
+        else:
+            self._bundle = None
         self._worker_tasks: List[asyncio.Task] = []
         self._worker_pids: Dict[str, List[int]] = {}
-        self._tmp_path.__enter__()
-        self._bundle.__enter__()
         self._remote_roots: Dict[str, Path] = {}
         self._coordinators: Dict[str, Coordinator.ClientProxy] = {}
         self._ssh_clients: Dict[str, SSHClient] = {}
@@ -107,10 +112,11 @@ class RemoteSessionManager:
                 else:
                     always_print(f"\n!! Failed to unzip {Path('.') / ARTIFACTS_ZIP}\n")
         self._remote_roots = {}
-        with suppress(Exception):
-            self._tmp_path.__exit__(None, None, None)
-        with suppress(Exception):
-            self._bundle.__exit__(None, None, None)
+        if self._bundle is not None:
+            with suppress(Exception):
+                self._tmp_path.__exit__(None, None, None)
+            with suppress(Exception):
+                self._bundle.__exit__(None, None, None)
 
     async def _setup(self, worker_config: RemoteWorkerConfig,
                      remote_root: Path,
@@ -121,17 +127,18 @@ class RemoteSessionManager:
                                host=worker_config.remote_host)
         self._ssh_clients[worker_config.remote_host] = ssh_client
 
-        futures, _ = await asyncio.wait(
-            [self._bundle.setup_remote_venv(ssh_client=ssh_client, remote_venv=remote_venv),
-             self._deploy(ssh_client, worker_config, timeout=deploy_timeout, remote_root=remote_root)],
-            timeout=deploy_timeout,
-            return_when=asyncio.ALL_COMPLETED
-        )
-        results = [f.result() for f in futures]
-        for r in results:
-            if isinstance(r, Exception):
-                raise r
-        await self._bundle.install_requirements(ssh_client, remote_root=remote_root, remote_venv=remote_venv)
+        if self._bundle is not None:
+            futures, _ = await asyncio.wait(
+                [self._bundle.setup_remote_venv(ssh_client=ssh_client, remote_venv=remote_venv),
+                 self._deploy(ssh_client, worker_config, timeout=deploy_timeout, remote_root=remote_root)],
+                timeout=deploy_timeout,
+                return_when=asyncio.ALL_COMPLETED
+            )
+            results = [f.result() for f in futures]
+            for r in results:
+                if isinstance(r, Exception):
+                    raise r
+            await self._bundle.install_requirements(ssh_client, remote_root=remote_root, remote_venv=remote_venv)
 
     async def _deploy(self, ssh_client: SSHClient, worker_config: RemoteWorkerConfig,
                       remote_root: Path, timeout: Optional[float] = None,):

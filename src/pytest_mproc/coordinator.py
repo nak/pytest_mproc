@@ -165,8 +165,9 @@ class Coordinator:
         """
         try:
             index = len(self._worker_procs) + 1
-            root_path = self._remote_root if self._remote_root else Path(os.getcwd())
-            root_path.mkdir(exist_ok=True, parents=True)
+            root_path = self._remote_root # if self._remote_root else Path(os.getcwd())
+            if root_path is not None:
+                root_path.mkdir(exist_ok=True, parents=True)
             proc, tee_proc = WorkerSession.start(
                 index=(self._index, index),
                 orchestration_port=self._orchestration_port,
