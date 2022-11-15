@@ -94,23 +94,24 @@ class RemoteSessionManager:
             with suppress(Exception):
                 task.cancel()
         self._worker_tasks = []
-        for host, remote_root in self._remote_roots.items():
-            with suppress(Exception):
-                ssh_client = self._ssh_clients[host]
-                artifacts_zip = remote_root / ARTIFACTS_ZIP
-                always_print(f"\n>> Pulling {artifacts_zip} from {host}\n")
-                ssh_client.pull_sync(artifacts_zip, Path('.') / ARTIFACTS_ZIP)
-                always_print(f"\n>> Unzipping {ARTIFACTS_ZIP}...\n")
-                proc = subprocess.run(
-                    f"unzip -o ./{ARTIFACTS_ZIP}",
-                    shell=True,
-                    stdout=sys.stdout,
-                    stderr=sys.stderr
-                )
-                if proc.returncode == 0:
-                    os.remove(ARTIFACTS_ZIP)
-                else:
-                    always_print(f"\n!! Failed to unzip {Path('.') / ARTIFACTS_ZIP}\n")
+        if self._bundle is not None:
+            for host, remote_root in self._remote_roots.items():
+                with suppress(Exception):
+                    ssh_client = self._ssh_clients[host]
+                    artifacts_zip = remote_root / ARTIFACTS_ZIP
+                    always_print(f"\n>> Pulling {artifacts_zip} from {host}\n")
+                    ssh_client.pull_sync(artifacts_zip, Path('.') / ARTIFACTS_ZIP)
+                    always_print(f"\n>> Unzipping {ARTIFACTS_ZIP}...\n")
+                    proc = subprocess.run(
+                        f"unzip -o ./{ARTIFACTS_ZIP}",
+                        shell=True,
+                        stdout=sys.stdout,
+                        stderr=sys.stderr
+                    )
+                    if proc.returncode == 0:
+                        os.remove(ARTIFACTS_ZIP)
+                    else:
+                        always_print(f"\n!! Failed to unzip {Path('.') / ARTIFACTS_ZIP}\n")
         self._remote_roots = {}
         if self._bundle is not None:
             with suppress(Exception):

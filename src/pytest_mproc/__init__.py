@@ -42,23 +42,25 @@ def get_auth_key() -> bytes:
         ini_path = Path(os.environ['SYSTEM_CONFIG_INI'])
         if not ini_path.is_file():
             raise ValueError("Env var SYSTEM_CONFIG_INI does not point to a valid ini file")
-    else:
+    elif 'AUTH_TOKEN_STDIN' not in os.environ:
         ini_path = Path.home() / '.pytest_mproc' / 'config.ini'
+    else:
+        ini_path = None
     if hasattr(multiprocessing, 'parent_process') and multiprocessing.parent_process() is not None:
         _auth_key = current_process().authkey
     elif _auth_key is not None:
         return _auth_key
     elif _user_defined_auth:
         _auth_key = _user_defined_auth()
-    elif os.environ.get("AUTH_TOKEN_STDIN", None) == '1':
-        auth_key = sys.stdin.readline().strip()
-        _auth_key = binascii.a2b_hex(auth_key)
-    elif ini_path.is_file():
+    elif ini_path is not None and ini_path.is_file():
         parser = ConfigParser()
         parser.read(ini_path)
         auth_key = parser.get(section='pytest_mproc', option='auth_token', fallback=None)
-        if _auth_key is None:
+        if auth_key is None:
             raise ValueError(f"No 'auth_token' provided in {ini_path}")
+        _auth_key = binascii.a2b_hex(auth_key)
+    elif os.environ.get("AUTH_TOKEN_STDIN", None) == '1':
+        auth_key = sys.stdin.readline().strip()
         _auth_key = binascii.a2b_hex(auth_key)
     else:
         _auth_key = secrets.token_bytes(64)
