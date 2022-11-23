@@ -1,224 +1,175 @@
 """
-This package contains code to coordinate execution from a main thread to worker threads (processes)
+This package contains code to coordinate execution of workers on a host (either localhost or remote)
 """
+import binascii
+import multiprocessing
 import os
 import subprocess
 import sys
 import time
-from contextlib import suppress
+from configparser import ConfigParser
 from dataclasses import dataclass
 from multiprocessing import JoinableQueue
+from multiprocessing.managers import BaseManager
 
 from pathlib import Path
-from subprocess import TimeoutExpired
 from typing import Optional, List, Dict, Tuple
 
-from pytest_mproc import user_output
-from pytest_mproc.constants import ARTIFACTS_ZIP
 
-from pytest_mproc.user_output import always_print, debug_print
-from pytest_mproc.fixtures import Global
-from pytest_mproc.worker import WorkerSession
+from pytest_mproc import user_output, _find_free_port, worker
+from pytest_mproc.auth import is_local_auth, ini_path
+
+from pytest_mproc.user_output import always_print
+from pytest_mproc.fixtures import Global, Node
 from pytest_mproc.utils import BasicReporter
+
+
+DEFAULT_MGR_PORT = 9893
 
 
 @dataclass
 class Value:
+    """
+    needed to allow in/out/return values for multiprocessing
+    """
     value: int
 
 
-class Coordinator:
+class Coordinator(BaseManager):
     """
     Context manager for kicking off worker Processes to conduct test execution via pytest hooks
     Coordinators are scoped to a node and only handle a collection of workers on that node
     """
 
-    class ClientProxy:
-        """
-        proxy interface for distributed communications;
-
-        NOTE: on either some machine or with VPN/firewall configurations
-        registering the Coordinator class doesn't work (upon registering coordinator with the orchestrator, a
-        ConnectionError is thrown from the orchestrator when processing the register call)
-        """
-
-        def __init__(self, q: JoinableQueue, host: str):
-            self._q = q
-            self._host = host
-
-        @property
-        def host(self):
-            return self._host
-
-        def kill(self):
-            self._q.put(('kill',))
-
-        def shutdown(self, timeout: Optional[float] = None):
-            self._q.put(('shutdown', timeout))
-
-        def start_workers(
-            self, num_processes: int,
-            addl_env: Optional[Dict[str, str]] = None,
-            args: Optional[List[str]] = None
-        ):
-            self._q.put(('start_workers', num_processes, addl_env, args))
-
-        def start_worker(self, index: int, args: List[str], addl_env: Dict[str, str]) -> int:
-            self._q.put(('start_worker', index, args, addl_env))
-            self._q.join()
-            pid = self._q.get()
-            self._q.task_done()
-            return pid
-
-        def count(self) -> int:
-            self._q.put(('count',))
-            self._q.join()
-            count = self._q.get()
-            self._q.task_done()
-            return count
-
-    class HostProxy:
-        """
-        Host Proxy to listen for incoming commands (see above discussion on ClientProxy as to why we need this)
-        """
-
-        def __init__(self, q: JoinableQueue, target: "Coordinator"):
-            self._q = q
-            self._target = target
-
-        def loop(self):
-            cmd = None
-            try:
-                while cmd not in ('shutdown', 'kill'):
-                    cmd, *args = self._q.get()
-                    self._q.task_done()
-                    if cmd == 'kill':
-                        self._target.kill()
-                    elif cmd == 'shutdown':
-                        self._target.shutdown(*args)
-                        self._q.put(None)  # just a signal
-                    elif cmd == 'start_workers':
-                        self._target.start_workers(*args)
-                    elif cmd == 'start_worker':
-                        pid = self._target.start_worker(*args)
-                        self._q.put(pid)
-                    elif cmd == 'count':
-                        count = self._target.count()
-                        self._q.put(count)
-            except (EOFError, KeyboardInterrupt, BrokenPipeError, ConnectionError):
-                self._target.shutdown(timeout=5)
-
     _singleton: Optional["Coordinator"] = None
+    _workers_by_session: Dict[str, Tuple[multiprocessing.Process, multiprocessing.Process]] = {}
 
-    def __init__(self, global_mgr_port: int, orchestration_port: int, coordinator_index: int,
-                 artifacts_dir: Path, remote_root: Optional[Path] = None, remote_venv: Optional[Path] = None
-                 ):
+    def __init__(self, address: Optional[Tuple[str, int]] = None, auth_key: Optional[bytes] = None):
         """
         """
-        assert Coordinator._singleton is None, "Attempt to instantiate Coordinator more than once on same machine"
-        self._index = coordinator_index
+        if address is not None:
+            if auth_key is None:
+                raise RuntimeError("Asked to start coordinator on address without auth token")
+            if is_local_auth():
+                raise RuntimeError(f"No ini file used to define auth token needed for distributed processing")
+            super().__init__(address=address, authkey=auth_key)
         self._count = 0
-        self._global_mgr_port = global_mgr_port
-        self._orchestration_port = orchestration_port
         self._session_start_time = time.time()
         self._reporter = BasicReporter()
         self._worker_procs: List[Tuple[subprocess.Popen, subprocess.Popen]] = []
         self._remote_run_path: Optional[Path] = None
-        self._remote_root = remote_root
-        self._remote_venv = remote_venv
-        self._artifacts_path = remote_root / artifacts_dir if remote_root else Path(os.getcwd()) / artifacts_dir
-        self._artifacts_path.mkdir(exist_ok=True, parents=True)
-        self._relative_artifacts_path = artifacts_dir
-        if remote_root:
-            remote_root = Path(os.getcwd())
-            prepare_script = remote_root / 'prepare'
-            if prepare_script.is_file():
-                if not os.access(prepare_script, os.X_OK):
-                    raise PermissionError(f"Prepare script is not executable")
-                with open(self._artifacts_path / 'prepare.log', 'w') as out_stream, \
-                     open(self._artifacts_path / 'prepare_errors.log', 'w') as error_stream:
-                    proc = subprocess.run(
-                        str(prepare_script.absolute()),
-                        stdout=out_stream,
-                        stderr=error_stream,
-                        cwd=remote_root,
-                        shell=True
-                    )
-                if proc.returncode != 0:
-                    raise RuntimeError(f"Failed to execute prepare script, return code {proc.returncode}")
+        self._node_mgr_port = _find_free_port()
+        self._node_mgr = Node.Manager.singleton(self._node_mgr_port)
+        self._host_sessions: List[HostSession] = []
 
-    def count(self) -> int:
+    @classmethod
+    def as_client(cls, address: Tuple[str, int], auth_token: bytes):
         """
-        :return: current count of workers
+        create Coordinator from a main process as a client to a worker host/node
         """
-        return len(self._worker_procs)
+        instance = Coordinator(address=address, auth_key=auth_token)
+        instance.connect()
+        return instance
 
-    def start_worker(self, index: int, args: List[str], addl_env: Dict[str, str]) -> int:
+    @classmethod
+    def as_server(cls, address: Tuple[str, int], auth_token: bytes) -> "Coordinator":
         """
-        start a single worker based on config
-
-        :param args: additional arguments to pass to worker proces
-        :param addl_env: additional environment variables to set for worker process
-        :param index: unique index of worker
-
-        :return: pid of created process (must be pickleable, so don't return Popen instance!)
+        create coordinator on worker-host machine as server
         """
-        try:
-            index = len(self._worker_procs) + 1
-            root_path = self._remote_root # if self._remote_root else Path(os.getcwd())
-            if root_path is not None:
-                root_path.mkdir(exist_ok=True, parents=True)
-            proc, tee_proc = WorkerSession.start(
-                index=(self._index, index),
-                orchestration_port=self._orchestration_port,
-                global_mgr_port=self._global_mgr_port,
-                args=args,
-                addl_env=addl_env,
-                root_path=root_path,
-                venv_path=self._remote_venv,
-                worker_artifacts_dir=self._relative_artifacts_path,
-                artifacts_root=self._artifacts_path
-            )
-            self._worker_procs.append((proc, tee_proc))
-            if proc.returncode is not None:
-                raise SystemError(f"Worker-{index} failed to start")
-            return proc.pid
-        except Exception as e:
-            raise SystemError(f"Failed to launch Worker-{index}: {e}") from e
+        instance = Coordinator(address=address, auth_key=auth_token)
+        instance.start()
+        return instance
 
-    def start_workers(self, num_processes: int,
-                      addl_env: Optional[Dict[str, str]] = None,
-                      args: Optional[List[str]] = None,
-                      ) -> List[int]:
+    @classmethod
+    def as_local(cls):
+        """
+        run only as localhost coordinator, without need for multiprocessing proxy-system, just
+        direct API calls
+        """
+        return Coordinator()
+
+    def create_host_session(
+        self,
+        num_processes: int,
+        session_id: str,
+        working_dir: Path,
+        artifacts_rel_path: Path,
+        global_mgr_host: str,
+        global_mgr_port: int,
+        test_q: JoinableQueue,
+        results_q: JoinableQueue,
+        addl_env: Optional[Dict[str, str]] = None,
+        args: Optional[List[str]] = None,
+    ) -> "HostSession":
         """
         State a worker
 
         :param num_processes: number of worker processes to launch
+        :param session_id: unique session id (across all hosts for a single test session)
+        :param working_dir: working path where pytest will execute
+        :param artifacts_rel_path: relative path (to working dir) where artifacts will be placed
+        :param global_mgr_host: host name/ip of server hosting global fixture information
+        :param global_mgr_port: port of global mgr server
+        :param test_q: queue to pull tests from
+        :param results_q: queue to put test results/exceptions in
         :param addl_env: optional additional environ variable for worker processes
         :param args: optional additional args to pass to worker processes
         """
-        pids = []
+        host_session = HostSession(session_id=session_id,
+                                   working_dir=working_dir, artifacts_rel_path=artifacts_rel_path,
+                                   test_q=test_q, results_q=results_q,
+                                   global_mgr_host=global_mgr_host,
+                                   global_mgr_port=global_mgr_port
+                                   )
+        self._host_sessions.append(host_session)
         for index in range(num_processes):
-            pids.append(self.start_worker(index, args=args, addl_env=addl_env))
-        time.sleep(0.5)
-        for index, (proc, tee_proc) in enumerate(self._worker_procs):
-            if proc.returncode is not None:
-                always_print(f"Worker-{index} failed to start")
-                self._worker_procs.remove((proc, tee_proc))
-                pids.remove(pids[index])
-                with suppress(Exception):
-                    tee_proc.kill()
-        if not self._worker_procs:
-            raise SystemError("All workers failed to start")
-        return pids
+            host_session.start_worker(args=args, addl_env=addl_env)
+        return host_session
 
-    def wait(self, timeout: Optional[float] = None):
-        for proc, tee_proc in self._worker_procs:
-            try:
-                proc.wait(timeout=timeout)
-            finally:
-                proc.terminate()
-                tee_proc.terminate()
+
+class HostSession:
+
+    def __init__(self, session_id: str, global_mgr_host: str, global_mgr_port: int,
+                 working_dir: Path, artifacts_rel_path: Path,
+                 test_q: JoinableQueue, results_q: JoinableQueue):
+        self._session_id = session_id
+        self._working_dir = working_dir
+        self._artifacts_rel_path = artifacts_rel_path
+        self._test_q = test_q
+        self._results_q = results_q
+        self._node_mgr_port = _find_free_port()
+        # for handling global fixtures:
+        Global.Manager.singleton(address=(global_mgr_host, global_mgr_port), as_client=True)
+        # TODO is host is 'localhost' ensure host code reverse-port-forwards port
+
+    _worker_procs_by_session_id: Dict[str, List[multiprocessing.Process]] = []
+
+    def start_worker(
+            self,
+            args: List[str],
+            addl_env: Dict[str, str],
+    ) -> None:
+        """
+        :param args: args to append to pytest process of worker
+        :param addl_env: additional environment variables when launching worker
+        :return: HostSession instance
+        """
+        worker_id = f"Worker-{self._session_id}-{len(HostSession._worker_procs_by_session_id[self._session_id]) + 1}"
+        always_print(f"Starting worker with id {worker_id}")
+        env = os.environ.copy()
+        os.environ.update(addl_env)
+        os.environ.update({
+            "PTMPROC_WORKER": "1",
+            'PTMPROC_VERBOSE': '1' if user_output.is_verbose else '0',
+        })
+        (self._working_dir / self._artifacts_rel_path).mkdir(exist_ok=True, parents=True)
+        log_dir = self._working_dir
+        Node.Manager.singleton(self._node_mgr_port)  # forces creation on defined port
+        proc = multiprocessing.Process(target=self._launch_pytest,
+                                       args=(args, worker_id, log_dir, env))
+        proc.start()
+        os.environ = env
+        HostSession._worker_procs_by_session_id[self._session_id].append(proc)
 
     def shutdown(self, timeout: Optional[float] = None) -> None:
         """
@@ -227,104 +178,100 @@ class Coordinator:
         :param timeout: timeout if taking too long
         :raises: TimeoutError if taking too long
         """
-        try:
-            if self._remote_run_path is not None:
-                try:
-                    finalize_script = self._remote_root / 'finalize'
-                    # if not artifacts_path, no prepare script was executed, so no need to invoke finalize
-                    if self._artifacts_path and finalize_script.is_file():
-                        if not os.access(finalize_script, os.X_OK):
-                            raise PermissionError(f"Finalize script is not executable")
-                        with open(self._artifacts_path / 'finalize.log', 'w') as out_stream, \
-                             open(self._artifacts_path / 'finalize_errors.log', 'w') as error_stream:
-                            proc = subprocess.run(
-                                str(finalize_script.absolute()),
-                                stdout=out_stream,
-                                stderr=error_stream,
-                                cwd=self._remote_root,
-                                shell=True
-                            )
-                            if proc.returncode != 0:
-                                raise RuntimeError(f"Failed to execute finalize script, return code {proc.returncode}")
-                except RuntimeError:
-                    raise
-                except Exception as e:
-                    always_print(f"ERROR!: Unexpected exception in finalize execution: {e}")
-        finally:
-            if self._remote_root and self._artifacts_path.exists():
-                always_print(f"Zipping artifacts to {Path('.') / ARTIFACTS_ZIP} for transfer...")
-                debug_print(f"Executing command  'zip -r {ARTIFACTS_ZIP} {str(self._relative_artifacts_path)}'")
-                completed = subprocess.run(
-                    f"zip -r {ARTIFACTS_ZIP} {str(self._relative_artifacts_path)}",
-                    shell=True,
-                    cwd=str(self._remote_root),
-                    stdout=sys.stdout if user_output.is_verbose else subprocess.DEVNULL,
-                    stderr=sys.stderr
-                )
-                if completed.returncode != 0:
-                    always_print(f"Failed to zip {self._relative_artifacts_path} from {self._remote_root}",
-                                 as_error=True)
-            for proc, tee_proc in self._worker_procs:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=timeout)
-                except (TimeoutExpired, KeyboardInterrupt):
-                    with suppress(OSError):
-                        proc.kill()
-                try:
-                    tee_proc.terminate()
-                    tee_proc.wait(timeout=timeout)
-                except (TimeoutExpired, KeyboardInterrupt):
-                    with suppress(OSError):
-                        tee_proc.kill()
-            self._worker_procs = []
+        if hasattr(self, "_tee_proc"):
+            self._tee_proc.kill()
+        if self._session_id not in HostSession._worker_procs_by_session_id:
+            return
+        for worker_proc in HostSession._worker_procs_by_session_id[self._session_id]:
+            worker_proc.join(timeout=timeout)
+            if worker_proc.exitcode is None:
+                worker_proc.terminate()
+        del HostSession._worker_procs_by_session_id[self._session_id]
 
     def kill(self) -> None:
         """
         Abruptly kill all worker processes
         """
-        for proc, tee_proc in self._worker_procs:
-            proc.kill()
-            tee_proc.kill()
-        self._worker_procs = []
+        if self._session_id in HostSession._worker_procs_by_session_id:
+            for worker_proc in HostSession._worker_procs_by_session_id[self._session_id]:
+                worker_proc.kill()
+            del self._worker_procs_by_session_id[self._session_id]
+        if hasattr(self, "_tee_proc"):
+            self._tee_proc.kill()
+
+    def wait(self, timeout: Optional[float] = None):
+        for worker_proc in HostSession._worker_procs_by_session_id.get(self._session_id, []):
+            worker_proc.join(timeout=timeout)
+            if worker_proc.exitcode is None:
+                worker_proc.terminate()
+
+    def _launch_pytest(self, args: List[str],
+                       worker_id: str, log_dir: Path):
+        # this should be launched in a new mp Process
+        Node.Manager.singleton(self._node_mgr_port)
+        log = log_dir / 'pytest_run.log'
+        stdout = subprocess.DEVNULL if not user_output.is_verbose else sys.stderr
+        self._tee_proc = subprocess.Popen(
+            ['tee', log],
+            stdout=stdout,
+            stderr=sys.stderr,
+            bufsize=0,
+            stdin=subprocess.PIPE
+        )
+        sys.stdout = self._tee_proc.stdin
+        sys.stderr = self._tee_proc.stdin
+        worker.main(test_q=self._test_q, results_q=self._results_q, args=args, worker_id=worker_id)
+        always_print(f"Launched pytest worker")
 
 
-def coordinator_main(global_mgr_port: int, orchestration_port: int, host: str, index: int,
-                     artifacts_path: Path, remote_root: Optional[Path] = None,
-                     remote_venv: Optional[Path] = None) -> Tuple[Coordinator.HostProxy, Coordinator]:
+def coordinator_main(host: str, port: int, auth_key: str) -> Coordinator:
     """
     entry point for running as main
     """
-    from pytest_mproc.orchestration import OrchestrationManager
-    Global.Manager.singleton(address=('localhost', global_mgr_port), as_client=True)
-    mgr = OrchestrationManager.create_client(address=('localhost', orchestration_port))
-    coordinator = Coordinator(global_mgr_port=global_mgr_port, orchestration_port=orchestration_port,
-                              coordinator_index=index, artifacts_dir=artifacts_path,
-                              remote_root=remote_root, remote_venv=remote_venv)
-    proxy = Coordinator.HostProxy(q=mgr.get_coordinator_q(host=host),
-                                  target=coordinator)
-    return proxy, coordinator
+    return Coordinator.as_server(address=(host, port), auth_token=binascii.a2b_hex(auth_key))
 
 
 if __name__ == "__main__":
     try:
-        uri = sys.argv[1]
-        _index = int(sys.argv[2])
-        _artifacts_path = Path(sys.argv[3])
-        _remote_root = Path(sys.argv[4]) if (len(sys.argv) > 4) else None
-        _remote_venv = Path(sys.argv[5]) if (len(sys.argv) > 5) else None
-        _host, _global_mgr_port, _orchestration_port = uri.split(':')
+        if ini_path() is not None:
+            print(f"Ignoring cmd line and reading config from {ini_path()}")
+            config_parser = ConfigParser()
+            config_parser.read(ini_path())
+            _host = config_parser.get(section='pytest_mproc', option="coordinator_host", fallback='localhost')
+            _port = config_parser.get(section='pytest_mproc', option="coordinator_port", fallback=DEFAULT_MGR_PORT)
+            _auth_key = config_parser.get(section='pytest_mproc', option='auth_key', fallback=None)
+            if _port is None:
+                print(f"No port defined for coordinator bring up in {ini_path()}")
+                sys.exit(-1)
+            if _auth_key is None:
+                print(f"No auth key defined for coordinator bring up in {ini_path()}")
+                sys.exit(-1)
+            _global_mgr_port = int(_port)
+        else:
+            if len(sys.argv) > 2:
+                print(f"Usage: {sys.argv[0]} [host:port]")
+                sys.exit(-2)
+            if len(sys.argv) == 2:
+                uri = sys.argv[1]
+                try:
+                    _host, _global_mgr_port, _orchestration_port = uri.split(':')
+                except ValueError:
+                    print(f"Usage: {sys.argv[0]} [host:port]")
+                    sys.exit(-2)
+            else:
+                print(f"No host/port pair specified.  Using port {DEFAULT_MGR_PORT} "
+                      "and assuming localhost using ssh-reverse-port-forwarding as needed")
+                _host = 'localhost'
+                _global_mgr_port = DEFAULT_MGR_PORT
+
+            print("No ini file, reading auth token from stdin (hex format)...")
+            _auth_key = sys.stdin.readline()
+            _auth_key = binascii.a2b_hex(_auth_key)
         _global_mgr_port = int(_global_mgr_port)
-        _orchestration_port = int(_orchestration_port)
-        _proxy, _coordinator = coordinator_main(
-            orchestration_port=_orchestration_port, global_mgr_port=_global_mgr_port, host=_host, index=_index,
-            artifacts_path=_artifacts_path, remote_root=_remote_root, remote_venv=_remote_venv
-        )
-        sys.stdout.write("\nSTARTED\n")
+        sys.stdout.write("\nCoordinator STARTED\n")
         sys.stdout.flush()
-        _proxy.loop()
-        _coordinator.kill()
-        always_print(f"Coordinator {_index} completed")
+        coordinator_main(_host, _global_mgr_port, _auth_key)
+        sys.stdout.write("\nCoordinator FINISHED")
     except Exception as _e:
         import traceback
         always_print(traceback.format_exc(), as_error=True)

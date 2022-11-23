@@ -9,9 +9,10 @@ import sys
 import _pytest.terminal
 from pytest_mproc.worker import WorkerSession
 
-from pytest_mproc import worker, user_output, Constants, Settings
+from pytest_mproc import worker, user_output, Constants
+from pytest_mproc.remote.data import Settings
 from pytest_mproc.coordinator import coordinator_main
-from pytest_mproc.main import LocalOrchestrator, RemoteOrchestrator
+from pytest_mproc.main import Orchestrator
 from pytest_mproc.user_output import always_print
 
 import getpass
@@ -205,6 +206,7 @@ def pytest_addoption(parser):
         typ=bool,
         help_text="output messages when connecting and executing tasks"
     )
+    parser.addini("ssh_username", help="username for ssh transactions if needed", default=None)
 
 
 cmdline_main_called = False
@@ -318,7 +320,7 @@ def pytest_cmdline_main(config):
         config.ptmproc_config.mode = ModeEnum.MODE_LOCAL_MAIN
         # Running locally on local host only:
         artifacts_path = proj_config_from(config).artifacts_path
-        config.ptmproc_orchestrator = LocalOrchestrator(artifacts_path=artifacts_path)
+        config.ptmproc_orchestrator = Orchestrator.as_local()??)
         return mproc_pytest_cmdline_main_local(config.ptmproc_config, config.ptmproc_orchestrator, reporter)
     elif not has_remotes:
         config.ptmproc_config.mode = ModeEnum.MODE_REMOTE_MAIN
@@ -328,7 +330,7 @@ def pytest_cmdline_main(config):
         global_mgr_port = None if global_mgr_port_text is None else int(global_mgr_port_text)
         # noinspection PyTypeChecker
         orchestration_port = None if orchestration_port_text is None else int(orchestration_port_text)
-        config.ptmproc_orchestrator = RemoteOrchestrator(
+        config.ptmproc_orchestrator = Orchestrator.as_server(
             project_config=proj_config_from(config),
             global_mgr_port=global_mgr_port,
             orchestration_port=orchestration_port,
@@ -343,7 +345,7 @@ def pytest_cmdline_main(config):
     else:
         config.ptmproc_config.mode = ModeEnum.MODE_REMOTE_MAIN
         # running distributed in automated fashion:
-        config.ptmproc_orchestrator = RemoteOrchestrator(project_config=proj_config_from(config))
+        config.ptmproc_orchestrator = Orchestrator.as_server(project_config=proj_config_from(config))
         config.remote_coro = mproc_pytest_cmdline_main_remote(
             config.ptmproc_config, reporter=reporter,
             orchestrator=config.ptmproc_orchestrator,
@@ -379,7 +381,7 @@ def mproc_pytest_cmdline_coordinator(config, host: Optional[str], global_mgr_por
     config.ptmproc_coordinator.start_workers(config.ptmproc_config.num_cores, args=args, addl_env=addl_env)
 
 
-def mproc_pytest_cmdline_main_local(config: PytestMprocConfig, orchestrator: LocalOrchestrator, reporter: BasicReporter
+def mproc_pytest_cmdline_main_local(config: PytestMprocConfig, orchestrator: Orchestrator, reporter: BasicReporter
                                     ) -> None:
     assert "--as-worker-node" not in sys.argv
     reporter.write(f"Running locally as main\n", green=True)
@@ -387,7 +389,7 @@ def mproc_pytest_cmdline_main_local(config: PytestMprocConfig, orchestrator: Loc
 
 
 def mproc_pytest_cmdline_main_remote(config: PytestMprocConfig, reporter: BasicReporter,
-                                     orchestrator: RemoteOrchestrator, remote_clients):
+                                     orchestrator: Orchestrator, remote_clients):
     assert "--as-worker-node" not in sys.argv
     version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
     mproc_remote_sys_executable = config.remote_sys_executable or f"/usr/bin/python{version}"

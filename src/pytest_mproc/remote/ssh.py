@@ -24,7 +24,8 @@ from typing import (
     Union,
 )
 
-from pytest_mproc import user_output, Settings
+from pytest_mproc import user_output
+from pytest_mproc.remote.data import Settings
 from pytest_mproc.user_output import debug_print, always_print
 
 SUCCESS = 0

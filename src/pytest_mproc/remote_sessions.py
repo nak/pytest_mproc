@@ -15,7 +15,8 @@ from typing import Optional, Dict, List
 from pytest_mproc.constants import ARTIFACTS_ZIP
 from pytest_mproc.coordinator import Coordinator
 
-from pytest_mproc import get_auth_key, Settings, AsyncMPQueue, user_output
+from pytest_mproc import get_auth_key, AsyncMPQueue, user_output
+from pytest_mproc.remote.data import Settings
 from pytest_mproc.data import ClientDied
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
 from pytest_mproc.remote.bundle import Bundle

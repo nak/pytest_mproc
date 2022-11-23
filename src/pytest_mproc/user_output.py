@@ -1,7 +1,7 @@
 import os
 import sys
 
-from pytest_mproc import get_ip_addr
+from pytest_mproc import _get_my_ip
 
 is_verbose = os.environ.get("PTMPROC_VERBOSE", False) not in ['0', 'False', 'false', 'FALSE', False]
 
@@ -26,7 +26,7 @@ def debug_print(msg: str, *args):
     """
     global is_verbose
     if is_verbose:
-        msg = f"[{get_ip_addr()}] {msg}"
+        msg = f"[{_get_my_ip()}] {msg}"
         print(msg % args)
 
 
@@ -44,5 +44,5 @@ def always_print(msg: str, *args, as_error: bool = False):
     else:
         msg += '\n'
     if is_verbose:
-        msg = f"[{get_ip_addr()}] {msg}"
+        msg = f"[{_get_my_ip()}] {msg}"
     os.write(sys.stderr.fileno() if as_error else sys.stdout.fileno(), msg.encode('utf-8'))

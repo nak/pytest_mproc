@@ -15,7 +15,8 @@ from asyncio import Semaphore
 from pathlib import Path
 
 import pytest_mproc
-from pytest_mproc import find_free_port
+import pytest_mproc.remote.data
+from pytest_mproc import _find_free_port
 from pytest_mproc.ptmproc_data import ProjectConfig
 
 from pytest_mproc.remote.bundle import Bundle
@@ -76,8 +77,8 @@ def test_remote_execution_cli(tmp_path):
         out.write(json.dumps(converted))
         out.flush()
         # remote_host = 'fssh://pi@10.220.45.119:{find_free_port()}'
-        remote_host = f'127.0.0.1:{find_free_port()}'
-        pytest_mproc.Settings.set_ssh_credentials(username='pi')
+        remote_host = f'127.0.0.1:{_find_free_port()}'
+        pytest_mproc.remote.data.Settings.set_ssh_credentials(username='pi')
         remote_server = f'delegated://pi@'
         client_connect = '10.220.45.110'
         client_connect = 'localhost'

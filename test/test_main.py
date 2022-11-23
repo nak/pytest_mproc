@@ -13,12 +13,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from pytest_mproc import user_output
-from pytest_mproc.data import AllClientsCompleted, ClientDied, TestBatch, ResultExit
+from pytest_mproc.data import ClientDied, TestBatch, ResultExit
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.remote_sessions import RemoteSessionManager
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
-from pytest_mproc.user_output import always_print
 
 
 @pytest.fixture()
@@ -125,8 +124,8 @@ def test_one():
         task = asyncio.create_task(go())
         r = await asyncio.wait_for(result_q.get(), timeout=20)
         while True:
-            assert type(r) in (ClientDied, AllClientsCompleted, ResultExit)
-            if type(r) == AllClientsCompleted:
+            assert r is None or type(r) in (ClientDied, ResultExit)
+            if r is None:
                 try:
                     r = await asyncio.wait_for(result_q.get(), timeout=5)
                     assert False, f"Result q not empty as expected: {r}"
@@ -210,7 +209,7 @@ async def test_start_remote(project_config: ProjectConfig, uri: str, request):
             await asyncio.wait_for(test_q.put(None), timeout=5)
             await asyncio.wait_for(test_q.put(None), timeout=5)
             result = await asyncio.wait_for(result_q.get(), timeout=10)
-            while not isinstance(result, AllClientsCompleted):
+            while result is not None:
                 result = await asyncio.wait_for(result_q.get(), timeout=100)
             try:
                 await asyncio.wait_for(result_q.get(), timeout=2)

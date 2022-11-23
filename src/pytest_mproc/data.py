@@ -69,14 +69,6 @@ class ClientDied(Exception):
 
 
 @dataclass
-class AllClientsCompleted:
-    """
-    result placed in queue when all clients have completed
-    """
-    pass
-
-
-@dataclass
 class ResultTestStatus:
     """
     placed in results queue when test report is available

@@ -1,18 +1,12 @@
 import asyncio
 import multiprocessing
 import time
-import binascii
 import inspect
-import os
-import secrets
 import socket
 import sys
-from configparser import ConfigParser
 
 from contextlib import closing
 from dataclasses import dataclass
-from multiprocessing.process import current_process
-from pathlib import Path
 from queue import Empty, Full
 from typing import Union, Callable, Optional, Any, Dict
 
@@ -21,7 +15,6 @@ from pytest_mproc.data import GroupTag
 is_main = '--as-main' in sys.argv or '--remote-worker' in sys.argv
 is_worker = '--as-worker' in sys.argv or 'pytest_mproc.worker' in sys.argv
 
-_auth_key = None
 _user_defined_port_alloc: Optional[Callable[[], int]] = None
 _user_defined_auth: Optional[Callable[[], bytes]] = None
 
@@ -36,68 +29,10 @@ def set_user_defined_port_alloc(func: Callable[[], int]):
     _user_defined_port_alloc = func
 
 
-def get_auth_key() -> bytes:
-    global _auth_key
-    if 'SYSTEM_CONFIG_INI' in os.environ:
-        ini_path = Path(os.environ['SYSTEM_CONFIG_INI'])
-        if not ini_path.is_file():
-            raise ValueError("Env var SYSTEM_CONFIG_INI does not point to a valid ini file")
-    elif 'AUTH_TOKEN_STDIN' not in os.environ:
-        ini_path = Path.home() / '.pytest_mproc' / 'config.ini'
-    else:
-        ini_path = None
-    if hasattr(multiprocessing, 'parent_process') and multiprocessing.parent_process() is not None:
-        _auth_key = current_process().authkey
-    elif _auth_key is not None:
-        return _auth_key
-    elif _user_defined_auth:
-        _auth_key = _user_defined_auth()
-    elif ini_path is not None and ini_path.is_file():
-        parser = ConfigParser()
-        parser.read(ini_path)
-        auth_key = parser.get(section='pytest_mproc', option='auth_token', fallback=None)
-        if auth_key is None:
-            raise ValueError(f"No 'auth_token' provided in {ini_path}")
-        _auth_key = binascii.a2b_hex(auth_key)
-    elif os.environ.get("AUTH_TOKEN_STDIN", None) == '1':
-        auth_key = sys.stdin.readline().strip()
-        _auth_key = binascii.a2b_hex(auth_key)
-    else:
-        _auth_key = secrets.token_bytes(64)
-    current_process().authkey = _auth_key
-    return _auth_key
-
-
-def get_auth_key_hex():
-    return binascii.b2a_hex(get_auth_key()).decode('utf-8')
-
-
-class TestError(BaseException):
-    """
-    To be thrown when a test setup/test environment issue occurs preventing test execution from even happening
-
-    :param retry: whether to retry the test when raised in the context of pytest-mproc distributed execution.
-       if not specified, default is True
-    :param fatal: whether error is fatal when raised in the context of pytest-mproc distributed executions;  errors
-       marked fatal, meaning that all further processing for the work-node on which exception was raised will be
-       stopped. Default is False if not specified
-    """
-
-    def __init__(self, msg: str, retry: bool = True, fatal: bool = False):
-        super().__init__(msg)
-        self._retry = retry
-        self._fatal = fatal
-
-    @property
-    def retry(self) -> bool:
-        return self._retry
-
-    @property
-    def fatal(self) -> bool:
-        return self._fatal
-
-
 def priority(level: int):
+    """
+    decorator for setting test priority (lower number is higher priority)
+    """
 
     def decorator_priority(obj_):
         if inspect.isclass(obj_):
@@ -134,7 +69,7 @@ def group(tag: Union["GroupTag", str]):
     return decorator_group
 
 
-def find_free_port():
+def _find_free_port():
     if _user_defined_port_alloc:
         return _user_defined_port_alloc()
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -145,23 +80,17 @@ def find_free_port():
 
 # noinspection SpellCheckingInspection
 def fixture(fixturefunction, *, scope, **kargs):
-    from _pytest.fixtures import fixture
-    return fixture(fixturefunction, scope=scope, **kargs)
+    from _pytest.fixtures import fixture as pt_fixture
+    return pt_fixture(fixturefunction, scope=scope, **kargs)
 
 
-def get_ip_addr() -> str:
+def _get_my_ip() -> str:
     hostname = socket.gethostname()
     # noinspection PyBroadException
     try:
         return socket.gethostbyname(hostname)
     except Exception:
         return "<<unknown ip address>>"
-
-
-class FatalError(Exception):
-    """
-    raised to exit pytest immediately
-    """
 
 
 @dataclass
@@ -175,44 +104,6 @@ class Constants:
     def set_ptmproc_args(cls, name: str, typ: Any):
         cls.ptmproc_args = cls.ptmproc_args or {}
         cls.ptmproc_args[name] = typ
-
-
-@dataclass
-class Settings:
-    ssh_username: Optional[str] = os.environ.get("SSH_USERNAME")
-    ssh_password: Optional[str] = None
-    cache_dir: Optional[Path] = None
-    tmp_root: Optional[Path] = None
-
-    @classmethod
-    def set_ssh_credentials(cls, username: str, password: Optional[str] = None):
-        """
-        Set SSH credentials
-
-        :param username:  username for ssh (remote end username)
-        :param password: optional password, if no password provided, sets password to None and assume password-less
-            login
-        """
-        cls.ssh_username = username
-        cls.ssh_password = password
-
-    @classmethod
-    def set_cache_dir(cls, cache_dir: Optional[Path]):
-        """
-        Set persistent cache dir where cached files will be stored
-
-        :param cache_dir: path to use for files cached run to run
-        """
-        cls.cache_dir = Path(cache_dir) if cache_dir else None
-
-    @classmethod
-    def set_tmp_root(cls, tmp_dir: Optional[Path]):
-        """
-        Set root dir for tmp files on remote hosts
-
-        :param tmp_dir:  root dir where temp directories are created (and removed on finalization)
-        """
-        cls.tmp_root = Path(tmp_dir) if tmp_dir else None
 
 
 class AsyncMPQueue:
@@ -230,52 +121,64 @@ class AsyncMPQueue:
     def raw(self) -> multiprocessing.JoinableQueue:
         return self._q
 
-    async def get(self, max_tries: Optional[int] = None):
+    async def get(self, immediate: bool = False):
         """
-        :return: next item in queue
+        :return: next item in queue.
+        :param immediate: If False, will block; use asyncio.wait_for to timeout a call to this method.
+           If True, return immediately if item ia available, else return None
         """
-        count = 0
-        while max_tries is None or count < max_tries:
+        while True:
             try:
                 item = self._q.get(block=False)
                 self._q.task_done()
                 return item
             except Empty:
-                count += 1
+                if immediate:
+                    return None
                 await asyncio.sleep(self.INTERVAL_POLLING)
 
-    async def put(self, item, max_tries: Optional[float] = None) -> bool:
+    async def wait(self):
+        """
+        wait until all results are out of queue.  Called once all clients are done putting results to flush and
+        process remaining items
+        THIS WILL WAIT 20 seconds for remaining results to come in (presumable after all worker threads exited),
+        anything longer than that is deemed as no more results to process.  Either that there is a severe network
+        delay and we have bigger issues
+        """
+        while True:
+            try:
+                await asyncio.wait_for(self.get(), timeout=20)
+            except asyncio.TimeoutError:
+                break
+
+    async def put(self, item, immediate: bool = False) -> bool:
         """
         put an item in the queue
 
         :param item: item to place
-        :param max_tries: maximum number of tries before returning False, or None for no restriction on tries
+        :param immediate: return immediately indicating whether put was successful if set True; otherwise blocks;
+           use asyncio.wait_for to utilize a timeout on this method
         """
-        count = 0
-        while max_tries is None or count < max_tries:
+        while True:
             try:
                 self._q.put(item, block=False)
                 await asyncio.sleep(0)
                 return True
             except Full:
-                count += 1
+                if immediate:
+                    return False
                 await asyncio.sleep(self.INTERVAL_POLLING)
-        return False
 
     def close(self):
         self._q.close()
 
     def get_nowait(self):
-        return self._q.get_nowait()
+        return self.get(immediate=True)
 
     def put_nowait(self, item):
-        return self._q.put(item)
+        return self.put(item, immediate=True)
 
-    async def join(self, timeout: float = TIMEOUT_JOIN) -> None:
+    def join(self, timeout: float = TIMEOUT_JOIN) -> None:
         # assume join only called on "put" thread when it expects
         # all items in the queue to be drained and no more puts are expected
-        start = time.monotonic()
-        while not self._q.empty():
-            await asyncio.sleep(self.INTERVAL_POLLING)
-            if time.monotonic() - start > timeout:
-                raise TimeoutError(f"Timed out after {timeout:.1f} seconds joining queue")
+        self._q.close()

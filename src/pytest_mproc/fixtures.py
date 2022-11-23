@@ -8,7 +8,8 @@ from contextlib import suppress
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
 from pytest_mproc.user_output import debug_print, always_print
-from pytest_mproc import find_free_port, get_auth_key_hex, get_auth_key
+from pytest_mproc import _find_free_port
+from pytest_mproc.auth import get_auth_key_hex, get_auth_key
 
 # assert plugin  # import takes care of some things on import, but not used otherwise; here to make flake8 happy
 
@@ -65,7 +66,7 @@ class Node:
 
     class Manager(FixtureManager):
 
-        PORT = int(os.environ.get('PTMPROC_NODE_MGR_PORT', find_free_port()))
+        PORT = int(os.environ.get('PTMPROC_NODE_MGR_PORT', _find_free_port()))
         _singleton = None
 
         def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
@@ -74,16 +75,17 @@ class Node:
                 debug_print(f"Connected [{name}]")
 
         @classmethod
-        def singleton(cls) -> "Node.Manager":
+        def singleton(cls, port: Optional[int] = None) -> "Node.Manager":
+            port = port if port is not None else cls.PORT
             if cls._singleton is None:
                 # noinspection PyBroadException
                 try:
-                    cls._singleton = cls(as_main=False, port=cls.PORT)
+                    cls._singleton = cls(as_main=False, port=port)
                     cls._singleton.connect()
                     cls._singleton._is_serving = False
                 except (OSError, EOFError):
                     debug_print(f"Looks like no node manager already running, starting ...")
-                    cls._singleton = cls(as_main=True, port=cls.PORT)
+                    cls._singleton = cls(as_main=True, port=port)
                     cls._singleton.start()
                     cls._singleton._is_serving = True
                 except Exception as e:
