@@ -60,7 +60,7 @@ class Coordinator(BaseManager):
         self._remote_run_path: Optional[Path] = None
         self._node_mgr_port = _find_free_port()
         self._node_mgr = Node.Manager.singleton(self._node_mgr_port)
-        self._host_sessions: List[HostSession] = []
+        self._host_sessions: List[WorkerProcess] = []
 
     @classmethod
     def as_client(cls, address: Tuple[str, int], auth_token: bytes):
@@ -94,13 +94,12 @@ class Coordinator(BaseManager):
         session_id: str,
         working_dir: Path,
         artifacts_rel_path: Path,
-        global_mgr_host: str,
-        global_mgr_port: int,
         test_q: JoinableQueue,
         results_q: JoinableQueue,
+        global_mgr_address: Optional[Tuple[str, int]] = None,
         addl_env: Optional[Dict[str, str]] = None,
         args: Optional[List[str]] = None,
-    ) -> "HostSession":
+    ) -> "WorkerProcess":
         """
         State a worker
 
@@ -108,30 +107,29 @@ class Coordinator(BaseManager):
         :param session_id: unique session id (across all hosts for a single test session)
         :param working_dir: working path where pytest will execute
         :param artifacts_rel_path: relative path (to working dir) where artifacts will be placed
-        :param global_mgr_host: host name/ip of server hosting global fixture information
-        :param global_mgr_port: port of global mgr server
+        :param global_mgr_address: host name/ip and port of server hosting global fixture information
         :param test_q: queue to pull tests from
         :param results_q: queue to put test results/exceptions in
         :param addl_env: optional additional environ variable for worker processes
         :param args: optional additional args to pass to worker processes
         """
-        host_session = HostSession(session_id=session_id,
-                                   working_dir=working_dir, artifacts_rel_path=artifacts_rel_path,
-                                   test_q=test_q, results_q=results_q,
-                                   global_mgr_host=global_mgr_host,
-                                   global_mgr_port=global_mgr_port
-                                   )
+        host_session = WorkerProcess(session_id=session_id,
+                                     working_dir=working_dir, artifacts_rel_path=artifacts_rel_path,
+                                     test_q=test_q, results_q=results_q,
+                                     global_mgr_address=global_mgr_address
+                                     )
         self._host_sessions.append(host_session)
         for index in range(num_processes):
             host_session.start_worker(args=args, addl_env=addl_env)
         return host_session
 
 
-class HostSession:
+class WorkerProcess:
 
-    def __init__(self, session_id: str, global_mgr_host: str, global_mgr_port: int,
+    def __init__(self, session_id: str,
                  working_dir: Path, artifacts_rel_path: Path,
-                 test_q: JoinableQueue, results_q: JoinableQueue):
+                 test_q: JoinableQueue, results_q: JoinableQueue,
+                 global_mgr_address: Optional[Tuple[str, int]] = None, ):
         self._session_id = session_id
         self._working_dir = working_dir
         self._artifacts_rel_path = artifacts_rel_path
@@ -139,7 +137,8 @@ class HostSession:
         self._results_q = results_q
         self._node_mgr_port = _find_free_port()
         # for handling global fixtures:
-        Global.Manager.singleton(address=(global_mgr_host, global_mgr_port), as_client=True)
+        if global_mgr_address is not None:
+            Global.Manager.as_client(address=global_mgr_address)
         # TODO is host is 'localhost' ensure host code reverse-port-forwards port
 
     _worker_procs_by_session_id: Dict[str, List[multiprocessing.Process]] = []
@@ -154,7 +153,7 @@ class HostSession:
         :param addl_env: additional environment variables when launching worker
         :return: HostSession instance
         """
-        worker_id = f"Worker-{self._session_id}-{len(HostSession._worker_procs_by_session_id[self._session_id]) + 1}"
+        worker_id = f"Worker-{self._session_id}-{len(WorkerProcess._worker_procs_by_session_id[self._session_id]) + 1}"
         always_print(f"Starting worker with id {worker_id}")
         env = os.environ.copy()
         os.environ.update(addl_env)
@@ -169,7 +168,7 @@ class HostSession:
                                        args=(args, worker_id, log_dir, env))
         proc.start()
         os.environ = env
-        HostSession._worker_procs_by_session_id[self._session_id].append(proc)
+        WorkerProcess._worker_procs_by_session_id[self._session_id].append(proc)
 
     def shutdown(self, timeout: Optional[float] = None) -> None:
         """
@@ -180,27 +179,27 @@ class HostSession:
         """
         if hasattr(self, "_tee_proc"):
             self._tee_proc.kill()
-        if self._session_id not in HostSession._worker_procs_by_session_id:
+        if self._session_id not in WorkerProcess._worker_procs_by_session_id:
             return
-        for worker_proc in HostSession._worker_procs_by_session_id[self._session_id]:
+        for worker_proc in WorkerProcess._worker_procs_by_session_id[self._session_id]:
             worker_proc.join(timeout=timeout)
             if worker_proc.exitcode is None:
                 worker_proc.terminate()
-        del HostSession._worker_procs_by_session_id[self._session_id]
+        del WorkerProcess._worker_procs_by_session_id[self._session_id]
 
     def kill(self) -> None:
         """
         Abruptly kill all worker processes
         """
-        if self._session_id in HostSession._worker_procs_by_session_id:
-            for worker_proc in HostSession._worker_procs_by_session_id[self._session_id]:
+        if self._session_id in WorkerProcess._worker_procs_by_session_id:
+            for worker_proc in WorkerProcess._worker_procs_by_session_id[self._session_id]:
                 worker_proc.kill()
             del self._worker_procs_by_session_id[self._session_id]
         if hasattr(self, "_tee_proc"):
             self._tee_proc.kill()
 
     def wait(self, timeout: Optional[float] = None):
-        for worker_proc in HostSession._worker_procs_by_session_id.get(self._session_id, []):
+        for worker_proc in WorkerProcess._worker_procs_by_session_id.get(self._session_id, []):
             worker_proc.join(timeout=timeout)
             if worker_proc.exitcode is None:
                 worker_proc.terminate()

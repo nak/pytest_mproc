@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from pytest_mproc import user_output
-from pytest_mproc.data import ClientDied, TestBatch, ResultExit
+from pytest_mproc.data import ClientExited, TestBatch, ResultExit
 from pytest_mproc.main import Orchestrator
 from pytest_mproc.remote_sessions import RemoteSessionManager
 from pytest_mproc.orchestration import OrchestrationManager
@@ -124,7 +124,7 @@ def test_one():
         task = asyncio.create_task(go())
         r = await asyncio.wait_for(result_q.get(), timeout=20)
         while True:
-            assert r is None or type(r) in (ClientDied, ResultExit)
+            assert r is None or type(r) in (ClientExited, ResultExit)
             if r is None:
                 try:
                     r = await asyncio.wait_for(result_q.get(), timeout=5)

@@ -44,7 +44,7 @@ def get_auth_key() -> bytes:
     elif os.environ.get("AUTH_TOKEN_STDIN", None) == '1':
         auth_key = sys.stdin.readline().strip()
         _auth_key = binascii.a2b_hex(auth_key)
-    elif ini_path is not None and ini_path().is_file():
+    elif ini_path() is not None and ini_path().is_file():
         parser = ConfigParser()
         parser.read(ini_path())
         auth_key = parser.get(section='pytest_mproc', option='auth_token', fallback=None)

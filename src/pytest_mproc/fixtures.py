@@ -1,14 +1,11 @@
-import hashlib
 import inspect
 import functools
 import logging
 import os
 import sys
-from contextlib import suppress
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
 from pytest_mproc.user_output import debug_print, always_print
-from pytest_mproc import _find_free_port
 from pytest_mproc.auth import get_auth_key_hex, get_auth_key
 
 # assert plugin  # import takes care of some things on import, but not used otherwise; here to make flake8 happy
@@ -32,8 +29,8 @@ class FixtureManager(BaseManager):
         def value(self) -> Any:
             return self._val
 
-    def __init__(self, addr: Tuple[str, int]):
-        super().__init__(address=addr, authkey=get_auth_key())
+    def __init__(self, addr: Tuple[str, int], authkey: bytes):
+        super().__init__(address=addr, authkey=authkey)
 
     # noinspection PyAttributeOutsideInit
     def start(self, **kwargs):
@@ -66,48 +63,52 @@ class Node:
 
     class Manager(FixtureManager):
 
-        PORT = int(os.environ.get('PTMPROC_NODE_MGR_PORT', _find_free_port()))
-        _singleton = None
+        _singletons: Dict[int, "Node.Manager"] = {}
 
-        def __init__(self, as_main: bool, port: int, name: str = "Node.Manager"):
-            super().__init__(("127.0.0.1", port))
+        def __init__(self, as_main: bool, port: int, authkey: bytes, name: str = "Node.Manager"):
+            super().__init__(("127.0.0.1", port), authkey)
             if not as_main:
                 debug_print(f"Connected [{name}]")
+            self._is_serving = as_main
+            self._port = port
+
+        @property
+        def port(self):
+            return self._port
 
         @classmethod
-        def singleton(cls, port: Optional[int] = None) -> "Node.Manager":
-            port = port if port is not None else cls.PORT
-            if cls._singleton is None:
-                # noinspection PyBroadException
-                try:
-                    cls._singleton = cls(as_main=False, port=port)
-                    cls._singleton.connect()
-                    cls._singleton._is_serving = False
-                except (OSError, EOFError):
-                    debug_print(f"Looks like no node manager already running, starting ...")
-                    cls._singleton = cls(as_main=True, port=port)
-                    cls._singleton.start()
-                    cls._singleton._is_serving = True
-                except Exception as e:
-                    raise SystemError(f"FAILED TO START NODE MANAGER") from e
-            return cls._singleton
+        def singleton(cls, port: int, authkey: bytes) -> "Node.Manager":
+            if port in cls._singletons:
+                return cls._singletons[port]
+            # noinspection PyBroadException
+            try:
+                cls._singletons[port] = cls(as_main=False, port=port, authkey=authkey)
+                cls._singletons[port].connect()
+            except (OSError, EOFError):
+                debug_print(f"Looks like no node manager already running, starting ...")
+                cls._singletons[port] = cls(as_main=True, port=port, authkey=authkey)
+                cls._singletons[port].start()
+            except Exception as e:
+                raise SystemError(f"FAILED TO START NODE MANAGER") from e
+            return cls._singletons[port]
 
-        @classmethod
-        def shutdown(cls) -> None:
+        def shutdown(self) -> None:
             # noinspection PyProtectedMember
-            if cls._singleton is not None and cls._singleton._is_serving:
-                cls._singleton.shutdown()
-                cls._singleton = None
+            super().shutdown()
+            del Node.Manager._singletons[self.port]
 
 
 class Global:
 
     class Manager(FixtureManager):
 
-        _singleton: Dict[str, "Global.Manager"] = {}
+        # We track singleton based on pid, as a multiprocessing.Process can carry over a singleton into
+        # that new process when forked.  Always use the singleton() method to access the singleon, as this
+        # does the propoer check on matching pid
+        _singleton: Optional[Tuple[int, "Global.Manager"]] = None
 
-        def __init__(self, host: str, port: int):
-            super().__init__((host, port))
+        def __init__(self, host: str, port: int, authkey: bytes):
+            super().__init__((host, port), authkey=authkey)
 
         @property
         def port(self):
@@ -121,39 +122,46 @@ class Global:
         def uri(self):
             return f"{self.address[0]}:{self.address[1]}"
 
-        @staticmethod
-        def key() -> str:
-            return hashlib.sha256(get_auth_key()).hexdigest()
-
         @classmethod
-        def singleton(cls, address: Optional[Tuple[str, int]] = None, as_client: bool = False) -> "Global.Manager":
-            if cls.key() in cls._singleton and (address is None or address == cls._singleton[cls.key()].address):
-                return cls._singleton[cls.key()]
-            elif address is None:
-                raise SystemError("Attempt to get Global manager before start or connect")
-            if as_client:
-                host, port = address
-                host = host.split('@', maxsplit=1)[-1]
-                assert host is not None and port is not None, \
-                    "Internal error: host and port not provided for global manager"
-                singleton = cls(host=host, port=port)
-                singleton.connect()
-                singleton._is_serving = False
+        def singleton(cls) -> Optional["Global.Manager"]:
+            if cls._singleton is None:
+                return None
+            pid, mgr = cls._singleton
+            if os.getpid() == pid:
+                return mgr
             else:
-                host, port = address
-                host = host.split('@', maxsplit=1)[-1]
-                singleton = cls(host=host, port=port)
-                singleton.start()
-                singleton._is_serving = True
-            cls._singleton[cls.key()] = singleton
-            return cls._singleton[cls.key()]
+                cls._singleton = None
+                return None
 
         @classmethod
-        def stop(cls) -> None:
-            if cls.key() in cls._singleton:
-                with suppress(Exception):  # shutdown only available if server and not client
-                    cls._singleton[cls.key()].shutdown()
-                del cls._singleton[cls.key()]
+        def as_server(cls, address: Tuple[str, int], auth_key: bytes) -> "Global.Manager":
+            if cls.singleton() is not None:
+                raise RuntimeError(f"Attempt to create global fixture manager twice")
+            host, port = address
+            host = host.split('@', maxsplit=1)[-1]
+            mgr = cls(host=host, port=port, authkey=auth_key)
+            mgr.start()
+            mgr._is_serving = True
+            cls._singleton = (os.getpid(), mgr)
+            return mgr
+
+        @classmethod
+        def as_client(cls, address: Tuple[str, int], auth_key: bytes) -> "Global.Manager":
+            if cls.singleton() is not None:
+                raise RuntimeError(f"Attempt to create global fixture manager twice")
+            host, port = address
+            host = host.split('@', maxsplit=1)[-1]
+            assert host is not None and port is not None, \
+                "Internal error: host and port not provided for global manager"
+            mgr = cls(host=host, port=port, authkey=auth_key)
+            mgr.connect()
+            mgr._is_serving = False
+            cls._singleton = (os.getpid(), mgr)
+            return mgr
+
+        def stop(self) -> None:
+            super().shutdown()
+            Global.Manager._singleton = None
 
     def __init__(self, config):
         super().__init__(config)
@@ -173,9 +181,9 @@ def global_fixture(**kwargs):
         @functools.wraps(func)
         def _wrapper(*args, **kwargs_):
             nonlocal value
-            # TODO: make this a "is_present" call in Global.Manager
-            assert Global.Manager.key() in Global.Manager._singleton, "Global Manager did not start as expected"
             global_mgr = Global.Manager.singleton()
+            if global_mgr is None:
+                raise RuntimeError("Global fixture manager not started as expected")
             # when serving potentially multiple full pytest session in a standalone server,
             # we distinguish sessions via the auth token
             # noinspection PyUnresolvedReferences

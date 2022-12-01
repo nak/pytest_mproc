@@ -58,7 +58,7 @@ class ResultException(Exception):
 
 
 @dataclass
-class ClientDied(Exception):
+class ClientExited(Exception):
     """
     raise by a client when it dies or exits
     """
