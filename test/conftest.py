@@ -1,8 +1,12 @@
-#import explicitly, as entrypoint not present during test  (only after setup.py and dist file created)
 import os
+import subprocess
+import time
+from contextlib import suppress
 from pathlib import Path
+from typing import List
 
 import pytest_mproc.fixtures
+from pytest_mproc.worker import WorkerAgent
 
 if os.path.exists("../src/pytest_mproc"):
     import sys
@@ -13,21 +17,22 @@ import pytest
 from pytest_mproc.plugin import TmpDirFactory
 
 
+my_ip = pytest_mproc._get_my_ip()
+
+
 def pytest_addoption(parser):
+    # noinspection PyProtectedMember
     if 'pytest_mproc' not in [g.name for g in parser._groups]:
         pytest_mproc.plugin.pytest_addoption(parser)
 
 
 _node_tmpdir = None
 
-#pytest_mproc.Settings.set_ssh_credentials('pi')
-#pytest_mproc.Settings.set_tmp_root(Path('/home/pi/tmp'))
-#pytest_mproc.Settings.set_cache_dir(Path('/home/pi/cache'))
-
 
 def get_ip_addr():
     import socket
     hostname = socket.gethostname()
+    # noinspection PyBroadException
     try:
         return socket.gethostbyname(hostname)
     except Exception:
@@ -57,18 +62,21 @@ class GlobalV:
     value = 41
 
 
+# noinspection PyUnusedLocal,PyShadowingNames
 @pytest_mproc.fixtures.global_fixture()
 def global_fix(dummy):
     GlobalV.value += 1
-    return GlobalV.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
+    # we will assert the fixture is 42 in tests and never increases, as this should only be called once
+    return GlobalV.value
 
 
-import pytest_mproc
 @pytest_mproc.fixtures.node_fixture()
-@pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture', restrict_to=pytest_mproc.data.TestExecutionConstraint.SINGLE_NODE))
+@pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture',
+                                          restrict_to=pytest_mproc.data.TestExecutionConstraint.SINGLE_NODE))
 def node_level_fixture(mp_tmp_dir_factory: TmpDirFactory):
-    _node_tmpdir = mp_tmp_dir_factory._root_tmp_dir
-    assert os.path.exists(_node_tmpdir)
+    # noinspection PyProtectedMember
+    _node_tmpdir_ = mp_tmp_dir_factory._root_tmp_dir
+    assert os.path.exists(_node_tmpdir_)
     V.value += 1
     return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
 
@@ -76,7 +84,8 @@ def node_level_fixture(mp_tmp_dir_factory: TmpDirFactory):
 @pytest.mark.trylast
 def pytest_sessionfinish(session):
     if _node_tmpdir and not hasattr(session.config.option, "mproc_worker"):
-       assert not os.path.exists(_node_tmpdir), f"Failed to cleanup temp dirs"
+        # noinspection PyTypeChecker
+        assert not os.path.exists(_node_tmpdir), f"Failed to cleanup temp dirs"
 
 
 @pytest.fixture()
@@ -85,8 +94,52 @@ def chdir():
 
     class ChDir:
 
+        # noinspection PyMethodMayBeStatic
         def chdir(self, path: Path):
             os.chdir(path)
 
     yield ChDir()
     os.chdir(cwd)
+
+
+class WorkerAgentFactory:
+
+    def __init__(self):
+        self._agents: List[WorkerAgent] = []
+        self._procs: List[subprocess.Popen] = []
+
+    # noinspection PyProtectedMember
+    def create_worker_agent(self, port: int, authkey: bytes, separate_process: bool = False):
+        if separate_process:
+            proc = subprocess.Popen(f"{sys.executable} -m pytest_mproc.worker",
+                                    cwd=os.getcwd(),
+                                    env=os.environ,
+                                    stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE)
+            proc.stdin.write(authkey.hex().encode('utf-8') + b'\n')
+            proc.stdin.close()
+            port = int(proc.stdout.read())
+            agent = WorkerAgent.as_client(address=(my_ip, port), authkey=authkey)
+            self._agents.append(agent)
+            self._procs.append(proc)
+            return agent
+        else:
+            agent = WorkerAgent.as_server(address=(my_ip, port), authkey=authkey)
+            self._agents.append(agent)
+            return agent
+
+    def shutdown(self):
+        for agent in self._agents:
+            agent.shutdown()
+        for proc in self._procs:
+            with suppress(Exception):
+                proc.wait(timeout=5)
+            if proc.returncode is None:
+                proc.terminate()
+
+
+@pytest.fixture
+def worker_agent_factory() -> WorkerAgentFactory:
+    factory = WorkerAgentFactory()
+    yield factory
+    factory.shutdown()

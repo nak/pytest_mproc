@@ -17,7 +17,7 @@ from pytest_mproc.coordinator import Coordinator
 
 from pytest_mproc import get_auth_key, AsyncMPQueue, user_output
 from pytest_mproc.remote.data import Settings
-from pytest_mproc.data import ClientExited
+from pytest_mproc.data import WorkerExited
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
 from pytest_mproc.remote.bundle import Bundle
 from pytest_mproc.remote.ssh import SSHClient, remote_root_context
@@ -216,7 +216,7 @@ class RemoteSessionManager:
                     ssh_client.signal_sync(worker_pids, signal.SIGINT)
                     for worker_pid in worker_pids:
                         # this will attempt to reschedule test
-                        result = ClientExited(worker_pid, host, True)
+                        result = WorkerExited(worker_pid, host, True)
                         await results_q.put(result)
                     del self._worker_pids[host]
             await asyncio.sleep(POLLING_INTERVAL_HOST_VALIDATION)

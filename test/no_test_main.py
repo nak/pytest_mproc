@@ -13,8 +13,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from pytest_mproc import user_output
-from pytest_mproc.data import ClientExited, TestBatch, ResultExit
-from pytest_mproc.main import Orchestrator
+from pytest_mproc.data import WorkerExited, TestBatch, StatusTestsComplete
+from pytest_mproc.orchestration import Orchestrator
 from pytest_mproc.remote_sessions import RemoteSessionManager
 from pytest_mproc.orchestration import OrchestrationManager
 from pytest_mproc.ptmproc_data import ProjectConfig, RemoteWorkerConfig
@@ -124,7 +124,7 @@ def test_one():
         task = asyncio.create_task(go())
         r = await asyncio.wait_for(result_q.get(), timeout=20)
         while True:
-            assert r is None or type(r) in (ClientExited, ResultExit)
+            assert r is None or type(r) in (WorkerExited, StatusTestsComplete)
             if r is None:
                 try:
                     r = await asyncio.wait_for(result_q.get(), timeout=5)
@@ -153,7 +153,7 @@ async def test_populate_test_queue(project_config: ProjectConfig):
                 [TestBatch([f'test3.{n}' for n in range(100)], priority=5)] + \
                 [TestBatch([f'test{n}.1'], priority=1) for n in range(100)]
         try:
-            task = asyncio.create_task(orchestrator.populate_test_queue(tests=tests))
+            task = asyncio.create_task(orchestrator._populate_test_queue(tests=tests))
             test_batch = await asyncio.wait_for(orchestrator._test_q.get(), timeout=5)
             index = 0
             assert test_batch.test_ids == ['test1.1', 'test1.2']

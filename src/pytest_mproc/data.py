@@ -49,61 +49,6 @@ class ResourceUtilization:
 
 
 @dataclass
-class ResultException(Exception):
-    """
-    if a pytest exception occurred, hold info on that
-    """
-    # noinspection SpellCheckingInspection
-    excrepr: Exception
-
-
-@dataclass
-class ClientExited(Exception):
-    """
-    raise by a client when it dies or exits
-    """
-    pid: int
-    host: str
-    errored: bool = False
-    message: Optional[str] = None
-
-
-@dataclass
-class ResultTestStatus:
-    """
-    placed in results queue when test report is available
-    """
-    report: TestReport
-
-
-class TestStateEnum(Enum):
-    """
-    possible states of a test
-    """
-    STARTED = 1
-    FINISHED = 2
-    RETRY = 3
-
-
-@dataclass
-class TestState:
-    state: TestStateEnum
-    host: str
-    pid: int
-    test_id: str
-    test_batch: TestBatch
-
-
-@dataclass
-class ResultExit:
-    worker_id: str
-    test_count: int
-    status: int
-    duration: float
-    resource_utilization: ResourceUtilization
-
-
-@dataclass
 class GroupTag:
     """
     holder for group information (batch of tests)
@@ -117,18 +62,92 @@ class GroupTag:
 
 
 @dataclass
-class ReportStarted:
+class WorkerStarted:
+    worker_id : str
+    pid: int
+    host: str
+
+
+@dataclass
+class WorkerExited:
+    """
+    raise by a client when it dies or exits
+    """
+    worker_id: str
+    pid: int
+    host: str
+    errored: bool = False
+    message: Optional[str] = None
+
+
+@dataclass
+class AllWorkersDone:
+    pass
+
+
+class ClientException(Exception):
+    """
+    raised when client dies with exception
+    """
+    worker_id: str
+    exc: Exception
+
+
+@dataclass
+class WorkerStatus:
+    session_id: str
+    worker_id: str
+
+
+class TestStateEnum(Enum):
+    """
+    possible states of a test
+    """
+    STARTED = 1
+    FINISHED = 2
+    RETRY = 3
+
+
+@dataclass
+class StatusTestState:
+    state: TestStateEnum
+    host: str
+    pid: int
+    test_id: str
+    test_batch: TestBatch
+
+
+@dataclass
+class StatusTestsComplete(WorkerStatus):
+    test_count: int
+    status: int
+    duration: float
+    resource_utilization: ResourceUtilization
+
+
+StatusType = Union[StatusTestState, Exception, StatusTestsComplete]
+
+
+@dataclass
+class ReportActivity:
+    """
+    base class for report state changes (started/finished)
+    """
+
+
+@dataclass
+class ReportStarted(ReportActivity):
     nodeid: str
     location: str
 
 
 @dataclass
-class ReportFinished:
+class ReportFinished(ReportActivity):
     nodeid: str
     location: str
 
 
-ResultType = Union[TestState, ResultException, ResultExit, ResourceUtilization, ResultTestStatus]
+ReportUpdate = Union[ReportActivity, TestReport]
 
 
 def resource_utilization(time_span: float, start_rusage, end_rusage) -> "ResourceUtilization":
