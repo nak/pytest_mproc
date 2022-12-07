@@ -1,5 +1,0 @@
-#!/usr/bin/env python3
-import os
-
-for index in range(1000):
-    print(f"FINALIZE STEP {index} '{os.environ.get('WORKER_ID')}'")

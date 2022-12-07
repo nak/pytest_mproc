@@ -2,10 +2,8 @@ import asyncio
 import binascii
 import multiprocessing
 import os
-import secrets
-from dataclasses import dataclass
-from multiprocessing import JoinableQueue
-from multiprocessing.managers import BaseManager
+from pytest_mproc.mp import JoinableQueue, SharedJoinableQueue
+from multiprocessing.managers import BaseManager, SyncManager
 
 import resource
 import sys
@@ -32,43 +30,45 @@ from pytest_mproc.data import (
 )
 from pytest_mproc.data import StatusType
 from pytest_mproc.fixtures import Global
+from pytest_mproc.mp import SafeSerializable
 from pytest_mproc.user_output import debug_print, always_print
 from pytest_mproc.utils import BasicReporter
 
 
-__all__ = ["Orchestrator", "Config", "MainSession"]
+__all__ = ["Orchestrator", "MainSession"]
 
 from pytest_mproc.worker import WorkerAgent
 
 
-@dataclass
-class Config:
-    global_mgr_address: Optional[Tuple[str, int]] = None
-
-
-class Orchestrator(BaseManager):
+class Orchestrator(SafeSerializable):
     """
     class that acts as Main point of orchestration
     """
 
+    _mp_client: Optional[BaseManager] = None
+    _mp_server: Optional[BaseManager] = None
+    _registered: bool = False
+    _instances: Dict[int, "Orchestrator"] = {}
+
     # noinspection PyUnresolvedReferences
-    def __init__(self,
-                 address: Optional[Tuple[str, int]] = None, authkey: Optional[bytes] = None):
+    def __init__(self, port: Optional[int] = None):
         """
         :param address: address hosting this orchestrator agent, if distributed on multiple hosts
         """
         # for accumulating tests and exit status:
-        if address is not None:
-            super().__init__(address, authkey=authkey)
-            self._is_local = False
-        else:
-            self._is_local = True
-        self._authkey = authkey if authkey else secrets.token_bytes(64)
         self._worker_queues: Dict[str, JoinableQueue] = {}
         self._sessions: Dict[str, multiprocessing.Process] = {}
-        mp = multiprocessing.Manager()
-        self._status_q: JoinableQueue = mp.JoinableQueue()
-        self._test_q: JoinableQueue = mp.JoinableQueue()
+        self._session_queues: Dict[str, Tuple[JoinableQueue, JoinableQueue, JoinableQueue]] = {}
+        self._is_local = port is None
+        self._port = port
+        self.__class__._instances[port or 0] = self
+        self._global_mgr_address = None
+
+    @classmethod
+    def instance_at(cls, port: int) -> Optional["Orchestrator"]:
+        if port not in cls._instances:
+            cls._instances[port] = Orchestrator(port=port)
+        return cls._instances.get(port)
 
     @classmethod
     def as_local(cls) -> "Orchestrator":
@@ -77,66 +77,105 @@ class Orchestrator(BaseManager):
 
     @classmethod
     def as_client(cls, address: Tuple[str, int], authkey: bytes) -> "Orchestrator":
-        orchestrator = Orchestrator(address=address, authkey=authkey)
-        orchestrator.register("start_session", )
-        orchestrator.register("shutdown_session", )
-        orchestrator.register("start_worker", )
-        orchestrator.register("sessions", )
-        orchestrator.register("join_session", )
-        orchestrator.connect()
+        """
+        :return: a client proxy to an orchestrator, creating it if necessary (otherwise return singleton if
+        already created)
+        :param address: address to connect to
+        :param authkey: auth for connection
+        """
+        if cls._mp_client is None:
+            if not cls._registered:
+                SyncManager.register("Orchestrator",
+                                     exposed=['start_globals',
+                                              'start_session',
+                                              'shutdown_session',
+                                              'sessions',
+                                              'join_session',
+                                              'start_worker',
+                                              'shutdown']
+                                     )
+                SyncManager.register("JoinableQueue")
+                SyncManager.register("instance_at")
+
+            cls._mp_client = SyncManager(address=address, authkey=authkey)
+            cls._mp_client.connect()
+        # noinspection PyUnresolvedReferences
+        orchestrator = cls._mp_client.instance_at(address[1])
         return orchestrator
 
     @classmethod
     def as_server(cls, address: Tuple[str, int], authkey: bytes) -> "Orchestrator":
-        orchestrator = Orchestrator(address=address, authkey=authkey)
-        orchestrator.register("start_session", orchestrator.start_session)
-        orchestrator.register("shutdown_session", orchestrator.shutdown_session)
-        orchestrator.register("start_worker", orchestrator.start_worker)
-        orchestrator.register("sessions", orchestrator.sessions)
-        orchestrator.register("join_session", orchestrator.join_session)
-        orchestrator.start()
-        return orchestrator
+        """
+        :return: a server proxy to an orchestrator, creating it if necessary (otherwise return singleton if
+        already created)
+        :param address: address to serve from
+        :param authkey: auth for connection
+        """
+        host, port = address
+        if cls._mp_server is None:
+            if not cls._registered:
+                SyncManager.register("Orchestrator", Orchestrator, exposed=['start_globals',
+                                                                            'start_session',
+                                                                            'shutdown_session',
+                                                                            'sessions',
+                                                                            'join_session',
+                                                                            'start_worker',
+                                                                            'shutdown'])
+                SyncManager.register("JoinableQueue", JoinableQueue)
+                SyncManager.register("instance_at", Orchestrator.instance_at)
+            cls._mp_server = SyncManager(address=address, authkey=authkey)
+            cls._mp_server.start()
+        # noinspection PyUnresolvedReferences
+        return cls._mp_server.instance_at(port=port)
 
-    def start_globals(self, return_data: Config):
+    def start_globals(self) -> Tuple[str, int, str]:
         if self._is_local:
-            global_mgr_address = ('localhost', _find_free_port())
+            host, port = ('localhost', _find_free_port())
         else:
-            global_mgr_address = (_get_my_ip(), _find_free_port())
-        Global.Manager.as_server(address=global_mgr_address, auth_key=self._authkey)
-        return_data.global_mgr_address = global_mgr_address
+            host, port = (_get_my_ip(), _find_free_port())
+        # noinspection PyProtectedMember,PyUnresolvedReferences
+        authkey = self.__class__._mp_server._authkey if not self._is_local else None
+        Global.Manager.as_server(address=(host, port), auth_key=authkey)
+        self._global_mgr_address = (host, port)
+        return host, port, authkey.hex() if authkey else None
 
     def sessions(self) -> List[str]:
         return list(self._sessions.keys())
 
     def start_session(self,
                       session_id: str,
-                      report_q: JoinableQueue,
                       args: List[str],
-                      token: str,
-                      cwd: Path = Path(os.getcwd()),
-                      ) -> None:
+                      cwd: Path,
+                      ) -> JoinableQueue:
         """
         Conduct a test session
         :param session_id: unique session id associated with test session
         :param args: args to pass to pytest main
-        :param token: communication token
         :param cwd: where to run the session (where all workers will run from)
-        :param report_q: queue to pass reports back to overarching session
+        :returns: queue to pass reports back to overarching session
         """
-        assert self._test_q is not None
+        cls = self.__class__
+        # noinspection PyProtectedMember,PyUnresolvedReferences
+        authkey = cls._mp_server._authkey if not self._is_local else None
         if session_id in self._sessions:
-            raise ValueError(f"Session {session_id} already  actively exists")
+            raise ValueError(f"Session {session_id} already actively exists")
         # noinspection PyUnresolvedReferences
-        worker_q = multiprocessing.Manager().JoinableQueue()
+        worker_q = JoinableQueue()
         self._worker_queues[session_id] = worker_q
+        test_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
+        status_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
+        report_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
+        self._session_queues[session_id] = (test_q, status_q, report_q)
         proc = multiprocessing.Process(target=MainSession.launch,
-                                       args=(session_id, token, self._test_q, self._status_q, report_q,
+                                       args=(session_id, authkey, test_q, status_q, report_q,
                                              worker_q, args, cwd),
                                        )
-        proc.authkey = binascii.a2b_hex(token)
+        if authkey is not None:
+            proc.authkey = authkey
         proc.start()
-        debug_print(f"Main session started {token}")
+        debug_print(f"Main session {session_id} started")
         self._sessions[session_id] = proc
+        return report_q
 
     def join_session(self, session_id: str, timeout: Optional[float] = None) -> int:
         if session_id not in self._sessions:
@@ -147,8 +186,11 @@ class Orchestrator(BaseManager):
                 break
             time.sleep(0.5)
         self._sessions[session_id].join(timeout=timeout)
+        proc = self._sessions[session_id]
+        del self._sessions[session_id]
+        del self._session_queues[session_id]
         debug_print("Main session done")
-        return self._sessions[session_id].exitcode
+        return proc.exitcode
 
     def shutdown_session(self, session_id: str, timeout: Optional[float] = 10.0) -> Dict[str, int]:
         """
@@ -164,10 +206,8 @@ class Orchestrator(BaseManager):
                 self._worker_queues[session_id].put(None)
             self._worker_queues[session_id].close()
             del self._worker_queues[session_id]
-        self._test_q.join()
-        self._test_q.close()
-        self._status_q.join()
-        self._status_q.close()
+        if session_id in self._session_queues:
+            del self._session_queues[session_id]
         if session_id in self._sessions:
             proc = self._sessions[session_id]
             del self._sessions[session_id]
@@ -177,7 +217,9 @@ class Orchestrator(BaseManager):
             proc.join(timeout=timeout)
             if proc.exitcode is None:
                 proc.terminate()
-                always_print(f"Forcibly stopped main session")
+                while proc.is_alive():  # forces a call to poll() for proc
+                    time.sleep(0.1)
+                always_print(f"Forcibly stopped main session {session_id} [{proc.exitcode}]", as_error=True)
             return {'exitcode': proc.exitcode}
 
     def start_worker(self, session_id: str, worker_id: str, address: Optional[Tuple[str, int]] = None) -> None:
@@ -191,12 +233,19 @@ class Orchestrator(BaseManager):
             raise ValueError(f"No such session to start worker: {session_id}")
         session = self._sessions[session_id]
         worker_q = self._worker_queues[session_id]
-        debug_print(f"Orchestrator signalling start worker {worker_id} at {address} with token {session.authkey.hex()}")
-        worker_q.put((worker_id, address, session.authkey.hex()))
+        debug_print(f"Orchestrator signalling start worker {worker_id} at {address}")
+        worker_q.put((worker_id, address, self._global_mgr_address, session.authkey.hex()))
 
-    # to make mypy/type checking happy
-    JoinableQueue = JoinableQueue
-    Config = Config
+    def shutdown(self):
+        cls = self.__class__
+        if cls._mp_server is not None:
+            with suppress(Exception):
+                cls._mp_server.shutdown()
+        cls._mp_server = None
+        cls._mp_client = None
+        cls._registered = False
+        if self._port is not None:
+            del cls._instances[self._port]
 
 
 class MainSession:
@@ -207,12 +256,12 @@ class MainSession:
     _singleton: "MainSession" = None
 
     @staticmethod
-    def launch(session_id: str, token: str, test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
+    def launch(session_id: str, authkey: bytes, test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
                worker_q: JoinableQueue, args: List[str], cwd: Path) -> None:
         os.chdir(cwd)
         debug_print(f"Launched session {session_id}")
         with MainSession(session_id=session_id, test_q=test_q, status_q=status_q, report_q=report_q,
-                         worker_q=worker_q, args=args, authkey=binascii.a2b_hex(token)):
+                         worker_q=worker_q, args=args, authkey=authkey) as session:
             try:
                 if all([not arg.startswith("--log-file") for arg in args]):
                     args.append('--log-file=pytest_debug.log')
@@ -226,7 +275,16 @@ class MainSession:
                 msg = f"Main execution orchestration died with exit code {status}: {e} [{type(e)}]"
                 os.write(sys.stderr.fileno(), msg.encode('utf-8'))
                 status = -1
-        always_print(f">>>>>>>>>>>>>>>>>>> EXITING WITH STATUS {status} [{os.getpid()}]", as_error=True)
+            for agent in session._worker_agents.values():
+                agent.join_session(session_id=session_id, timeout=10)
+
+        report_q.join()
+        # status_q.join()
+        # test_q.join()
+        status_q.close()
+        test_q.close()
+        report_q.close()
+        debug_print(f"\nSession{session_id} exiting with status {status} [{os.getpid()}]")
         sys.exit(status)
 
     @classmethod
@@ -241,8 +299,8 @@ class MainSession:
         self._session_id = session_id
         self._test_q = AsyncMPQueue(test_q)
         self._status_q = AsyncMPQueue(status_q)
-        self._worker_q = worker_q
         self._report_q = AsyncMPQueue(report_q)
+        self._worker_q = worker_q
         self._pending: Dict[str, StatusTestState] = {}
         self._exit_results: List[StatusTestsComplete] = []
         self._count = 0
@@ -252,8 +310,6 @@ class MainSession:
         # for information output:
         self._reporter = BasicReporter()
         self._rusage = None
-        # self._test_q = AsyncMPQueue(wrapped_q=test_q)
-        # self._status_q = AsyncMPQueue(wrapped_q=status_q)
         self._active = False
         self._test_end_signalled = False
         self._all_workers_done = False
@@ -262,6 +318,7 @@ class MainSession:
         self._workers: Set[str] = set()
         self._pytest_args = args
         self._tests_remain = True
+        self._worker_agents = {}
 
     @staticmethod
     def _write_sep(s, txt):
@@ -405,7 +462,7 @@ class MainSession:
                     await self._process_worker_died(result_batch)
                 elif isinstance(result_batch, WorkerStarted):
                     self._workers.add(result_batch.worker_id)
-                    always_print(f"Worker {result_batch.worker_id} added {self._tests_remain}", as_error=True)
+                    debug_print(f"Worker {result_batch.worker_id} added {self._tests_remain}")
                     if not self._tests_remain:
                         await self._test_q.put(None)  # ensures new worker exits at right time
                 elif isinstance(result_batch, Exception):
@@ -470,12 +527,9 @@ class MainSession:
                 await self._test_q.put(None)
         except (EOFError, BrokenPipeError, ConnectionError, KeyboardInterrupt) as e:
             always_print(f"!!! Result processing interrupted;  stopping queue !!!: {e}")
-            self._test_q.close()
         except Exception as e:
             always_print(f"!!! Exception while populating tests; shutting down: {e} !!!")
-            self._test_q.close()
         else:
-            self._test_q.close()
             always_print(f"All tests have been queued for execution")
 
     # noinspection PyProtectedMember
@@ -519,31 +573,43 @@ class MainSession:
     def _poll_for_workers(self):
         debug_print("\nPolling for workers... ")
         worker_address_and_token = self._worker_q.get()
-        worker_agents = {}
+        debug_print(f"Got worker {worker_address_and_token}")
         while worker_address_and_token is not None:
             try:
-                worker_id, worker_address, authkey = worker_address_and_token
+                worker_id, worker_address, global_mgr_address, authkey = worker_address_and_token
                 real_address = worker_address or 'localhost'
                 debug_print(f"Got worker {worker_id}@{real_address}")
-                authkey = binascii.a2b_hex(authkey)
-                if real_address not in worker_agents:
+                if authkey is not None:
+                    authkey = binascii.a2b_hex(authkey)
+                if real_address not in self._worker_agents:
                     debug_print(f"Requesting worker at {worker_address}")
-                    agent = WorkerAgent.as_client(address=worker_address, authkey=authkey) \
-                        if worker_address is not None\
-                        else WorkerAgent.as_local()
-                    worker_agents[real_address] = agent
+                    retries = 3
+                    while True:
+                        try:
+                            agent = WorkerAgent.as_client(address=worker_address, authkey=authkey) \
+                                if worker_address is not None\
+                                else WorkerAgent.as_local()
+                            break
+                        except ConnectionError:
+                            retries -= 1
+                            if retries == 0:
+                                raise
+                            time.sleep(0.5)
+                    self._worker_agents[real_address] = agent
                     agent.start_session(session_id=self._session_id,
                                         test_q=self._test_q.raw(),
-                                        status_q=self._status_q.raw(), report_q=self._report_q.raw(),
+                                        status_q=self._status_q.raw(),
+                                        report_q=self._report_q.raw(),
                                         args=self._pytest_args,
                                         cwd=Path(os.getcwd()).absolute(),
-                                        token=self._authkey)
-                agent = worker_agents[real_address]
+                                        global_mgr_address=global_mgr_address,
+                                        token=self._authkey.hex() if self._authkey else None)
+                agent = self._worker_agents[real_address]
                 agent.start_worker(session_id=self._session_id, worker_id=worker_id)
                 worker_address_and_token = self._worker_q.get()
             except Exception as e:
-                always_print(f"ERROR: starting worker: {e}")
-                worker_address_and_token = None
+                import traceback
+                always_print(f"ERROR: starting worker: {e}\n{traceback.format_exception()}", as_error=True)
 
     async def run_loop(self, session, tests):
         """
@@ -581,13 +647,10 @@ class MainSession:
             debug_print("Exiting orchestration run loop.  Cleaning up...")
             self._active = False
             with suppress(Exception):
-                self._status_q.close()
-            with suppress(Exception):
                 # should never time out since workers are done
                 await asyncio.wait_for(populate_tests_task, timeout=1)
             with suppress(Exception):
                 if not self._all_workers_done:
-                    self._test_q.close()
                     always_print(f"Results loop exiting without receiving signal that all workers are done",
                                  as_error=True)
             with suppress(Exception):
@@ -617,13 +680,4 @@ class MainSession:
         """
         if self._worker_polling_proc and self._worker_polling_proc.is_alive():
             self._worker_polling_proc.kill()
-        with suppress(Exception):
-            self._test_q.close()
-        with suppress(Exception):
-            self._status_q.close()
         self._pending = {}
-
-
-# now really set them to what we want:
-Orchestrator.register("JoinableQueue", JoinableQueue)
-Orchestrator.register("Config", Config)

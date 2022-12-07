@@ -4,18 +4,19 @@ Top level definitions to start and stop sessions
 import asyncio
 import json
 import multiprocessing
+import os
 import sys
 import uuid
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
-from multiprocessing import JoinableQueue
+from pathlib import Path
 from typing import Dict, List, AsyncIterator, Tuple, Optional
 
 from _pytest.reports import TestReport
 
 from pytest_mproc import AsyncMPQueue
-from pytest_mproc.data import WorkerExited, ReportUpdate, ReportStarted, ReportFinished
-from pytest_mproc.orchestration import Orchestrator, Config
+from pytest_mproc.data import WorkerExited, ReportStarted, ReportFinished
+from pytest_mproc.orchestration import Orchestrator
 from pytest_mproc.user_output import debug_print
 
 
@@ -98,11 +99,11 @@ class Session:
         self._authkey = orchestrator_authkey
         self._orchestrator_address = orchestrator_address
         self._is_local = orchestrator_address is None
+        # noinspection PyTypeChecker
         self._orchestrator = Orchestrator.as_local() if self._is_local \
             else Orchestrator.as_client(self._orchestrator_address, orchestrator_authkey)
         self._mp = multiprocessing.Manager() if not self._is_local else None
-        self._report_q: AsyncMPQueue[ReportUpdate] = AsyncMPQueue(self._mp.JoinableQueue()) if not self._is_local \
-            else AsyncMPQueue(JoinableQueue())
+        self._report_q: Optional[AsyncMPQueue] = None
         self._global_mgr_address: Optional[Tuple[str, int]] = None
         self._session_id = self._new_session_id()
         self._worker_nodes: Dict[str, Optional[RemoteWorkerNode]] = {}
@@ -124,14 +125,11 @@ class Session:
         :param worker_count: how many workers to invoke
         :param addl_args: additional arguments to pass to pytest common to all workers (add'l to sys.argv)
         """
-        global_info = Config()
         args = sys.argv[1:] + addl_args
-        self._orchestrator.start_globals(return_data=global_info)
-        self._global_mgr_address = global_info.global_mgr_address
-        self._orchestrator.start_session(session_id=self._session_id,
-                                         report_q=self._report_q.raw(),
-                                         args=args,
-                                         )
+        host, port, authkey = self._orchestrator.start_globals()
+        self._global_mgr_address = (host, port)
+        report_q = self._orchestrator.start_session(session_id=self._session_id, args=args, cwd=Path(os.getcwd()))
+        self._report_q = AsyncMPQueue(report_q)
         if self._resource_mgr is not None:
             async for node in self._resource_mgr.reserve(worker_count):
                 if node.resource_id in self._worker_nodes:

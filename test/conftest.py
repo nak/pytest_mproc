@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 import pytest_mproc.fixtures
+from pytest_mproc.orchestration import Orchestrator, MainSession
 from pytest_mproc.worker import WorkerAgent
 
 if os.path.exists("../src/pytest_mproc"):
@@ -15,6 +16,7 @@ if os.path.exists("../src/pytest_mproc"):
 import multiprocessing
 import pytest
 from pytest_mproc.plugin import TmpDirFactory
+from pytest_mproc.fixtures import Global, Node
 
 
 my_ip = pytest_mproc._get_my_ip()
@@ -37,48 +39,6 @@ def get_ip_addr():
         return socket.gethostbyname(hostname)
     except Exception:
         return None
-
-
-@pytest_mproc.fixtures.global_fixture()
-def dummy():
-    return [None]
-
-
-@pytest_mproc.fixtures.node_fixture()
-def queue_fixture():
-    # cannot be shared at global level, so must be node-scoped
-    # (will raise  mnultiprocessing.context.AuthenticationError: digest sent was rejected
-    #  when sharing queue across machines)
-    global _node_tmpdir
-    m = multiprocessing.Manager()
-    return m.Queue()
-
-
-class V:
-    value = 41
-
-
-class GlobalV:
-    value = 41
-
-
-# noinspection PyUnusedLocal,PyShadowingNames
-@pytest_mproc.fixtures.global_fixture()
-def global_fix(dummy):
-    GlobalV.value += 1
-    # we will assert the fixture is 42 in tests and never increases, as this should only be called once
-    return GlobalV.value
-
-
-@pytest_mproc.fixtures.node_fixture()
-@pytest_mproc.group(pytest_mproc.GroupTag(name='node_fixture',
-                                          restrict_to=pytest_mproc.data.TestExecutionConstraint.SINGLE_NODE))
-def node_level_fixture(mp_tmp_dir_factory: TmpDirFactory):
-    # noinspection PyProtectedMember
-    _node_tmpdir_ = mp_tmp_dir_factory._root_tmp_dir
-    assert os.path.exists(_node_tmpdir_)
-    V.value += 1
-    return V.value  # we will assert the fixture is 42 in tests and never increases, as this should only be called once
 
 
 @pytest.mark.trylast
@@ -143,3 +103,41 @@ def worker_agent_factory() -> WorkerAgentFactory:
     factory = WorkerAgentFactory()
     yield factory
     factory.shutdown()
+
+
+shielded = False
+
+
+@pytest.fixture
+def shield():
+    """
+    we are testing pytest_mproc and run pytest.main against resources/project_tests in some cases.  When doing this,
+    we must shield the cleanup fixture from running against those tsts since they may pick up this contest.py file
+    """
+    global shielded
+    shielded = True
+    yield
+    shielded = False
+
+
+@pytest.fixture(autouse=True)
+def cleanup():
+    global shielded
+    yield
+
+    if not shielded:
+        Orchestrator._mp_server = None
+        Orchestrator._mp_client = None
+        Orchestrator._registered = False
+        Orchestrator._instances = {}
+        MainSession._singleton = None
+        WorkerAgent._mp_server = None
+        WorkerAgent._mp_client = None
+        WorkerAgent._registered = False
+        WorkerAgent._sessions = {}
+        WorkerAgent._instances = {}
+        WorkerAgent._node_mgrs = {}
+        if Global.Manager.singleton():
+            Global.Manager.singleton().stop()
+        if Node.Manager._singleton:
+            Node.Manager._singleton.stop()

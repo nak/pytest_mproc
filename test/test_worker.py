@@ -11,6 +11,7 @@ from _pytest.reports import TestReport
 from pytest_mproc import _find_free_port
 from pytest_mproc.data import TestBatch, StatusTestState, TestStateEnum, WorkerExited
 from pytest_mproc.fixtures import Global
+from pytest_mproc.user_output import always_print
 from pytest_mproc.worker import WorkerSession, WorkerAgent
 
 WORKER_TEST_DIR = Path(__file__).parent / "resources" / "project_tests"
@@ -68,6 +69,11 @@ def test_test_loop():
         assert set(states[TestStateEnum.STARTED].keys()) == set(states[TestStateEnum.FINISHED].keys())
         assert set(states[TestStateEnum.STARTED].keys()) == {str(m) for m in range(100)}
 
+    def mock_report_q_pull(report_q: JoinableQueue):
+        report = report_q.get()
+        while report is not None:
+            report = report_q.get()
+
     def mock_pytest_runtest_protocol(*args, **kwargs):
         item = kwargs['item']
         items_ran[item.nodeid] = kwargs['item']
@@ -105,10 +111,14 @@ def test_test_loop():
     populate_proc.start()
     pull_proc = multiprocessing.Process(target=mock_status_q_pull, args=(status_q, ))
     pull_proc.start()
+    report_pull_proc = multiprocessing.Process(target=mock_report_q_pull, args=(report_q,))
+    report_pull_proc.start()
     session.test_loop(pytest_session)
     status_q.put(None)
+    report_q.put(None)
     populate_proc.join(timeout=1)
     pull_proc.join(timeout=10)
+    report_pull_proc.join(timeout=1)
     assert populate_proc.exitcode == 0
     assert pull_proc.exitcode == 0
 
@@ -130,13 +140,20 @@ def test_system_worker_e2e():
     session_id = "Session1"
 
     def external_process(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue):
+        import sys
+        for path in sys.path.copy():
+            if Path(path).absolute() == Path(__file__).parent.absolute():
+                sys.path.remove(path)
+            if Path(path).absolute() == Path(__file__).parent.parent.absolute():
+                sys.path.remove(path)
+        os.environ['PYTHONPATH'] = str(Path(__file__).parent.parent / 'src')
+        always_print(f">>>>>>>>>>>>>>>>>> S{str(Path(__file__).parent)}")
         agent_client = WorkerAgent.as_client(address=('localhost', agent_port), authkey=agent_authkey)
         agent_client.start_session(session_id=session_id,
                                    test_q=test_q, status_q=status_q, report_q=report_q,
                                    global_mgr_address=('localhost', global_mgr_port),
-                                   args=['-s', '--cores', '2'],
-                                   cwd=Path(os.getcwd()),
-                                   token=authkey)
+                                   args=['-s', '--cores', '2', f'--ignore={str(Path(__file__).parent)}'],
+                                   cwd=Path(os.getcwd()),)
         agent_client.start_worker(session_id=session_id, worker_id="Worker-1")
 
     proc = multiprocessing.Process(
@@ -149,7 +166,7 @@ def test_system_worker_e2e():
         test_q.put(batch)
         test_q.put(None)
         while True:
-            status = status_q.get(timeout=1)
+            status = status_q.get(timeout=5)
             status_q.task_done()
             if isinstance(status, list):
                 for stat in status:

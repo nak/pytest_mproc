@@ -2,6 +2,7 @@ import asyncio
 import multiprocessing
 import os
 import secrets
+import threading
 import time
 from multiprocessing import JoinableQueue
 from typing import List, AsyncIterator
@@ -12,6 +13,7 @@ from _pytest.reports import TestReport
 
 from pytest_mproc import _find_free_port
 from pytest_mproc.data import ReportStarted, ReportFinished, WorkerExited
+from pytest_mproc.mp import SharedJoinableQueue
 from pytest_mproc.orchestration import Orchestrator
 from pytest_mproc.session import Session, ResourceManager, RemoteWorkerNode
 
@@ -43,7 +45,7 @@ async def test_process_reports(hook):
 
         def mock_launch(session_id: str, token: str, test_q: JoinableQueue, status_q: JoinableQueue,
                         report_q: JoinableQueue,
-                        worker_q: JoinableQueue, args: List[str]):
+                        worker_q: JoinableQueue, args: List[str], cwd):
             worker = worker_q.get()
             while worker is not None:
                 time.sleep(1)
@@ -77,8 +79,6 @@ async def test_process_reports(hook):
             assert hook.finished == [f'node-{i}' for i in range(99)]
             assert hook.reported == [f'node-{i}' for i in range(99)]
 
-report_q_dict = {}
-
 
 @pytest.mark.asyncio
 async def test_process_reports_nonlocal(hook):
@@ -100,31 +100,33 @@ async def test_process_reports_nonlocal(hook):
 
     def mock_launch(session_id: str, token: str, test_q: JoinableQueue, status_q: JoinableQueue,
                     report_q: JoinableQueue,
-                    worker_q: JoinableQueue, args: List[str]):
+                    worker_q: JoinableQueue, args: List[str], cwd):
         worker = worker_q.get()
         while worker is not None:
-            time.sleep(1)
+            start_worker(report_q, session_id, worker[0], None)
+            time.sleep(0.2)
             worker = worker_q.get()
 
     nodeids = {f'Worker-resource_{index}': [
         f'node-{j + index * 8}' for j in range(8)
     ] for index in range(14)}
 
-    def mock_start_worker(self, session_id: str, worker_id: str, address):
-        report_q = report_q_dict.get('q')
+    def start_worker(report_q, session_id: str, worker_id: str, address):
         assert worker_id in [f'Worker-resource_{i}' for i in range(14)]
 
-        async def worker():
+        def worker():
             nonlocal nodeids
             for nodeid in nodeids[worker_id]:
-                await report_q.put(ReportStarted(nodeid=nodeid, location="here"))
-                await report_q.put(TestReport(nodeid=nodeid, location=("there", None, ""),
-                                              longrepr="", when='call', keywords={},
-                                              outcome='passed'))
-                await report_q.put(ReportFinished(nodeid=nodeid, location="here"))
-            await report_q.put(WorkerExited(worker_id=worker_id,
+                report_q.put(ReportStarted(nodeid=nodeid, location="here"))
+                report_q.put(TestReport(nodeid=nodeid, location=("there", None, ""),
+                                                    longrepr="", when='call', keywords={},
+                                                    outcome='passed'))
+                report_q.put(ReportFinished(nodeid=nodeid, location="here"))
+            report_q.put(WorkerExited(worker_id=worker_id,
                                             pid=os.getpid(), host='localhost'))
-        asyncio.create_task(worker())
+
+        thread = threading.Thread(target=worker)
+        thread.start()
 
     authkey = secrets.token_bytes(64)
     resource_mgr = ResourceMgr()
@@ -134,14 +136,11 @@ async def test_process_reports_nonlocal(hook):
         try:
             with Session(resource_mgr=resource_mgr, orchestrator_address=('localhost', port),
                          orchestrator_authkey=authkey) as session:
-                report_q_dict['q'] = session._report_q
-                with patch("pytest_mproc.orchestration.Orchestrator.start_worker", mock_start_worker):
-                    print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! {report_q_dict}")
-                    await session.start(worker_count=14, addl_args=[])
-                    await session.process_reports(hook)
-                    assert set(hook.started) == {f'node-{i}' for i in range(112)}, "Not all tests started"
-                    assert set(hook.finished) == {f'node-{i}' for i in range(112)}, "Not all tests finished"
-                    assert set(hook.reported) == {f'node-{i}' for i in range(112)}, "Not all tests reported"
+                await session.start(worker_count=14, addl_args=[])
+                await session.process_reports(hook)
+                assert set(hook.started) == {f'node-{i}' for i in range(112)}, "Not all tests started"
+                assert set(hook.finished) == {f'node-{i}' for i in range(112)}, "Not all tests finished"
+                assert set(hook.reported) == {f'node-{i}' for i in range(112)}, "Not all tests reported"
 
         finally:
             orchestrator_srvr.shutdown()
