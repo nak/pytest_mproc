@@ -149,8 +149,10 @@ class WorkerSession:
                     # count tests that have been run
                     self._count += 1
                     self._last_execution_time = time.time()
-        except (EOFError, ConnectionError, BrokenPipeError, KeyboardInterrupt) as e:
-            always_print(f"{self._name} terminating, testing queue closed unexpectedly")
+        except KeyboardInterrupt:
+            raise
+        except (EOFError, ConnectionError, BrokenPipeError) as e:
+            always_print(f"{self._name} terminating, test queue closed unexpectedly")
             if isinstance(e, KeyboardInterrupt):
                 raise
         finally:
@@ -291,12 +293,13 @@ class WorkerAgent(SafeSerializable):
         if address is not None:
             if authkey is None:
                 raise RuntimeError(f"Must supply authkey when address is not None")
-        self._node_mgr: Optional[Node.Manager] = None
+        self._node_mgr: Dict[str, Node.Manager] = {}
         self._sessions: Dict[str, "WorkerAgent.TestSession"] = {}
         self._port = address[1] if address else None
 
     @classmethod
     def as_server(cls, address: Tuple[str, int], authkey: bytes) -> "WorkerAgent":
+        debug_print(f"worker agent as server: {address} {cls._mp_server} {cls._registered}")
         if cls._mp_server is None:
             if not cls._registered:
                 SyncManager.register(
@@ -308,6 +311,7 @@ class WorkerAgent(SafeSerializable):
                 cls._registered = True
             cls._mp_server = SyncManager(address, authkey)
             cls._mp_server.start()
+            debug_print(f"Started worker agent server at {address} {cls._mp_server._state.value}")
         # noinspection PyUnresolvedReferences
         return cls._mp_server.worker_agent_at(address=address, authkey=authkey.hex())
 
@@ -317,11 +321,13 @@ class WorkerAgent(SafeSerializable):
             authkey = binascii.a2b_hex(authkey)
             cls._instances[address[0]] = WorkerAgent(address=address, authkey=authkey)
         elif address[1] != cls._instances[address[0]]._port:
-            raise RuntimeError(f"A worker agent is already running on port {cls._instances[address[0]]._port}")
+            raise RuntimeError(f"A worker agent is running on port {cls._instances[address[0]]._port}, "
+                               f"but requested connection on port {address[1]}")
         return cls._instances[address[0]]
 
     @classmethod
     def as_client(cls, address: Tuple[str, int], authkey: bytes) -> "WorkerAgent":
+        debug_print(f"Worker agent client at {address} {cls._mp_client} {cls._registered}")
         if cls._mp_client is None:
             if not cls._registered:
                 SyncManager.register(
@@ -331,10 +337,21 @@ class WorkerAgent(SafeSerializable):
                 SyncManager.register('worker_agent_at',)
                 SyncManager.register('shutdown_agent',)
                 cls._registered = True
+            debug_print(f"Connecting worker client at {address}...")
             cls._mp_client = SyncManager(address=address, authkey=authkey)
-            cls._mp_client.connect()
+            try:
+                cls._mp_client.connect()
+            except ConnectionError:
+                cls._mp_client = None
+                raise
+            debug_print("Conneted worker agent client")
         # noinspection PyUnresolvedReferences
         return cls._mp_client.worker_agent_at(address, authkey.hex())
+
+    @classmethod
+    def join(cls):
+        always_print(f">>>>>>>>>>>>>>>>>>> JOINING {cls._mp_server._state.value}")
+        return cls._mp_server.join()
 
     @classmethod
     def as_local(cls):
@@ -345,12 +362,12 @@ class WorkerAgent(SafeSerializable):
                       global_mgr_address: Optional[Tuple[str, int]] = None):
         if session_id in self._sessions:
             raise KeyError(f"Worker TestSession '{session_id}' already exists")
-        node_mgr_port = _find_free_port()
         authkey = binascii.a2b_hex(token) if token is not None else None
+        node_mgr_port = _find_free_port()
         self._sessions[session_id] =\
             self.__class__.TestSession(test_q, status_q, report_q, global_mgr_address, node_mgr_port,
                                        args, {}, cwd=cwd, authkey=authkey)
-        self._node_mgr = Node.Manager.singleton(node_mgr_port, authkey)
+        self._node_mgr[session_id] = Node.Manager.as_server(node_mgr_port, authkey)
         debug_print(f"Started worker-session under {session_id} port {node_mgr_port}")
 
     def start_worker(self, session_id: str, worker_id: str):
@@ -397,17 +414,20 @@ class WorkerAgent(SafeSerializable):
         :param timeout: optional timeout value for waiting on a worker, after which the worker will be terminated
             explicitly
         """
+        debug_print(f"Worker agent shutting down session {session_id}")
         test_session = self._sessions.get(session_id)
-        if self._node_mgr:
+        if self._node_mgr.get(session_id):
             with suppress(Exception):
-                self._node_mgr.shutdown()
-            self._node_mgr = None
+                self._node_mgr[session_id].stop()
+            del self._node_mgr[session_id]
         if test_session:
             for worker_id, worker in test_session.worker_procs.items():
+                debug_print(f"Waiting for {worker_id} to terminate...")
                 worker.join(timeout)
                 if worker.exitcode is None:
                     worker.terminate()
                     always_print(f"Terminated worker {worker_id} abruptly", as_error=True)
+
             test_session.worker_procs = {}
             del self._sessions[session_id]
 
@@ -419,18 +439,18 @@ class WorkerAgent(SafeSerializable):
 
 
 def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue, cwd: Path,
-         args: List[str], session_id: str, worker_id: str, token: bytes,
+         args: List[str], session_id: str, worker_id: str, authkey: bytes,
          global_mgr_address: Optional[Tuple[str, int]] = None, node_mgr_port: Optional[int] = None):
     from pytest_mproc import plugin  # ensures auth_key is set
     os.chdir(cwd)
     status_q.put(WorkerStarted(worker_id, os.getpid(), _get_my_ip()))
     assert plugin  # to prevent flake8 unused import
     if global_mgr_address:
-        Global.Manager.as_client(global_mgr_address, auth_key=token)
+        Global.Manager.as_client(global_mgr_address, auth_key=authkey)
     if node_mgr_port:
-        Node.Manager.singleton(node_mgr_port=node_mgr_port, authkey=token)
+        node_mgr_client = Node.Manager.as_client(port=node_mgr_port, authkey=authkey)
     # noinspection PyUnresolvedReferences
-    from pytest_mproc.worker import WorkerSession  # to make Python happy
+    # from pytest_mproc.worker import WorkerSession  # to make Python happy
     worker = WorkerSession(session_id=session_id,
                            worker_id=worker_id,
                            test_q=test_q,
@@ -438,7 +458,6 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
                            report_q=report_q,
                            )
     WorkerSession.set_singleton(worker)
-    assert WorkerSession.singleton() is not None
     status = None
     # noinspection PyBroadException
     has_error = False
@@ -473,12 +492,17 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
 
 if __name__ == "__main__":
     port = _find_free_port()
-    authkey_ = sys.stdin.read()
+    print(">>>>>>>>>>>> READING FROM STDIN")
+    authkey_ = sys.stdin.readline()
     sys.stdin.close()
-    authkey_ = binascii.a2b_hex(authkey_)
+    print(f">>>>>>>>>>>> READ {authkey_}")
+    authkey_ = binascii.a2b_hex(authkey_.strip())
+    print(f">>>>>>>>>>>> READ {authkey_}")
     agent_ = WorkerAgent.as_server(address=(_get_my_ip(), port), authkey=authkey_)
-    sys.stdout.write(str(port))
-    sys.stdout.close()
+    sys.stderr.write(str(port) + '\n')
+    sys.stderr.close()
     # serve until agent is shut down explicitly:
     # noinspection PyUnresolvedReferences
-    agent_.join()
+    print("JOINING AGENT...")
+    WorkerAgent.join()
+    print("ENDING WORKER AGENT")

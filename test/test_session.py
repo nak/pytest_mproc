@@ -15,7 +15,8 @@ from pytest_mproc import _find_free_port
 from pytest_mproc.data import ReportStarted, ReportFinished, WorkerExited
 from pytest_mproc.mp import SharedJoinableQueue
 from pytest_mproc.orchestration import Orchestrator
-from pytest_mproc.session import Session, ResourceManager, RemoteWorkerNode
+from pytest_mproc.session import Session
+from pytest_mproc.resourcing import ResourceManager, RemoteWorkerNode
 
 
 class MockHook:
@@ -135,7 +136,7 @@ async def test_process_reports_nonlocal(hook):
         orchestrator_srvr = Orchestrator.as_server(address=('localhost', port), authkey=authkey)
         try:
             with Session(resource_mgr=resource_mgr, orchestrator_address=('localhost', port),
-                         orchestrator_authkey=authkey) as session:
+                         authkey=authkey) as session:
                 await session.start(worker_count=14, addl_args=[])
                 await session.process_reports(hook)
                 assert set(hook.started) == {f'node-{i}' for i in range(112)}, "Not all tests started"

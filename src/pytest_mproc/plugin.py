@@ -3,11 +3,14 @@ This file contains some standard pytest_* plugin hooks to implement multiprocess
 """
 import asyncio
 import os
+import secrets
 import sys
+import threading
 
 import _pytest.terminal
 
-from pytest_mproc.user_output import debug_print
+from pytest_mproc.session import Session
+from pytest_mproc.resourcing import ResourceManager
 from pytest_mproc.worker import WorkerSession
 
 from pytest_mproc import user_output, Constants
@@ -25,7 +28,7 @@ from typing import Callable, Optional, Union, Type
 import pytest
 import socket
 
-from multiprocessing import cpu_count, JoinableQueue
+from multiprocessing import cpu_count
 from pytest_mproc.utils import is_degraded, BasicReporter
 
 
@@ -124,6 +127,23 @@ def pytest_addoption(parser):
         typ=bool,
         help_text="output messages when connecting and executing tasks"
     )
+    _add_option(
+        group,
+        '--distributed',
+        dest="mproc_distributed_uri",
+        action="store",
+        typ=bool,
+        help_text="provide a uri-like string to execute distributed: <protocol>://[<orchestrator-host:port>]"
+    )
+    if '--distributed' in sys.argv:
+        _add_option(
+            group,
+            '--orchestrator',
+            dest='mproc_orch_address',
+            action='store',
+            typ=str,
+            help_text="host:port of remote orchestration agent (local orchestration on same host as session otherwise)"
+        )
 
 
 def pytest_cmdline_main(config):
@@ -136,6 +156,8 @@ def pytest_cmdline_main(config):
     user_output.is_verbose = config.getoption("mproc_verbose", default=False)
     is_worker = WorkerSession.singleton() is not None
     is_orchestrator = MainSession.singleton() is not None
+    uri = config.getoption('mproc_distributed_uri', default=None)
+    is_distributed = uri is not None
     if mproc_num_cores is None or is_degraded() or mproc_disabled:
         if is_orchestrator:
             raise pytest.UsageError(
@@ -159,6 +181,8 @@ def pytest_cmdline_main(config):
         return mproc_pytest_cmdline_worker(config)
     elif is_orchestrator:
         return mproc_pytest_cmdline_orchestrator(config)
+    elif is_distributed or mproc_num_cores is not None:
+        return mproc_pytest_cmdline_session(config, uri)
     else:
         # Running locally on local host only:
         return mproc_pytest_cmdline_main_local(config, mproc_num_cores)
@@ -174,11 +198,38 @@ def mproc_pytest_cmdline_main_local(config, num_cores: int) -> None:
     reporter.write(f"Running locally as main\n", green=True)
     orchestrator = Orchestrator.as_local()
     config.orchestrator = orchestrator
-    report_q = JoinableQueue()
-    orchestrator.start_session(session_id="LocalSession", cwd=Path(os.getcwd()), report_q=report_q, args=sys.argv[1:])
+    config.report_q = orchestrator.start_session(session_id="LocalSession", cwd=Path(os.getcwd()), args=sys.argv[1:])
     for index in range(num_cores):
         worker_id = f"Worker-{index}"
         orchestrator.start_worker(session_id="LocalSession", worker_id=worker_id)
+
+
+# noinspection PyUnusedLocal
+def mproc_pytest_cmdline_session(config, uri: Optional[str]):
+    orchestrator_address = config.getoption("mproc_orch_address", default=None)
+    if orchestrator_address:
+        host, port_img = orchestrator_address.split(':')
+        address = (host, int(port_img))
+    else:
+        address = None
+        authkey = None
+    if uri is None or ':' not in uri or uri.endswith('://'):
+        protocol = uri
+        resource_mgr = None
+    else:
+        try:
+            protocol, path_and_query = uri.split("://", maxsplit=1)
+            resource_mgr_clazz = ResourceManager.implementation(protocol)
+            if resource_mgr_clazz is None:
+                raise pytest.UsageError(f"No such protocol registered: {protocol} (from uri {uri} on cmd line)")
+        except ValueError:
+            raise pytest.UsageError(
+                f"Invalid uri format for --distributed option ({uri})."
+                "The URI should be in the form <protocol>://[path_and_query_string]"
+            )
+        resource_mgr = resource_mgr_clazz(path_and_query)
+    config.ptmproc_session = Session(resource_mgr=resource_mgr, orchestrator_address=address,
+                                     authkey=authkey)
 
 
 # noinspection PyUnusedLocal
@@ -198,10 +249,31 @@ def pytest_sessionstart(session):
 def pytest_configure(config):
     # if config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
     #    return
+
     is_worker = WorkerSession.singleton() is not None
-    if not is_worker and (config.getoption('mproc_num_cores', default=None) is None
+    is_orchestrator = MainSession.singleton() is not None
+    is_distributed = config.getoption('mproc_distributed_uri', default=None) is not None
+    mproc_num_cores = config.getoption("mproc_numcores", default=None)
+
+    if not is_worker and ((mproc_num_cores is None)
        or config.getoption("mproc_disabled", default=False)):
         return
+    elif not is_worker and not is_orchestrator and (is_distributed or (mproc_num_cores is not None)):
+        session: Session = config.ptmproc_session
+
+        def reserve():
+            async def main():
+                args = sys.argv[1:].copy()
+                for index, arg in enumerate(args.copy()):
+                    if arg == '--distributed':
+                        args.remove(args[index + 1])
+                        args.remove(arg)
+                await session.start(mproc_num_cores, addl_args=args)
+            asyncio.run(main())
+
+        config.reservation_thread = threading.Thread(target=reserve)
+        config.reservation_thread.start()
+        session.wait_on_start()
     # tell xdist not to run, (and BTW setting num_cores is enough to tell pycov we are distributed)
     config.option.dist = "no"
 
@@ -239,7 +311,8 @@ def _process_fixtures(session, reporter, item):
 def pytest_runtestloop(session):
     is_worker = WorkerSession.singleton() is not None
     is_orchestrator = MainSession.singleton() is not None
-    debug_print(f"In run loop;  worker? {is_worker}; orchestrator? {is_orchestrator}")
+    is_distributed = session.config.getoption('mproc_distributed_uri', default=None) is not None
+    mproc_num_cores = session.config.getoption("mproc_numcores", default=None)
     if session.config.option.collectonly:
         return
     if len(session.items) == 0:
@@ -278,6 +351,9 @@ def pytest_runtestloop(session):
             finally:
                 MainSession.singleton().shutdown()
         asyncio.run(loop())
+    elif is_distributed or (mproc_num_cores is not None):
+        mproc_session: Session = session.config.ptmproc_session
+        asyncio.run(mproc_session.process_reports(hook=session.config.hook))
     return True
 
 
@@ -324,6 +400,9 @@ def pytest_runtest_logfinish(nodeid, location):
 # noinspection PyUnusedLocal,SpellCheckingInspection
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    is_worker = WorkerSession.singleton() is not None
+    is_orchestrator = MainSession.singleton() is not None
+    print(f">>>>>>>>>>>>>> TERM SUMMARY CALLED {exitstatus} {is_orchestrator} {is_worker}")
     verbose = config.getoption("mproc_verbose", default=False)
     is_worker = WorkerSession.singleton() is not None
     if is_worker:
@@ -358,6 +437,26 @@ def pytest_sessionstart(session) -> None:
     yield
     session.config.option.verbose = verbose
 
+
+def pytest_sessionfinish(session):
+    is_worker = WorkerSession.singleton() is not None
+    is_orchestrator = MainSession.singleton() is not None
+    uri = session.config.getoption('mproc_distributed_uri', default=None)
+    is_distributed = uri is not None
+    num_cores = session.config.getoption("mproc_numcores", default=None)
+
+    if MainSession.singleton():
+        with suppress(Exception):
+            MainSession.singleton().shutdown()
+    if hasattr(session.config, 'ptmproc_session'):
+        try:
+            status = session.config.ptmproc_session.shutdown()
+            print(f">>>>>>>>>> !!!!!!!!!!!!! STAT SESS {status}")
+        except Exception:
+            status = -1
+        if status != 0:
+            raise SystemExit(status)
+    print(f">>>>>>>>>???????????  PYTEST FINISH CALLED {is_worker} {is_orchestrator}")
 
 ################
 # Process-safe temp dir

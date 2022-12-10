@@ -1,6 +1,7 @@
 import inspect
 import functools
 import logging
+import os
 from contextlib import suppress
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
@@ -44,9 +45,9 @@ class FixtureManager(BaseManager):
     def connect(self):
         self.__class__.register("get_fixture")
         self.__class__.register("put_fixture")
-        debug_print(f"Connecting {self.__class__.__qualname__} server {self.address}...")
+        debug_print(f"Connecting {self.__class__.__qualname__} {self.address}... [{os.getpid()}]")
         super().connect()
-        debug_print(f"Connected {self.__class__.__qualname__} server.")
+        debug_print(f"Connected {self.__class__.__qualname__}.")
 
     def _put_fixture(self, name: str, value: Any) -> None:
         self._fixtures[name] = value
@@ -62,52 +63,41 @@ class Node:
 
     class Manager(FixtureManager):
 
-        _singleton: Optional["Node.Manager"] = None
         _port: int = 0
 
-        def __init__(self, as_main: bool,  authkey: bytes, port: int = 0, name: str = "Node.Manager"):
-            if self.__class__._port == 0:
-                raise ValueError("Request for Node.Manager singleton but none instantiated")
+        def __init__(self, port: int, authkey: bytes, name: str = "Node.Manager"):
             super().__init__(("127.0.0.1", port), authkey)
-            if not as_main:
-                debug_print(f"Connected [{name}]")
-            self._is_serving = as_main
-            self._port = port
-
-        @property
-        def port(self):
-            return self._port
 
         @classmethod
-        def singleton(cls, node_mgr_port: int = 0, authkey: Optional[bytes] = None) -> "Node.Manager":
-            if cls._port != 0 and node_mgr_port != cls._port:
-                raise ValueError(f"Inconsistent port provided, not matching previous: {cls._port} != {node_mgr_port}")
-            if cls._singleton:
-                return cls._singleton
-            cls._port = node_mgr_port
-            # noinspection PyBroadException
-            try:
-                cls._singleton = cls(as_main=False, port=cls._port, authkey=authkey)
-                cls._singleton.connect()
-            except (OSError, EOFError):
-                if cls._port == 0:
-                    raise ValueError("Request for Node.Manager singleton but none instantiated")
-                debug_print(f"Looks like no node manager already running, starting ...")
-                cls._singleton = cls(as_main=True, port=cls._port, authkey=authkey)
-                cls._singleton.start()
-            except Exception as e:
-                raise SystemError(f"FAILED TO START NODE MANAGER") from e
-            return cls._singleton
+        def port(cls):
+            return cls._port
+
+        @classmethod
+        def as_server(cls, port: int, authkey: bytes) -> "Node.Manager":
+            instance = cls(port=port, authkey=authkey)
+            instance.start()
+            assert cls._port == 0
+            cls._port = port
+            return instance
+
+        @classmethod
+        def as_client(cls, port: int, authkey: Optional[bytes] = None) -> "Node.Manager":
+            assert cls._port != 0
+            instance = cls(port=port, authkey=authkey)
+            instance.connect()
+            return instance
 
         def shutdown(self) -> None:
             # noinspection PyProtectedMember
             super().shutdown()
             Node.Manager._singleton = None
+            Node.Manager._port = 0
 
         def stop(self) -> None:
             with suppress(Exception):
                 super().shutdown()
             Node.Manager._singleton = None
+            Node.Manager._port = 0
 
 
 class Global:
@@ -213,7 +203,9 @@ def global_fixture(func_=None, **kwargs):
                 global_mgr.put_fixture(key, value)
             return value
         if Global.Manager.singleton() is None:
-            return pytest.fixture(scope='session', **kwargs_)(func)
+            # if all on localhost, fallback to using a node fixture (which will fall back to session fixture if
+            # serialized execution)
+            return node_fixture(func, **kwargs_)
         else:
             return pytest.fixture(scope='session', **kwargs_)(_wrapper)
 
@@ -255,7 +247,7 @@ def node_fixture(func=None, **kwargs):
         # noinspection PyProtectedMember
         if Node.Manager._port != 0:
             # noinspection PyProtectedMember
-            node_mgr = Node.Manager.singleton(Node.Manager._port)
+            node_mgr = Node.Manager.as_client(Node.Manager._port)
             return pytest.fixture(scope='session', **kwargs)(_wrapper)
         else:
             return pytest.fixture(scope='session', **kwargs)(func)

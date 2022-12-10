@@ -10,17 +10,15 @@ from pytest_mproc.user_output import always_print
 
 class SafeSerializable:
 
+    # HMMMMMM... THE PICKLING API NEVER SEEMS TO GET CALLED BY multiprocessing??
+
     def __getstate__(self):
-        raise(Exception)
-        always_print(f">>>>>>>>>>>>>>>>>>> PICKLING {self.__dict__}")
         d = dict(self.__dict__)
         for key in [k for k in d if k.startswith('_')]:
             del d[key]
         return d
 
     def __setstate__(self, d: Dict[str, Any]):
-        raise Exception()
-        always_print(f">>>>>>>>>>>>>>>>>>>> UPDATING STATE {d}  {self.__dict__}")
         self.__dict__.update(d)
 
 

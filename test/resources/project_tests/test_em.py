@@ -17,7 +17,6 @@ global_number2 = -42
 def glob_fix():
     global global_number2
     yield global_number2
-    raise Exception("HERE")
     global_number2 -= 1
 
 

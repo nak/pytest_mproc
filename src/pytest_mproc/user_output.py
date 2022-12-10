@@ -25,7 +25,7 @@ def debug_print(msg: str, *args):
     :param args: args for format string if required
     """
     global is_verbose
-    if is_verbose:
+    if is_verbose or True:
         msg = f"[{_get_my_ip()}] {msg}"
         print(msg % args)
 

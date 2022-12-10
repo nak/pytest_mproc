@@ -105,7 +105,7 @@ def worker_agent_factory() -> WorkerAgentFactory:
     factory.shutdown()
 
 
-shielded = False
+shielded = os.environ.get("SHIELDED", False)
 
 
 @pytest.fixture
@@ -139,5 +139,3 @@ def cleanup():
         WorkerAgent._node_mgrs = {}
         if Global.Manager.singleton():
             Global.Manager.singleton().stop()
-        if Node.Manager._singleton:
-            Node.Manager._singleton.stop()

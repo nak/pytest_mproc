@@ -2,6 +2,8 @@ import asyncio
 import binascii
 import multiprocessing
 import os
+import signal
+
 from pytest_mproc.mp import JoinableQueue, SharedJoinableQueue
 from multiprocessing.managers import BaseManager, SyncManager
 
@@ -166,6 +168,7 @@ class Orchestrator(SafeSerializable):
         status_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
         report_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
         self._session_queues[session_id] = (test_q, status_q, report_q)
+        debug_print("Launching main session...")
         proc = multiprocessing.Process(target=MainSession.launch,
                                        args=(session_id, authkey, test_q, status_q, report_q,
                                              worker_q, args, cwd),
@@ -173,7 +176,7 @@ class Orchestrator(SafeSerializable):
         if authkey is not None:
             proc.authkey = authkey
         proc.start()
-        debug_print(f"Main session {session_id} started")
+        debug_print(f"Main session {session_id} launched [{proc.pid}]")
         self._sessions[session_id] = proc
         return report_q
 
@@ -192,10 +195,12 @@ class Orchestrator(SafeSerializable):
         debug_print("Main session done")
         return proc.exitcode
 
-    def shutdown_session(self, session_id: str, timeout: Optional[float] = 10.0) -> Dict[str, int]:
+    def shutdown_session(self, session_id: str, on_error: bool = False,
+                         timeout: Optional[float] = 5.0) -> Dict[str, int]:
         """
         End a session, waiting until main session process exits
         :param session_id: unique session id associated with test session
+        :param on_error: if True, will terminate abruptly
         :param timeout: optional timeout to wait before forcibly closing main session (default is 10 seconds)
         """
         if Global.Manager.singleton():
@@ -211,15 +216,28 @@ class Orchestrator(SafeSerializable):
         if session_id in self._sessions:
             proc = self._sessions[session_id]
             del self._sessions[session_id]
+            if on_error:
+                debug_print(f"Sending SIGTERM to main session [{proc.pid}]")
+                proc.terminate()
+                proc.join(timeout=10)
+                if proc.exitcode is None:
+                    proc.kill()
+                    proc.join(timeout=2)
+                if proc.exitcode == None:
+                    proc.exitcode = -1
             timeout = end_time - time.monotonic()
             if timeout <= 0:
                 timeout = None
             proc.join(timeout=timeout)
             if proc.exitcode is None:
+                debug_print(f"Sending SIGTERM to main session [{proc.pid}]")
                 proc.terminate()
+                proc.join(timeout=3)
                 while proc.is_alive():  # forces a call to poll() for proc
                     time.sleep(0.1)
                 always_print(f"Forcibly stopped main session {session_id} [{proc.exitcode}]", as_error=True)
+                if proc.exitcode is None:
+                    proc.exitcode = -1
             return {'exitcode': proc.exitcode}
 
     def start_worker(self, session_id: str, worker_id: str, address: Optional[Tuple[str, int]] = None) -> None:
@@ -247,6 +265,10 @@ class Orchestrator(SafeSerializable):
         if self._port is not None:
             del cls._instances[self._port]
 
+    def workers_exhausted(self, session_id: str):
+        with suppress(Exception):
+            self._worker_queues[session_id].put(None, timeout=1)
+
 
 class MainSession:
     """
@@ -259,9 +281,16 @@ class MainSession:
     def launch(session_id: str, authkey: bytes, test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
                worker_q: JoinableQueue, args: List[str], cwd: Path) -> None:
         os.chdir(cwd)
-        debug_print(f"Launched session {session_id}")
+
+        debug_print(f"Starting main session {session_id}...")
+        status = -1
         with MainSession(session_id=session_id, test_q=test_q, status_q=status_q, report_q=report_q,
                          worker_q=worker_q, args=args, authkey=authkey) as session:
+            def handler(*args, **kwargs):
+                session.shutdown()
+                signal.raise_signal(signal.SIGKILL)
+
+            signal.signal(signal.SIGTERM, handler)
             try:
                 if all([not arg.startswith("--log-file") for arg in args]):
                     args.append('--log-file=pytest_debug.log')
@@ -284,7 +313,11 @@ class MainSession:
         status_q.close()
         test_q.close()
         report_q.close()
-        debug_print(f"\nSession{session_id} exiting with status {status} [{os.getpid()}]")
+        debug_print(f"\nSession {session_id} exiting  [{os.getpid()}]")
+        if session._count != session._target_count:
+            signal.raise_signal(signal.SIGKILL)
+        assert session._count == session._target_count, \
+            f"Failed to execute {session._target_count - session._count} out of {session._target_count} tests"
         sys.exit(status)
 
     @classmethod
@@ -319,6 +352,7 @@ class MainSession:
         self._pytest_args = args
         self._tests_remain = True
         self._worker_agents = {}
+        self._worker_polling_sem = multiprocessing.Semaphore(0)
 
     @staticmethod
     def _write_sep(s, txt):
@@ -449,6 +483,7 @@ class MainSession:
         read results and take actions (in batches)
         """
         exceptions = []
+        success = True
         try:
             test_count = 0
             while not self._all_workers_done:
@@ -456,6 +491,7 @@ class MainSession:
                 if result_batch is None:
                     always_print(f">>> Premature ending found in results queue.<<<<<", as_error=True)
                     self._all_workers_done = True
+                    success = False
                     break
                 if isinstance(result_batch, WorkerExited):
                     self._workers.remove(result_batch.worker_id)
@@ -505,6 +541,7 @@ class MainSession:
                 always_print(f"One or more remote worker exceptions encountered during execution", as_error=True)
                 for e in exceptions:
                     always_print(f"EXCEPTION: {e} [{type(e)}]", as_error=True)
+            return success
 
     async def _populate_test_queue(self, tests: List[TestBatch]) -> None:
         """
@@ -570,31 +607,36 @@ class MainSession:
         tests = sorted(tests, key=lambda x: x.priority)
         return tests, skipped_tests
 
-    def _poll_for_workers(self):
+    def _poll_for_workers(self, sem: multiprocessing.Semaphore):
         debug_print("\nPolling for workers... ")
         worker_address_and_token = self._worker_q.get()
-        debug_print(f"Got worker {worker_address_and_token}")
+        count = 0
         while worker_address_and_token is not None:
+            debug_print(f"Got worker {worker_address_and_token}")
+            worker_id, worker_address, global_mgr_address, authkey = worker_address_and_token
+            real_address = worker_address or 'localhost'
             try:
-                worker_id, worker_address, global_mgr_address, authkey = worker_address_and_token
-                real_address = worker_address or 'localhost'
                 debug_print(f"Got worker {worker_id}@{real_address}")
                 if authkey is not None:
                     authkey = binascii.a2b_hex(authkey)
                 if real_address not in self._worker_agents:
-                    debug_print(f"Requesting worker at {worker_address}")
+                    debug_print(f"Requesting worker agent at {worker_address}")
                     retries = 3
+                    delay = 0.5
                     while True:
                         try:
                             agent = WorkerAgent.as_client(address=worker_address, authkey=authkey) \
                                 if worker_address is not None\
                                 else WorkerAgent.as_local()
                             break
-                        except ConnectionError:
+                        except ConnectionError as e:
                             retries -= 1
                             if retries == 0:
+                                always_print(f"ERROR: Failed to get client for worker-agent: {e}")
                                 raise
-                            time.sleep(0.5)
+                            time.sleep(delay)
+                            delay *= 2
+                    debug_print(f"Got worker agent at {real_address}")
                     self._worker_agents[real_address] = agent
                     agent.start_session(session_id=self._session_id,
                                         test_q=self._test_q.raw(),
@@ -604,12 +646,28 @@ class MainSession:
                                         cwd=Path(os.getcwd()).absolute(),
                                         global_mgr_address=global_mgr_address,
                                         token=self._authkey.hex() if self._authkey else None)
+                    debug_print(f"Requested session {self._session_id} started")
                 agent = self._worker_agents[real_address]
+                debug_print(f"Requesting start worker {self._session_id}@{worker_id}")
                 agent.start_worker(session_id=self._session_id, worker_id=worker_id)
-                worker_address_and_token = self._worker_q.get()
+                debug_print(f"Requested worker started")
+                count += 1
+            except ConnectionError:
+                always_print(f"ERROR: Unable to connect to worker agent at {real_address}.  Is it running?",
+                             as_error=True)
             except Exception as e:
                 import traceback
-                always_print(f"ERROR: starting worker: {e}\n{traceback.format_exception()}", as_error=True)
+                always_print(f"ERROR: starting worker: {e}\n{traceback.format_exc()}", as_error=True)
+            worker_address_and_token = self._worker_q.get()
+        debug_print(f"No longer polling for workers [{count}]")
+        if count == 0:
+            self._all_workers_done = True
+            self._status_q.raw().put(None)
+            self._report_q.raw().put(AllWorkersDone())
+            self._status_q.raw().close()
+            self._report_q.raw().close()
+            always_print("Unable to connect to any worker agent", as_error=True)
+        sem.acquire()
 
     async def run_loop(self, session, tests):
         """
@@ -630,9 +688,10 @@ class MainSession:
         populate_tests_task = asyncio.create_task(
             self._populate_test_queue(test_batches)
         )
+        success = False
         try:
             # only master will read results and post reports through pytest
-            await self._read_results()
+            success = await self._read_results()
         except WorkerExited:
             os.write(sys.stderr.fileno(), b"\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
             os.write(sys.stderr.fileno(), b"All clients died; Possible incomplete run\n")
@@ -649,10 +708,11 @@ class MainSession:
             with suppress(Exception):
                 # should never time out since workers are done
                 await asyncio.wait_for(populate_tests_task, timeout=1)
-            with suppress(Exception):
-                if not self._all_workers_done:
-                    always_print(f"Results loop exiting without receiving signal that all workers are done",
-                                 as_error=True)
+            if not populate_tests_task.done():
+                populate_tests_task.cancel()
+            if not self._all_workers_done:
+                always_print(f"Results loop exiting without receiving signal that all workers are done",
+                             as_error=True)
             with suppress(Exception):
                 populate_tests_task.cancel()
             with suppress(Exception):
@@ -666,7 +726,8 @@ class MainSession:
 
     def __enter__(self):
         debug_print("Starting worker polling process...")
-        self._worker_polling_proc = multiprocessing.Process(target=self._poll_for_workers)
+        self._worker_polling_proc = multiprocessing.Process(target=self._poll_for_workers,
+                                                            args=(self._worker_polling_sem, ))
         self._worker_polling_proc.start()
         return self
 
@@ -678,6 +739,8 @@ class MainSession:
         """
         shutdown services
         """
-        if self._worker_polling_proc and self._worker_polling_proc.is_alive():
-            self._worker_polling_proc.kill()
+        with suppress(Exception):
+            self._worker_q.put(None, timeout=1)
+        self._worker_polling_sem.release()
+        self._worker_polling_proc.join()
         self._pending = {}
