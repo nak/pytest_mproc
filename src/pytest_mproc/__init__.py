@@ -11,8 +11,16 @@ from typing import Union, Callable, Optional, Any, Dict
 
 from pytest_mproc.data import GroupTag
 
-is_main = '--as-main' in sys.argv or '--remote-worker' in sys.argv
-is_worker = '--as-worker' in sys.argv or 'pytest_mproc.worker' in sys.argv
+
+def is_main() -> bool:
+    from pytest_mproc.orchestration import MainSession
+    return MainSession.shutdown() is not None
+
+
+def is_worker() -> bool:
+    from pytest_mproc.worker import WorkerSession
+    return not is_main() and WorkerSession.singleton() is not None
+
 
 _user_defined_port_alloc: Optional[Callable[[], int]] = None
 _user_defined_auth: Optional[Callable[[], bytes]] = None
@@ -68,7 +76,7 @@ def group(tag: Union["GroupTag", str]):
     return decorator_group
 
 
-def _find_free_port():
+def find_free_port():
     if _user_defined_port_alloc:
         return _user_defined_port_alloc()
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -90,19 +98,6 @@ def _get_my_ip() -> str:
         return socket.gethostbyname(hostname)
     except Exception:
         return "<<unknown ip address>>"
-
-
-@dataclass
-class Constants:
-    """
-    For storing global "constants"
-    """
-    ptmproc_args: Optional[Dict[str, Any]] = None
-
-    @classmethod
-    def set_ptmproc_args(cls, name: str, typ: Any):
-        cls.ptmproc_args = cls.ptmproc_args or {}
-        cls.ptmproc_args[name] = typ
 
 
 class AsyncMPQueue:

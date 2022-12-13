@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 from _pytest.reports import TestReport
 
-from pytest_mproc import _find_free_port
+from pytest_mproc import find_free_port
 from pytest_mproc.data import ReportStarted, ReportFinished, WorkerExited
 from pytest_mproc.mp import SharedJoinableQueue
 from pytest_mproc.orchestration import Orchestrator
@@ -53,7 +53,7 @@ async def test_process_reports(hook):
                 worker = worker_q.get()
 
         with patch("pytest_mproc.orchestration.MainSession.launch", new=mock_launch):
-            await session.start(worker_count=1, addl_args=[])
+            await session.start(worker_count=1, pytest_args=[])
 
             def populate():
 
@@ -83,7 +83,7 @@ async def test_process_reports(hook):
 
 @pytest.mark.asyncio
 async def test_process_reports_nonlocal(hook):
-    ports = [_find_free_port() for _ in range(14)]
+    ports = [find_free_port() for _ in range(14)]
 
     class ResourceMgr(ResourceManager):
 
@@ -95,9 +95,10 @@ async def test_process_reports_nonlocal(hook):
                 yield RemoteWorkerNode(resource_id=f'resource_{i}',
                                        address=('localhost', ports[i]),
                                        addl_params={'device': f"DEVICE_ID{i}"},
-                                       env={}, flags=['-s'])
+                                       env={}, flags=['-s'],
+                                       authkey=b'')
 
-    port = _find_free_port()
+    port = find_free_port()
 
     def mock_launch(session_id: str, token: str, test_q: JoinableQueue, status_q: JoinableQueue,
                     report_q: JoinableQueue,
@@ -137,7 +138,7 @@ async def test_process_reports_nonlocal(hook):
         try:
             with Session(resource_mgr=resource_mgr, orchestrator_address=('localhost', port),
                          authkey=authkey) as session:
-                await session.start(worker_count=14, addl_args=[])
+                await session.start(worker_count=14, pytest_args=[])
                 await session.process_reports(hook)
                 assert set(hook.started) == {f'node-{i}' for i in range(112)}, "Not all tests started"
                 assert set(hook.finished) == {f'node-{i}' for i in range(112)}, "Not all tests finished"

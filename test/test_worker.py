@@ -8,7 +8,7 @@ from typing import List
 
 from _pytest.reports import TestReport
 
-from pytest_mproc import _find_free_port
+from pytest_mproc import find_free_port
 from pytest_mproc.data import TestBatch, StatusTestState, TestStateEnum, WorkerExited
 from pytest_mproc.fixtures import Global
 from pytest_mproc.user_output import always_print
@@ -131,12 +131,12 @@ def test_system_worker_e2e():
     report_q = m.JoinableQueue(20)
     cwd = os.getcwd()
     os.chdir(WORKER_TEST_DIR)
-    global_mgr_port = _find_free_port()
+    global_mgr_port = find_free_port()
     authkey = b"1234546"
     agent_authkey = b'abcdef'
     global_mgr = Global.Manager.as_server(address=('localhost', global_mgr_port), auth_key=authkey)
-    agent_port = _find_free_port()
-    agent = WorkerAgent.as_server(('localhost', agent_port), authkey=agent_authkey)
+    agent_port = find_free_port()
+    agent = WorkerAgent.start_server(('localhost', agent_port), authkey=agent_authkey)
     session_id = "Session1"
 
     def external_process(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue):

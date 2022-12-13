@@ -82,7 +82,9 @@ class Node:
 
         @classmethod
         def as_client(cls, port: int, authkey: Optional[bytes] = None) -> "Node.Manager":
-            assert cls._port != 0
+            port = cls._port if port == 0 else port
+            assert port != 0
+            cls._port = port
             instance = cls(port=port, authkey=authkey)
             instance.connect()
             return instance

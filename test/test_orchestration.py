@@ -15,7 +15,7 @@ import pytest
 from _pytest.reports import TestReport
 
 # noinspection PyProtectedMember
-from pytest_mproc import _find_free_port, _get_my_ip
+from pytest_mproc import find_free_port, _get_my_ip
 from pytest_mproc.data import ReportStarted, ReportFinished, WorkerExited, AllWorkersDone
 from pytest_mproc.orchestration import Orchestrator
 from pytest_mproc.user_output import debug_print, always_print
@@ -25,7 +25,7 @@ TEST_PROXY_DIR = Path(__file__).parent / 'resources' / 'project_tests'
 
 def test_start_globals():
     authkey = secrets.token_bytes(64)
-    orchestrator = Orchestrator.as_server(address=('localhost', _find_free_port()), authkey=authkey)
+    orchestrator = Orchestrator.as_server(address=('localhost', find_free_port()), authkey=authkey)
     data = orchestrator.start_globals()
     assert data is not None
 
@@ -43,12 +43,12 @@ def mock_launch(session_id: str, authkey: bytes, test_q: JoinableQueue, status_q
 @patch("pytest_mproc.orchestration.MainSession.launch", new=mock_launch)
 def test_start_session():
     authkey = secrets.token_bytes(64)
-    port = _find_free_port()
+    port = find_free_port()
     server = Orchestrator.as_server(address=('localhost', port), authkey=authkey)
     server.start_globals()
     time.sleep(1)
     # noinspection PyUnresolvedReferences
-    client = Orchestrator.as_client(address=('localhost', port), authkey=authkey)
+    client = Orchestrator.as_client(address=('localhost', port), authkey=authkey, )
     client.start_session(session_id="Session1", args=['-s'], cwd=Path(os.getcwd()))
     assert list(server.sessions().copy()) == ['Session1']
     client.start_session(session_id="Session2", args=['-s'], cwd=Path(os.getcwd()))
@@ -64,7 +64,7 @@ def test_start_session():
 
 def test_start_session_nonlocal():
     authkey = secrets.token_bytes(64)
-    port = _find_free_port()
+    port = find_free_port()
     orch_server = Orchestrator.as_server(address=('localhost', port), authkey=authkey)
     orch_server.start_globals()
     # noinspection PyUnresolvedReferences
@@ -109,7 +109,7 @@ def test_start_session_nonlocal():
 def test_session_with_workers(worker_agent_factory, request, shield):
     authkey = secrets.token_bytes(64)
     worker_count = 10
-    orch_port = _find_free_port()
+    orch_port = find_free_port()
     # noinspection PyUnresolvedReferences
     hook = request.config.hook
 
@@ -133,7 +133,7 @@ def test_session_with_workers(worker_agent_factory, request, shield):
         assert results.get('passed') == 200
         assert results.get('failed') == 200
 
-    port = _find_free_port()
+    port = find_free_port()
     worker_agent = worker_agent_factory.create_worker_agent(port, authkey)
     my_ip = _get_my_ip()
     orchestrator = Orchestrator.as_server(address=(my_ip, orch_port), authkey=authkey)
@@ -157,7 +157,7 @@ def test_session_with_localhost_only(request, shield):
     authkey = secrets.token_bytes(64)
     debug_print(f"Using auth key {authkey.hex()}")
     worker_count = 10
-    ports = [_find_free_port() for _ in range(worker_count)]
+    ports = [find_free_port() for _ in range(worker_count)]
     # noinspection PyUnresolvedReferences
     report_q = JoinableQueue()
     hook = request.config.hook

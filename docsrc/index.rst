@@ -31,22 +31,23 @@ set of machines.
 Why Use *pytest_mproc* over *pytest-xdist*?
 ===========================================
 
-Why not just use *xdist*, another parallelization mechanism for test execution? *xdist* works for cases perhaps
-where there are large number of tests, but the cost of overhead in using rsync and
-overall implementation prevents realization of test-execution-time gains that one might hope for.  *xdist* also
-does not provide a way to run distributed on multiple machines
+Why not just use *xdist*, another parallelization mechanism for test execution? *pytest_mproc* was motivated due
+to the high overhead cost in startup and overall execution times over a large number of tests utilizing larger numbers
+of cores.   *xdist* also
+does not provide a way to run distributed execution across multiple machines
 
 *pytest_mproc* has several advantages over xdist, depending on your situation:
 
-* Overhead firing startup is much less, and start-up time does not grow with increasing number of cores as in xdist
+* Overhead firing up worker threads on startup is much less, and start-up time does not grow with increasing number
+  of cores as in *xdist*
 * It uses a pull model, so that each worker pulls the next test from a master queue, with no need to figure
   out how to divide the tests beforehand.  The disadvantage is that optimal efficiency requires knowledge to
-  prioritize longer running tests first.
+  prioritize longer running tests first (in cases where test case times are disparate).
 * It provides a 'global' scoped test fixture to provide a single instance of a fixture across all tests, regardless of
   how many nodes.
 * It provide a 'node' scoped test fixture that is a single instance across all workers on a single machine (node)
 * It allows you to programmatically group together a bunch of tests to run serially on a single worker process
-* Support for execution across multiple machines
+* It supports execution across multiple machines
 * It provides a better mechanism for prioritizing and configuring test execution
 
 
@@ -71,12 +72,12 @@ to get started with the minimal configuration for *pytest_mproc* -- running test
    additional (partial) batch will add more overhead, as the CPU must be split across multiple threads for some or all
    cores.
 
-When going beyond the simple one-machin parallelization, certain terminology is used.  The term 'node' is used to
+When going beyond the simple one-machine parallelization, certain terminology is used.  The term 'node' is used to
 refer to a single machine within a group of machines (over which execution is distributed).  The term 'main node'
 refers to the orchestrator of the tests, responsible for overseeing test execution and reporting results to the
 user.  The term 'worker' is used to specify a single process running on a node that is doing the actual test
 execution.  The main node can distribute tests across multiple other nodes, with multiple worker processes executing
-within each node.
+within each node.  Parallelization across multiple machines is an advanced topic described below.
 
 Disabling *pytest_mproc* from Command Line
 ------------------------------------------
@@ -161,7 +162,7 @@ the only value provided is the ability to specify a hierarchy of priorities.
 
 A Matter of Priority
 ====================
-You can also specify a priority for test execution using the *pytest_mproc.priority* decorator:
+You can specify a priority for test execution using the *pytest_mproc.priority* decorator:
 
 .. code-block:: python
 
@@ -185,7 +186,7 @@ execution for tests or test groups with the same priority.
 
 If you specify a priority on a class of tests, all test methods within that class will have that priority, unless
 a specific priority is assigned to that method through its own decorator.  In that class, the decorator for the class
-method is used.
+method is obeyed.
 
 
 Globally Scoped Fixtures
@@ -255,12 +256,13 @@ A Safe *tmpdir* Fixture
 
 *pytest_mproc* provides its own fixtures for creating temporary directories: *mp_tmpdir_factory*, a fixture with a
 "*create_tmpdir*" method for creating multiple temporary directories within a test procedure, and a
-*mp_tmpdir* directory for creating a single temporary directory.  Other plugins providing similar featurs can have
+*mp_tmpdir* directory for creating a single temporary directory.  Other plugins providing similar features can have
 race conditions causing intermittent (if infrequent) failures.  This plugin guarantees to be free of race conditions
-and safe in the context of *pytest_mproc*'s concrurrent test framework.
+and safe in the context of *pytest_mproc*'s concurrent test framework.
 
 (the regular pytest tmpdir and corresponding factory fixtures have a race condition that can cause a tmp dir to
-be removed that is in use by another thread worker in any distributed execution)
+be removed that is in use by another thread worker in any distributed execution, albeit a rare occurrence when
+number of parallel workers is small)
 
 Advanced: Testing on a Distributed Set of Machines
 ==================================================

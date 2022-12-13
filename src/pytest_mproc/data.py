@@ -63,7 +63,7 @@ class GroupTag:
 
 @dataclass
 class WorkerStarted:
-    worker_id : str
+    worker_id: str
     pid: int
     host: str
 

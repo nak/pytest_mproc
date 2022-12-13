@@ -21,11 +21,11 @@ def glob_fix():
 
 
 def test1(node_fix, glob_fix):
-    time.sleep(0.2)
+    time.sleep(0.5)
     assert node_fix == 42
     assert glob_fix == -42
 
 
 def test2():
-    time.sleep(0.2)
+    time.sleep(0.5)
     assert False, "This is supposed to fail"

@@ -2,6 +2,7 @@ import asyncio
 import binascii
 import multiprocessing
 import os
+import secrets
 import signal
 
 from pytest_mproc.mp import JoinableQueue, SharedJoinableQueue
@@ -19,7 +20,7 @@ from typing import List, Optional, Union, Dict, Tuple, Any, Set
 import pytest
 from _pytest.reports import TestReport
 
-from pytest_mproc import AsyncMPQueue, _get_my_ip, _find_free_port
+from pytest_mproc import AsyncMPQueue, _get_my_ip, find_free_port
 from pytest_mproc.exceptions import FatalError
 from pytest_mproc.constants import DEFAULT_PRIORITY
 from pytest_mproc.data import (
@@ -31,7 +32,7 @@ from pytest_mproc.data import (
     TestStateEnum, resource_utilization, WorkerStarted, AllWorkersDone,
 )
 from pytest_mproc.data import StatusType
-from pytest_mproc.fixtures import Global
+from pytest_mproc.fixtures import Global, Node
 from pytest_mproc.mp import SafeSerializable
 from pytest_mproc.user_output import debug_print, always_print
 from pytest_mproc.utils import BasicReporter
@@ -53,37 +54,56 @@ class Orchestrator(SafeSerializable):
     _instances: Dict[int, "Orchestrator"] = {}
 
     # noinspection PyUnresolvedReferences
-    def __init__(self, port: Optional[int] = None):
+    def __init__(self, port: Optional[int] = None, has_remote_workers: bool = False):
         """
         :param address: address hosting this orchestrator agent, if distributed on multiple hosts
         """
         # for accumulating tests and exit status:
+        self._has_remote_workers = has_remote_workers
+        self._session_args: Dicst[str, List[str]] = {}
         self._worker_queues: Dict[str, JoinableQueue] = {}
         self._sessions: Dict[str, multiprocessing.Process] = {}
-        self._session_queues: Dict[str, Tuple[JoinableQueue, JoinableQueue, JoinableQueue]] = {}
         self._is_local = port is None
         self._port = port
         self.__class__._instances[port or 0] = self
         self._global_mgr_address = None
+        self._node_mgr_port: Dict[str, int] = {}
+        self._node_mgr: Dict[str, Node.Manager] = {}
+        if has_remote_workers:
+            self._main_authkey = secrets.token_bytes(64)
+            self._main_address = (_get_my_ip(), find_free_port())
+            self._sm_base = SyncManager(address=self._main_address, authkey=self._main_authkey)
+            self._sm_base.register('JoinableQueue', JoinableQueue, exposed=['put', 'get', 'close', 'join', 'task_done'])
+            self._sm_base.start()
+            self._test_q = self._sm_base.JoinableQueue()
+            self._status_q = self._sm_base.JoinableQueue()
+            self._report_q = self._sm_base.JoinableQueue()
+        else:
+            self._main_authkey = None
+            self._main_address = None
+            self._test_q = SharedJoinableQueue()
+            self._status_q = SharedJoinableQueue()
+            self._report_q = SharedJoinableQueue()
 
     @classmethod
-    def instance_at(cls, port: int) -> Optional["Orchestrator"]:
+    def instance_at(cls, port: int, has_remote_workers: bool) -> Optional["Orchestrator"]:
         if port not in cls._instances:
-            cls._instances[port] = Orchestrator(port=port)
+            cls._instances[port] = Orchestrator(port=port, has_remote_workers=has_remote_workers)
         return cls._instances.get(port)
 
     @classmethod
-    def as_local(cls) -> "Orchestrator":
-        orchestrator = Orchestrator()
+    def as_local(cls, has_remote_workers: bool = False) -> "Orchestrator":
+        orchestrator = Orchestrator(has_remote_workers=has_remote_workers)
         return orchestrator
 
     @classmethod
-    def as_client(cls, address: Tuple[str, int], authkey: bytes) -> "Orchestrator":
+    def as_client(cls, address: Tuple[str, int], authkey: bytes, has_remote_workers: bool = False) -> "Orchestrator":
         """
         :return: a client proxy to an orchestrator, creating it if necessary (otherwise return singleton if
         already created)
         :param address: address to connect to
         :param authkey: auth for connection
+        :param has_remote_workers: whether remote workers will be present
         """
         if cls._mp_client is None:
             if not cls._registered:
@@ -102,16 +122,17 @@ class Orchestrator(SafeSerializable):
             cls._mp_client = SyncManager(address=address, authkey=authkey)
             cls._mp_client.connect()
         # noinspection PyUnresolvedReferences
-        orchestrator = cls._mp_client.instance_at(address[1])
+        orchestrator = cls._mp_client.instance_at(address[1], has_remote_workers)
         return orchestrator
 
     @classmethod
-    def as_server(cls, address: Tuple[str, int], authkey: bytes) -> "Orchestrator":
+    def as_server(cls, address: Tuple[str, int], authkey: bytes, has_remote_workers: bool = False) -> "Orchestrator":
         """
         :return: a server proxy to an orchestrator, creating it if necessary (otherwise return singleton if
         already created)
         :param address: address to serve from
         :param authkey: auth for connection
+        :param has_remote_workers: whether remote workers will be present
         """
         host, port = address
         if cls._mp_server is None:
@@ -128,13 +149,13 @@ class Orchestrator(SafeSerializable):
             cls._mp_server = SyncManager(address=address, authkey=authkey)
             cls._mp_server.start()
         # noinspection PyUnresolvedReferences
-        return cls._mp_server.instance_at(port=port)
+        return cls._mp_server.instance_at(port=port, has_remote_workers=has_remote_workers)
 
     def start_globals(self) -> Tuple[str, int, str]:
         if self._is_local:
-            host, port = ('localhost', _find_free_port())
+            host, port = ('localhost', find_free_port())
         else:
-            host, port = (_get_my_ip(), _find_free_port())
+            host, port = (_get_my_ip(), find_free_port())
         # noinspection PyProtectedMember,PyUnresolvedReferences
         authkey = self.__class__._mp_server._authkey if not self._is_local else None
         Global.Manager.as_server(address=(host, port), auth_key=authkey)
@@ -156,105 +177,116 @@ class Orchestrator(SafeSerializable):
         :param cwd: where to run the session (where all workers will run from)
         :returns: queue to pass reports back to overarching session
         """
+
+        if session_id in self._sessions:
+            raise ValueError(f"Session with id {session_id} already started")
         cls = self.__class__
+        self._session_args[session_id] = args
         # noinspection PyProtectedMember,PyUnresolvedReferences
         authkey = cls._mp_server._authkey if not self._is_local else None
         if session_id in self._sessions:
             raise ValueError(f"Session {session_id} already actively exists")
         # noinspection PyUnresolvedReferences
-        worker_q = JoinableQueue()
-        self._worker_queues[session_id] = worker_q
-        test_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
-        status_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
-        report_q = JoinableQueue() if self._is_local else SharedJoinableQueue()
-        self._session_queues[session_id] = (test_q, status_q, report_q)
-        debug_print("Launching main session...")
+        authkey = authkey or multiprocessing.current_process().authkey
+        if session_id not in self._worker_queues:
+            if cls._mp_server is None:
+                cls._mp_server = SyncManager(address=(_get_my_ip(), 0), authkey=authkey)
+                cls._mp_server.start()
+            # noinspection PyUnresolvedReferences
+            worker_q = cls._mp_server.JoinableQueue()
+            self._worker_queues[session_id] = worker_q
+        debug_print(f"Launching main session...{authkey.hex()} {multiprocessing.current_process().authkey.hex()}")
         proc = multiprocessing.Process(target=MainSession.launch,
-                                       args=(session_id, authkey, test_q, status_q, report_q,
-                                             worker_q, args, cwd),
+                                       args=(session_id, authkey, self._main_address, self._main_authkey,
+                                             self._test_q, self._status_q, self._report_q,
+                                             self._worker_queues[session_id], args, cwd),
                                        )
         if authkey is not None:
             proc.authkey = authkey
         proc.start()
-        debug_print(f"Main session {session_id} launched [{proc.pid}]")
+        debug_print(f"Main session '{session_id}' launched [{proc.pid}]")
         self._sessions[session_id] = proc
-        return report_q
+        self._node_mgr_port[session_id] = find_free_port()
+        self._node_mgr[session_id] = Node.Manager.as_server(self._node_mgr_port[session_id], authkey=authkey)
+        return self._report_q
 
-    def join_session(self, session_id: str, timeout: Optional[float] = None) -> int:
+    def join_session(self, session_id: str, on_error: bool, timeout: Optional[float] = None) -> int:
+        with suppress(Exception):
+            self._status_q.close()
+        with suppress(Exception):
+            self._test_q.close()
         if session_id not in self._sessions:
             raise ValueError(f"No such session: {session_id}")
+        proc = self._sessions[session_id]
         debug_print(f"Joining main session {session_id} [{self._sessions[session_id].is_alive()}]")
         for _ in range(10):
-            if not self._sessions[session_id].is_alive():
+            if not proc.is_alive():
                 break
             time.sleep(0.5)
         self._sessions[session_id].join(timeout=timeout)
+        if on_error and proc.exitcode is None:
+            debug_print(f"Sending SIGTERM on error to main session [{proc.pid}]")
+            proc.terminate()
+            proc.join(timeout=2)
+            if proc.exitcode is None:
+                always_print(f"Forcibly stopped main session on error {session_id} [{proc.exitcode}]", as_error=True)
+                proc.kill()
+                proc.join(timeout=2)
+            return -1
+        elif proc.exitcode is None:
+            always_print(f"Forcibly stopped main session {session_id} [{proc.exitcode}]", as_error=True)
+            proc.kill()
+            proc.join(timeout=2)
         proc = self._sessions[session_id]
         del self._sessions[session_id]
-        del self._session_queues[session_id]
         debug_print("Main session done")
         return proc.exitcode
 
     def shutdown_session(self, session_id: str, on_error: bool = False,
-                         timeout: Optional[float] = 5.0) -> Dict[str, int]:
+                         timeout: Optional[float] = 2.0) -> int:
         """
         End a session, waiting until main session process exits
         :param session_id: unique session id associated with test session
         :param on_error: if True, will terminate abruptly
         :param timeout: optional timeout to wait before forcibly closing main session (default is 10 seconds)
         """
+        if session_id in self._node_mgr:
+            self._node_mgr[session_id].shutdown()
         if Global.Manager.singleton():
             Global.Manager.singleton().shutdown()
-        end_time = time.monotonic() + timeout
         if session_id in self._worker_queues:
-            with suppress(BrokenPipeError):
-                self._worker_queues[session_id].put(None)
-            self._worker_queues[session_id].close()
+            with suppress(BrokenPipeError, TimeoutError):
+                self._worker_queues[session_id].put(None, timeout=1)
+            # self._worker_queues[session_id].close()
             del self._worker_queues[session_id]
-        if session_id in self._session_queues:
-            del self._session_queues[session_id]
         if session_id in self._sessions:
-            proc = self._sessions[session_id]
-            del self._sessions[session_id]
-            if on_error:
-                debug_print(f"Sending SIGTERM to main session [{proc.pid}]")
-                proc.terminate()
-                proc.join(timeout=10)
-                if proc.exitcode is None:
-                    proc.kill()
-                    proc.join(timeout=2)
-                if proc.exitcode == None:
-                    proc.exitcode = -1
-            timeout = end_time - time.monotonic()
-            if timeout <= 0:
-                timeout = None
-            proc.join(timeout=timeout)
-            if proc.exitcode is None:
-                debug_print(f"Sending SIGTERM to main session [{proc.pid}]")
-                proc.terminate()
-                proc.join(timeout=3)
-                while proc.is_alive():  # forces a call to poll() for proc
-                    time.sleep(0.1)
-                always_print(f"Forcibly stopped main session {session_id} [{proc.exitcode}]", as_error=True)
-                if proc.exitcode is None:
-                    proc.exitcode = -1
-            return {'exitcode': proc.exitcode}
+            status = self.join_session(session_id, on_error=on_error, timeout=timeout)
+            return status
+        return 0
 
-    def start_worker(self, session_id: str, worker_id: str, address: Optional[Tuple[str, int]] = None) -> None:
+    def start_worker(self, session_id: str, worker_id: str, address: Optional[Tuple[str, int]] = None,
+                     agent_authkey: Optional[bytes] = None) -> None:
         """
         Start a new worker under the given test session
         :param session_id: which test session
         :param worker_id: unique id assigned to worker (unique to session)
         :param address: optional address of worker (or None for simple localhost instantiation)
+        :param agent_authkey: authkey for authentication connecting to worker agent
         """
         if session_id not in self._sessions:
-            raise ValueError(f"No such session to start worker: {session_id}")
+            raise ValueError(f"No such session to start worker: {session_id} {self._sessions}")
         session = self._sessions[session_id]
         worker_q = self._worker_queues[session_id]
         debug_print(f"Orchestrator signalling start worker {worker_id} at {address}")
-        worker_q.put((worker_id, address, self._global_mgr_address, session.authkey.hex()))
+        worker_q.put(
+            (worker_id, address, self._global_mgr_address, self._node_mgr_port[session_id],
+             session.authkey.hex() if session.authkey else None,
+             agent_authkey)
+        )
 
     def shutdown(self):
+        for session_id in self._sessions:
+            self.shutdown_session(session_id, timeout=10)
         cls = self.__class__
         if cls._mp_server is not None:
             with suppress(Exception):
@@ -278,24 +310,51 @@ class MainSession:
     _singleton: "MainSession" = None
 
     @staticmethod
-    def launch(session_id: str, authkey: bytes, test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
+    def launch(session_id: str, authkey: bytes, main_address: Optional[Tuple[int, str]],
+               main_authkey: Optional[bytes],
+               test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
                worker_q: JoinableQueue, args: List[str], cwd: Path) -> None:
         os.chdir(cwd)
-
-        debug_print(f"Starting main session {session_id}...")
+        multiprocessing.current_process().authkey = authkey
+        debug_print(f"Starting main session {session_id}... {args}")
         status = -1
-        with MainSession(session_id=session_id, test_q=test_q, status_q=status_q, report_q=report_q,
+        if main_address:
+
+            def get_test_q():
+                nonlocal test_q
+                return test_q
+
+            def get_status_q():
+                nonlocal status_q
+                return status_q
+
+            def get_report_q():
+                nonlocal report_q
+                return report_q
+
+            m_address = (_get_my_ip(), find_free_port())
+            sm = SyncManager(address=m_address, authkey=main_authkey)
+            sm.register('get_test_q', get_test_q)
+            sm.register('get_status_q', get_status_q)
+            sm.register('get_report_q', get_report_q)
+            sm.start()
+        else:
+            m_address = None
+        with MainSession(session_id=session_id, main_address=m_address, main_authkey=main_authkey,
+                         test_q=test_q, status_q=status_q, report_q=report_q,
                          worker_q=worker_q, args=args, authkey=authkey) as session:
-            def handler(*args, **kwargs):
+            def handler(*_args, **_kwargs):
                 session.shutdown()
                 signal.raise_signal(signal.SIGKILL)
 
+            # noinspection PyTypeChecker
             signal.signal(signal.SIGTERM, handler)
             try:
                 if all([not arg.startswith("--log-file") for arg in args]):
                     args.append('--log-file=pytest_debug.log')
                 debug_print(f"Starting main orchestrator...\n   cmd: pytest {' '.join(args)}\n   from: {cwd}"
                             f"\n    args: {args}")
+                os.environ['PTMPROC_ORCHESTRATOR'] = '1'
                 status = pytest.main(args)
                 worker_q.put(None)  # signals no more workers to be processed/added
                 if isinstance(status, pytest.ExitCode):
@@ -304,18 +363,10 @@ class MainSession:
                 msg = f"Main execution orchestration died with exit code {status}: {e} [{type(e)}]"
                 os.write(sys.stderr.fileno(), msg.encode('utf-8'))
                 status = -1
-            for agent in session._worker_agents.values():
-                agent.join_session(session_id=session_id, timeout=10)
 
-        report_q.join()
-        # status_q.join()
-        # test_q.join()
-        status_q.close()
-        test_q.close()
-        report_q.close()
+        with suppress(Exception):
+            report_q.put(None)
         debug_print(f"\nSession {session_id} exiting  [{os.getpid()}]")
-        if session._count != session._target_count:
-            signal.raise_signal(signal.SIGKILL)
         assert session._count == session._target_count, \
             f"Failed to execute {session._target_count - session._count} out of {session._target_count} tests"
         sys.exit(status)
@@ -324,11 +375,14 @@ class MainSession:
     def singleton(cls):
         return cls._singleton
 
-    def __init__(self, session_id: str, test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
+    def __init__(self, session_id: str, main_address, main_authkey,
+                 test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
                  worker_q: JoinableQueue, args: List[str], authkey: bytes):
         if MainSession._singleton is not None:
             raise RuntimeError("More than one instance of MainSession is not allowed")
         MainSession._singleton = self
+        self._main_address = main_address
+        self._main_authkey = main_authkey
         self._session_id = session_id
         self._test_q = AsyncMPQueue(test_q)
         self._status_q = AsyncMPQueue(status_q)
@@ -351,8 +405,9 @@ class MainSession:
         self._workers: Set[str] = set()
         self._pytest_args = args
         self._tests_remain = True
-        self._worker_agents = {}
         self._worker_polling_sem = multiprocessing.Semaphore(0)
+        self._worker_agents: Dict[str, List[WorkerAgent]] = {}
+        self._worker_agents_by_address: Dict[Tuple[str, int], WorkerAgent] = {}
 
     @staticmethod
     def _write_sep(s, txt):
@@ -486,19 +541,17 @@ class MainSession:
         success = True
         try:
             test_count = 0
-            while not self._all_workers_done:
+            while True:
                 result_batch: Union[List[StatusType], None] = await self._status_q.get()
-                if result_batch is None:
-                    always_print(f">>> Premature ending found in results queue.<<<<<", as_error=True)
-                    self._all_workers_done = True
-                    success = False
-                    break
                 if isinstance(result_batch, WorkerExited):
                     self._workers.remove(result_batch.worker_id)
                     await self._process_worker_died(result_batch)
+                    self._all_workers_done = len(self._workers) == 0
+                    if self._all_workers_done:
+                        break
                 elif isinstance(result_batch, WorkerStarted):
                     self._workers.add(result_batch.worker_id)
-                    debug_print(f"Worker {result_batch.worker_id} added {self._tests_remain}")
+                    debug_print(f"Worker {result_batch.worker_id} started")
                     if not self._tests_remain:
                         await self._test_q.put(None)  # ensures new worker exits at right time
                 elif isinstance(result_batch, Exception):
@@ -513,6 +566,9 @@ class MainSession:
                         else:
                             test_count += 1
                             await self._process_worker_message(result)
+                elif result_batch is None:
+                    always_print("Exiting results processing on sentinel")
+                    break
                 if len(self._workers) == 0:
                     break
             # process stragglers left in results queue
@@ -526,6 +582,8 @@ class MainSession:
                             await self._process_worker_message(result)
                     elif isinstance(result_batch, StatusTestsComplete):
                         self._exit_results.append(result_batch)
+                    elif result_batch is None:
+                        break
                     result_batch = await self._status_q.get(immediate=True)
             except Empty:
                 pass
@@ -608,48 +666,63 @@ class MainSession:
         return tests, skipped_tests
 
     def _poll_for_workers(self, sem: multiprocessing.Semaphore):
-        debug_print("\nPolling for workers... ")
-        worker_address_and_token = self._worker_q.get()
+        debug_print(f"\nPolling for workers... {self}")
+        worker_agent_and_token = self._worker_q.get()
+        debug_print(f"Got worker {worker_agent_and_token}")
         count = 0
-        while worker_address_and_token is not None:
-            debug_print(f"Got worker {worker_address_and_token}")
-            worker_id, worker_address, global_mgr_address, authkey = worker_address_and_token
-            real_address = worker_address or 'localhost'
-            try:
-                debug_print(f"Got worker {worker_id}@{real_address}")
-                if authkey is not None:
-                    authkey = binascii.a2b_hex(authkey)
-                if real_address not in self._worker_agents:
-                    debug_print(f"Requesting worker agent at {worker_address}")
+        while worker_agent_and_token is not None:
+            worker_id, address, global_mgr_address, node_mgr_port, authkey, agent_authkey = \
+                worker_agent_and_token
+            authkey = binascii.a2b_hex(authkey)
+            real_address = address if address is not None else ('localhost', 0)
+            if real_address not in self._worker_agents_by_address:
+                if address is not None:
                     retries = 3
                     delay = 0.5
+                    worker_agent = None
                     while True:
                         try:
-                            agent = WorkerAgent.as_client(address=worker_address, authkey=authkey) \
-                                if worker_address is not None\
-                                else WorkerAgent.as_local()
+                            worker_agent = WorkerAgent.as_client(address, authkey=agent_authkey)
                             break
-                        except ConnectionError as e:
+                        except (ConnectionError, ConnectionRefusedError) as e:
                             retries -= 1
                             if retries == 0:
                                 always_print(f"ERROR: Failed to get client for worker-agent: {e}")
-                                raise
+                                break
                             time.sleep(delay)
-                            delay *= 2
-                    debug_print(f"Got worker agent at {real_address}")
-                    self._worker_agents[real_address] = agent
-                    agent.start_session(session_id=self._session_id,
-                                        test_q=self._test_q.raw(),
-                                        status_q=self._status_q.raw(),
-                                        report_q=self._report_q.raw(),
-                                        args=self._pytest_args,
-                                        cwd=Path(os.getcwd()).absolute(),
-                                        global_mgr_address=global_mgr_address,
-                                        token=self._authkey.hex() if self._authkey else None)
-                    debug_print(f"Requested session {self._session_id} started")
-                agent = self._worker_agents[real_address]
+                            delay *= 1.5
+                        except BaseException as e:
+                            always_print(f"Exception in connecting to worker agent at {address}: {e}")
+                else:
+                    worker_agent = WorkerAgent.as_local()
+                if worker_agent is None:
+                    worker_agent_and_token = self._worker_q.get()
+                    continue
+                self._worker_agents_by_address[real_address] = worker_agent
+                if self._main_address is not None:
+                    test_q, status_q, report_q = None, None, None
+                else:
+                    test_q, status_q, report_q = self._test_q, self._status_q, self._report_q
+                worker_agent.start_session(
+                    session_id=self._session_id,
+                    main_address=self._main_address,
+                    main_token=self._main_authkey.hex() if self._main_authkey else None,
+                    test_q=test_q.raw() if self._main_address is None else None,
+                    status_q=status_q.raw() if self._main_address is None else None,
+                    report_q=report_q.raw() if self._main_address is None else None,
+                    args=self._pytest_args,
+                    cwd=Path(os.getcwd()).absolute(),
+                    global_mgr_address=global_mgr_address,
+                    node_mgr_port=node_mgr_port,
+                    token=authkey.hex() if authkey else None
+                )
+                self._worker_agents.setdefault(self._session_id, []).append(worker_agent)
+            else:
+                worker_agent = self._worker_agents_by_address[real_address]
+            try:
+                debug_print(f"Got worker {worker_id}")
                 debug_print(f"Requesting start worker {self._session_id}@{worker_id}")
-                agent.start_worker(session_id=self._session_id, worker_id=worker_id)
+                worker_agent.start_worker(session_id=self._session_id, worker_id=worker_id)
                 debug_print(f"Requested worker started")
                 count += 1
             except ConnectionError:
@@ -658,15 +731,14 @@ class MainSession:
             except Exception as e:
                 import traceback
                 always_print(f"ERROR: starting worker: {e}\n{traceback.format_exc()}", as_error=True)
-            worker_address_and_token = self._worker_q.get()
+            worker_agent_and_token = self._worker_q.get()
+            debug_print(f"Got worker {worker_agent_and_token}")
         debug_print(f"No longer polling for workers [{count}]")
         if count == 0:
             self._all_workers_done = True
             self._status_q.raw().put(None)
             self._report_q.raw().put(AllWorkersDone())
-            self._status_q.raw().close()
-            self._report_q.raw().close()
-            always_print("Unable to connect to any worker agent", as_error=True)
+            always_print("Unable to connect to any worker agent or acquire any worker", as_error=True)
         sem.acquire()
 
     async def run_loop(self, session, tests):
@@ -688,10 +760,9 @@ class MainSession:
         populate_tests_task = asyncio.create_task(
             self._populate_test_queue(test_batches)
         )
-        success = False
         try:
             # only master will read results and post reports through pytest
-            success = await self._read_results()
+            await self._read_results()
         except WorkerExited:
             os.write(sys.stderr.fileno(), b"\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
             os.write(sys.stderr.fileno(), b"All clients died; Possible incomplete run\n")
@@ -701,7 +772,6 @@ class MainSession:
         except (EOFError, ConnectionError, BrokenPipeError, KeyboardInterrupt) as e:
             always_print(f"Testing interrupted; shutting down: {type(e)}")
             populate_tests_task.cancel()
-            self.shutdown()
         finally:
             debug_print("Exiting orchestration run loop.  Cleaning up...")
             self._active = False
@@ -722,10 +792,10 @@ class MainSession:
                                                     start_rusage=start_rusage,
                                                     end_rusage=end_rusage)
                 sys.stdout.write("\r\n")
+            await self._report_q.put(None)
             debug_print("Run loop done")
 
     def __enter__(self):
-        debug_print("Starting worker polling process...")
         self._worker_polling_proc = multiprocessing.Process(target=self._poll_for_workers,
                                                             args=(self._worker_polling_sem, ))
         self._worker_polling_proc.start()
@@ -740,7 +810,15 @@ class MainSession:
         shutdown services
         """
         with suppress(Exception):
+            self._status_q.raw().put(None)  # sentinel, if needed
+        with suppress(Exception):
             self._worker_q.put(None, timeout=1)
         self._worker_polling_sem.release()
         self._worker_polling_proc.join()
+        for agent in self._worker_agents_by_address.values():
+            agent.shutdown(timeout=3)
+        self._worker_agents = {}
+        self._worker_agents_by_address = {}
         self._pending = {}
+        self._status_q.close()
+        self._test_q.close()

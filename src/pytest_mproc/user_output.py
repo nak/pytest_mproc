@@ -4,7 +4,7 @@ import sys
 from pytest_mproc import _get_my_ip
 
 is_verbose = os.environ.get("PTMPROC_VERBOSE", False) not in ['0', 'False', 'false', 'FALSE', False]
-is_verbose = True
+
 
 def set_verbose(verbose: bool):
     """
@@ -25,9 +25,12 @@ def debug_print(msg: str, *args):
     :param args: args for format string if required
     """
     global is_verbose
-    if is_verbose or True:
+    if is_verbose:
         msg = f"[{_get_my_ip()}] {msg}"
-        print(msg % args)
+        if args:
+            print(msg % args)
+        else:
+            print(msg)
 
 
 def always_print(msg: str, *args, as_error: bool = False):
