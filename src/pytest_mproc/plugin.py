@@ -3,7 +3,6 @@ This file contains some standard pytest_* plugin hooks to implement multiprocess
 """
 import asyncio
 import os
-import secrets
 import sys
 import threading
 
@@ -11,6 +10,7 @@ import _pytest.terminal
 
 from pytest_mproc.session import Session
 from pytest_mproc.resourcing import ResourceManager
+from pytest_mproc.user_output import always_print
 from pytest_mproc.worker import WorkerSession
 
 from pytest_mproc import user_output, Constants
@@ -249,12 +249,10 @@ def pytest_sessionstart(session):
 def pytest_configure(config):
     # if config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
     #    return
-
     is_worker = WorkerSession.singleton() is not None
     is_orchestrator = MainSession.singleton() is not None
     is_distributed = config.getoption('mproc_distributed_uri', default=None) is not None
     mproc_num_cores = config.getoption("mproc_numcores", default=None)
-
     if not is_worker and ((mproc_num_cores is None)
        or config.getoption("mproc_disabled", default=False)):
         return
@@ -268,7 +266,7 @@ def pytest_configure(config):
                     if arg == '--distributed':
                         args.remove(args[index + 1])
                         args.remove(arg)
-                await session.start(mproc_num_cores, addl_args=args)
+                await session.start(mproc_num_cores, pytest_args=args)
             asyncio.run(main())
 
         config.reservation_thread = threading.Thread(target=reserve)
@@ -336,8 +334,7 @@ def pytest_runtestloop(session):
         if hasattr(item, "_request"):
             _process_fixtures(session, reporter, item)
     if is_worker:
-        with suppress(Exception):
-            WorkerSession.singleton().test_loop(session)
+        WorkerSession.singleton().test_loop(session)
     elif is_orchestrator:
         async def loop():
             try:
@@ -402,7 +399,6 @@ def pytest_runtest_logfinish(nodeid, location):
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     is_worker = WorkerSession.singleton() is not None
     is_orchestrator = MainSession.singleton() is not None
-    print(f">>>>>>>>>>>>>> TERM SUMMARY CALLED {exitstatus} {is_orchestrator} {is_worker}")
     verbose = config.getoption("mproc_verbose", default=False)
     is_worker = WorkerSession.singleton() is not None
     if is_worker:
@@ -444,19 +440,19 @@ def pytest_sessionfinish(session):
     uri = session.config.getoption('mproc_distributed_uri', default=None)
     is_distributed = uri is not None
     num_cores = session.config.getoption("mproc_numcores", default=None)
-
-    if MainSession.singleton():
-        with suppress(Exception):
+    if is_worker:
+       pass
+    elif is_orchestrator:
+        if MainSession.singleton():
             MainSession.singleton().shutdown()
+        MainSession._singleton = None
     if hasattr(session.config, 'ptmproc_session'):
         try:
             status = session.config.ptmproc_session.shutdown()
-            print(f">>>>>>>>>> !!!!!!!!!!!!! STAT SESS {status}")
         except Exception:
             status = -1
         if status != 0:
             raise SystemExit(status)
-    print(f">>>>>>>>>???????????  PYTEST FINISH CALLED {is_worker} {is_orchestrator}")
 
 ################
 # Process-safe temp dir

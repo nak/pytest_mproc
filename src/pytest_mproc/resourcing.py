@@ -1,3 +1,4 @@
+import binascii
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ class RemoteWorkerNode:
     addl_params: Dict[str, str]
     env: Dict[str, str]
     flags: List[str]
+    authkey: bytes
 
     @classmethod
     def from_json(cls, json_text: str):
@@ -38,7 +40,8 @@ class RemoteWorkerNode:
             address=(json_data['host'], int(json_data['port'])),
             addl_params={key: str(value) for key, value in json_data['addl_params'].items() if key.upper() != key},
             env={key: str(value) for key, value in json_data['addl_params'] if key.upper() == key},
-            flags=json_data['flags']
+            flags=json_data['flags'],
+            authkey=json_data['authkey']
         )
 
 
@@ -90,37 +93,48 @@ class FixedResourceManager(ResourceManager):
             raise ValueError(f"Given file name, '{uri_path}', in URI is not a file")
         self._path = path
 
-    async def reserve(self, count: int) -> AsyncIterator[RemoteWorkerNode]:
+    async def reserve(self, worker_count: int) -> AsyncIterator[RemoteWorkerNode]:
         count = 0
+        authkey = None
         async with aiofile.async_open(self._path, 'r') as in_stream:
             async for line in in_stream:
-                if line.startswith('#'):
+                line: str
+                if not line.strip() or line.startswith('#'):
                     continue
-                try:
-                    address, *args = line.split(',')
-                    host, port = address.split(':', maxsplit=1)
-                    port = int(port)
-                    kwargs = {}
-                    env = {}
-                    flags = []
-                    for arg in args:
-                        if '=' not in arg:
-                            flags.append(arg)
-                        else:
-                            k, v = arg.split('=')
-                            if k.upper() == k:
-                                env[k] = v
+                if line.startswith('authkey:'):
+                    authkey = binascii.a2b_hex(line[8:].strip())
+                    continue
+                else:
+                    if authkey is None:
+                        raise RuntimeError(f"No authkey defined in {self._path} as expected")
+                    try:
+                        address, *args = line.split(',')
+                        host, port = address.split(':', maxsplit=1)
+                        port = int(port)
+                        kwargs = {}
+                        env = {}
+                        flags = []
+                        for arg in args:
+                            if '=' not in arg:
+                                flags.append(arg)
                             else:
-                                kwargs[k] = v
-                    count += 1
-                    yield RemoteWorkerNode(
-                            address=(host, port), addl_params=kwargs, env=env,
-                            resource_id=f"resource-{count}",
-                            flags=flags
-                        )
-                except ValueError:
-                    always_print(f"Unable to parse line {line} in {self._path} for address(host/port) and arguments",
-                                 as_error=True)
+                                k, v = arg.split('=')
+                                if k.upper() == k:
+                                    env[k] = v
+                                else:
+                                    kwargs[k] = v
+                        count += 1
+                        yield RemoteWorkerNode(
+                                address=(host, port), addl_params=kwargs, env=env,
+                                resource_id=f"resource-{count}",
+                                flags=flags,
+                                authkey=authkey,
+                            )
+                        if count == worker_count:
+                            break
+                    except ValueError:
+                        always_print(f"Unable to parse line {line} in {self._path} for address(host/port) and arguments",
+                                     as_error=True)
 
     async def relinquish(self, worker_id: str):
         pass

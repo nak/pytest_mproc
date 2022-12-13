@@ -10,8 +10,6 @@ from pytest_mproc.user_output import always_print
 
 class SafeSerializable:
 
-    # HMMMMMM... THE PICKLING API NEVER SEEMS TO GET CALLED BY multiprocessing??
-
     def __getstate__(self):
         d = dict(self.__dict__)
         for key in [k for k in d if k.startswith('_')]:
@@ -62,12 +60,12 @@ mgr = None
 
 
 def SharedJoinableQueue():
-    global mgr
-    if mgr is None:
-        SyncManager.register("JoinableQueue", JoinableQueue, exposed=[
-            'get', 'put', 'task_done', 'join', 'close'
-        ])
-        mgr = SyncManager()
-        mgr.start()
-    return mgr.JoinableQueue()
+    #global mgr
+    #if mgr is None:
+        #SyncManager.register("JoinableQueue", JoinableQueue, exposed=[
+        #    'get', 'put', 'task_done', 'join', 'close'
+        #])
+        #mgr = SyncManager()
+        #mgr.start()
+    return JoinableQueue()
 

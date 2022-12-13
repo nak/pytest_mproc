@@ -1,6 +1,6 @@
 import os
 import subprocess
-import time
+import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import List
@@ -84,7 +84,7 @@ class WorkerAgentFactory:
             self._procs.append(proc)
             return agent
         else:
-            agent = WorkerAgent.as_server(address=(my_ip, port), authkey=authkey)
+            agent = WorkerAgent.start_server(address=(my_ip, port), authkey=authkey)
             self._agents.append(agent)
             return agent
 

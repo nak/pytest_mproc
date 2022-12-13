@@ -48,7 +48,7 @@ def test_start_session():
     server.start_globals()
     time.sleep(1)
     # noinspection PyUnresolvedReferences
-    client = Orchestrator.as_client(address=('localhost', port), authkey=authkey)
+    client = Orchestrator.as_client(address=('localhost', port), authkey=authkey, )
     client.start_session(session_id="Session1", args=['-s'], cwd=Path(os.getcwd()))
     assert list(server.sessions().copy()) == ['Session1']
     client.start_session(session_id="Session2", args=['-s'], cwd=Path(os.getcwd()))

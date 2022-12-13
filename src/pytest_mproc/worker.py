@@ -111,6 +111,7 @@ class WorkerSession:
         that it draws from to pick out the next test)
         :param session:  Where the test generator is kept
         """
+        debug_print(f"Worker {self._id} started test loop...")
         # global my_cov
         start_time = time.time()
         rusage = resource.getrusage(resource.RUSAGE_SELF)
@@ -271,10 +272,10 @@ class WorkerSession:
 
 class WorkerAgent(SafeSerializable):
     _mp_server: Optional[SyncManager] = None
-    _mp_client: Optional[SyncManager] = None
     _node_mgrs: Dict[str, Node.Manager] = {}
     _registered: bool = False
-    _instances: Dict[str, "WorkerAgent"] = {}
+    _singleton: Dict[Tuple[str, int], "WorkerAgent"] = {}
+    _proxies: Dict[Tuple[str, int], "WorkerAgent"] = {}
 
     @dataclass
     class TestSession:
@@ -289,86 +290,147 @@ class WorkerAgent(SafeSerializable):
         cwd: Path
         active: bool = True
 
-    def __init__(self, address: Optional[Tuple[str, int]] = None, authkey: Optional[bytes] = None):
-        if address is not None:
-            if authkey is None:
-                raise RuntimeError(f"Must supply authkey when address is not None")
+    def __init__(self, address: Optional[Tuple[str, int]] = None):
+        if address in self.__class__._singleton:
+            raise RuntimeError("Attempt to instantiate worker agent twice on same host")
         self._node_mgr: Dict[str, Node.Manager] = {}
         self._sessions: Dict[str, "WorkerAgent.TestSession"] = {}
         self._port = address[1] if address else None
+        self._address = address
+        self.__class__._singleton[address] = self
+
+    @property
+    def address(self):
+        return self._address
 
     @classmethod
-    def as_server(cls, address: Tuple[str, int], authkey: bytes) -> "WorkerAgent":
-        debug_print(f"worker agent as server: {address} {cls._mp_server} {cls._registered}")
-        if cls._mp_server is None:
-            if not cls._registered:
-                SyncManager.register(
-                    "WorkerAgent", WorkerAgent,
-                    exposed=['start_session', 'shutdown_session', 'start_worker', 'ping', 'shutdown'
-                             'shutdown_session'])
-                SyncManager.register('worker_agent_at', cls.worker_agent_at)
-                SyncManager.register('shutdown_agent', cls.shutdown_agent)
-                cls._registered = True
-            cls._mp_server = SyncManager(address, authkey)
-            cls._mp_server.start()
-            debug_print(f"Started worker agent server at {address} {cls._mp_server._state.value}")
+    def start_server(cls, address: Tuple[str, int], authkey: bytes) -> SyncManager:
+        debug_print(f"worker agent as server: {address} {cls._mp_server} ")
+        assert cls._mp_server is None
+        SyncManager.register('start_session', cls._cls_start_session)
+        SyncManager.register('shutdown_session', cls._cls_shutdown_session)
+        SyncManager.register('start_worker', cls._cls_start_worker)
+        SyncManager.register('ping', cls._cls_ping)
+        SyncManager.register('shutdown_agent', cls.shutdown_agent)
+        SyncManager.register('create', cls.create)  # only for server
+        _mp_server = SyncManager(address, authkey)
+        _mp_server.start()
         # noinspection PyUnresolvedReferences
-        return cls._mp_server.worker_agent_at(address=address, authkey=authkey.hex())
+        _mp_server.create(address)
+        debug_print(f"Started worker agent server at {address}  {authkey.hex()}")
+        # noinspection PyUnresolvedReferences
+        return _mp_server
 
     @classmethod
-    def worker_agent_at(cls, address: Tuple[str, int], authkey: Optional[str]) -> "WorkerAgent":
-        if address[0] not in cls._instances:
-            authkey = binascii.a2b_hex(authkey)
-            cls._instances[address[0]] = WorkerAgent(address=address, authkey=authkey)
-        elif address[1] != cls._instances[address[0]]._port:
-            raise RuntimeError(f"A worker agent is running on port {cls._instances[address[0]]._port}, "
-                               f"but requested connection on port {address[1]}")
-        return cls._instances[address[0]]
+    def create(cls, address):
+        cls._singleton[address] = WorkerAgent(address)
 
     @classmethod
     def as_client(cls, address: Tuple[str, int], authkey: bytes) -> "WorkerAgent":
-        debug_print(f"Worker agent client at {address} {cls._mp_client} {cls._registered}")
-        if cls._mp_client is None:
-            if not cls._registered:
-                SyncManager.register(
-                    "WorkerAgent",
-                    exposed=['start_session', 'shutdown_session', 'start_worker', 'ping', 'shutdown'
-                             'shutdown_session'])
-                SyncManager.register('worker_agent_at',)
-                SyncManager.register('shutdown_agent',)
-                cls._registered = True
-            debug_print(f"Connecting worker client at {address}...")
-            cls._mp_client = SyncManager(address=address, authkey=authkey)
-            try:
-                cls._mp_client.connect()
-            except ConnectionError:
-                cls._mp_client = None
-                raise
-            debug_print("Conneted worker agent client")
-        # noinspection PyUnresolvedReferences
-        return cls._mp_client.worker_agent_at(address, authkey.hex())
+        debug_print(f"Worker agent client at {address}")
+        if address in cls._proxies:
+            return cls._proxies[address]
+        if not cls._registered:
+            SyncManager.register('start_session',)
+            SyncManager.register('shutdown_session')
+            SyncManager.register('start_worker')
+            SyncManager.register('ping')
+            SyncManager.register('shutdown_agent',)
+            cls._registered = True
+        debug_print(f"Connecting worker client at {address}... {authkey.hex()}")
+        mp_client = SyncManager(address=address, authkey=authkey)
+        mp_client.connect()
+        debug_print(f"Connected worker agent client {authkey.hex()}")
 
-    @classmethod
-    def join(cls):
-        always_print(f">>>>>>>>>>>>>>>>>>> JOINING {cls._mp_server._state.value}")
-        return cls._mp_server.join()
+        class Proxy:
+            # noinspection PyMethodMayBeStatic
+            def start_session(self, session_id: str,
+                              main_address: Tuple[str, int], main_token: Optional[str],
+                              test_q: JoinableQueue, status_q: JoinableQueue,
+                              report_q: JoinableQueue,
+                              cwd: Path, args: List[str], token: Optional[str] = None,
+                              global_mgr_address: Optional[Tuple[str, int]] = None,
+                              node_mgr_port: Optional[int] = None):
+                try:
+                    # noinspection PyUnresolvedReferences
+                    return mp_client.start_session(
+                        address=address,
+                        session_id=session_id,
+                        main_address=main_address,
+                        main_token=main_token,
+                        test_q=test_q, status_q=status_q,
+                        report_q=report_q, cwd=cwd, args=args, token=token,
+                        global_mgr_address=global_mgr_address,
+                        node_mgr_port=node_mgr_port
+                    )
+                finally:
+                    always_print("DONE PROXY START SESSION")
+
+            # noinspection PyMethodMayBeStatic
+            def start_worker(self, session_id: str, worker_id: str):
+                # noinspection PyUnresolvedReferences
+                return mp_client.start_worker(address=address, session_id=session_id, worker_id=worker_id)
+
+            # noinspection PyMethodMayBeStatic
+            def ping(self) -> str:
+                # noinspection PyUnresolvedReferences
+                return mp_client.ping(address)
+
+            # noinspection PyMethodMayBeStatic
+            def shutdown_session(self, session_id: str, timeout: Optional[float] = None):
+                # noinspection PyUnresolvedReferences
+                return mp_client.shutdown_session(address, session_id, timeout)
+
+        # noinspection PyTypeChecker
+        cls._proxies[address] = Proxy()
+        return cls._proxies[address]
 
     @classmethod
     def as_local(cls):
-        return WorkerAgent(address=None, authkey=None)
+        return WorkerAgent(address=None)
 
-    def start_session(self, session_id: str, test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
+    @classmethod
+    def _cls_start_session(cls, address: Tuple[str, int],
+                           session_id: str,
+                           main_address: Tuple[str, int],
+                           main_token: Optional[str],
+                           test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
+                           cwd: Path, args: List[str], token: Optional[str] = None,
+                           global_mgr_address: Optional[Tuple[str, int]] = None,
+                           node_mgr_port: Optional[int] = None):
+        return cls._singleton[address].start_session(
+            session_id=session_id, main_address=main_address, main_token=main_token,
+            test_q=test_q, status_q=status_q, report_q=report_q,
+            cwd=cwd, args=args, token=token, global_mgr_address=global_mgr_address,
+            node_mgr_port=node_mgr_port)
+
+    # noinspection PyUnresolvedReferences
+    def start_session(self, session_id: str,
+                      main_address: Tuple[str, int], main_token: Optional[str],
+                      test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
                       cwd: Path, args: List[str], token: Optional[str] = None,
-                      global_mgr_address: Optional[Tuple[str, int]] = None):
+                      global_mgr_address: Optional[Tuple[str, int]] = None,
+                      node_mgr_port: Optional[int] = None):
         if session_id in self._sessions:
             raise KeyError(f"Worker TestSession '{session_id}' already exists")
+        if test_q is None:
+            sm = SyncManager(address=main_address, authkey=binascii.a2b_hex(main_token))
+            sm.register('get_test_q')
+            sm.register('get_status_q')
+            sm.register('get_report_q')
+            sm.connect()
+            test_q = sm.get_test_q()
+            status_q = sm.get_status_q()
+            report_q = sm.get_report_q()
         authkey = binascii.a2b_hex(token) if token is not None else None
-        node_mgr_port = _find_free_port()
         self._sessions[session_id] =\
             self.__class__.TestSession(test_q, status_q, report_q, global_mgr_address, node_mgr_port,
                                        args, {}, cwd=cwd, authkey=authkey)
-        self._node_mgr[session_id] = Node.Manager.as_server(node_mgr_port, authkey)
         debug_print(f"Started worker-session under {session_id} port {node_mgr_port}")
+
+    @classmethod
+    def _cls_start_worker(cls, address: Tuple[str, int], session_id: str, worker_id: str):
+        return cls._singleton[address].start_worker(session_id=session_id, worker_id=worker_id)
 
     def start_worker(self, session_id: str, worker_id: str):
         """
@@ -381,6 +443,7 @@ class WorkerAgent(SafeSerializable):
             raise ValueError(f"Worker {worker_id} for session {session_id} already exists")
         if not test_session.active:
             raise RuntimeError("Attempt to start worker when test session is not actively accepting new workers")
+        debug_print("Launching worker  process..")
         proc = multiprocessing.Process(target=main, args=(test_session.test_q,
                                                           test_session.status_q,
                                                           test_session.report_q,
@@ -390,11 +453,15 @@ class WorkerAgent(SafeSerializable):
                                                           worker_id,
                                                           test_session.authkey,
                                                           test_session.global_mgr_address,
-                                                          test_session.node_mgr_port,))
-
+                                                          test_session.node_mgr_port,)
+                                       )
         test_session.worker_procs[worker_id] = proc
         proc.start()
         debug_print(f"Started worker {worker_id} in separate process {proc.pid}")
+
+    @classmethod
+    def _cls_ping(cls, address: Tuple[str, int]) -> str:
+        return cls._singleton[address].ping()
 
     # noinspection PyMethodMayBeStatic
     def ping(self) -> str:
@@ -403,9 +470,21 @@ class WorkerAgent(SafeSerializable):
         """
         return "pong"
 
+    @classmethod
+    def _cls_shutdown(cls, address: Tuple[str, int], timeout: Optional[float] = None):
+        return cls._singleton[address].shutdown(timeout)
+
     def shutdown(self, timeout: Optional[float] = None):
+        debug_print(f"Shutting down worker agent .. {self._sessions}")
         for session_id in self._sessions.copy():
             self.shutdown_session(session_id, timeout)
+        self._sessions = {}
+        if self.__class__._mp_server:
+            self.__class__._mp_server.shutdown()
+
+    @classmethod
+    def _cls_shutdown_session(cls, address: Tuple[str, int], session_id: str, timeout: Optional[float] = None):
+        return cls._singleton[address].shutdown_session(session_id=session_id, timeout=timeout)
 
     def shutdown_session(self, session_id: str, timeout: Optional[float] = None):
         """
@@ -422,7 +501,7 @@ class WorkerAgent(SafeSerializable):
             del self._node_mgr[session_id]
         if test_session:
             for worker_id, worker in test_session.worker_procs.items():
-                debug_print(f"Waiting for {worker_id} to terminate...")
+                debug_print(f"Waiting for {worker_id} to terminate... {test_session.worker_procs}")
                 worker.join(timeout)
                 if worker.exitcode is None:
                     worker.terminate()
@@ -433,22 +512,29 @@ class WorkerAgent(SafeSerializable):
 
     @classmethod
     def shutdown_agent(cls, timeout: Optional[float] = None) -> None:
-        for host in cls._instances:
-            cls._instances[host].shutdown(timeout=timeout)
+        for instance in cls._singleton.values():
+            instance.shutdown(timeout=timeout)
         cls._sessions = {}
+        cls._singleton = {}
 
 
 def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue, cwd: Path,
          args: List[str], session_id: str, worker_id: str, authkey: bytes,
          global_mgr_address: Optional[Tuple[str, int]] = None, node_mgr_port: Optional[int] = None):
-    from pytest_mproc import plugin  # ensures auth_key is set
+    from pytest_mproc.worker import WorkerSession  # when working distributed, this is required otherwise singleton will be None
+    multiprocessing.current_process().authkey = authkey
+    for index, arg in enumerate(args.copy()):
+        if arg == '--cores':
+            args[index + 1] = '1'
     os.chdir(cwd)
     status_q.put(WorkerStarted(worker_id, os.getpid(), _get_my_ip()))
-    assert plugin  # to prevent flake8 unused import
     if global_mgr_address:
+        debug_print(f"Worker {worker_id} connecting to global fixture manager")
         Global.Manager.as_client(global_mgr_address, auth_key=authkey)
     if node_mgr_port:
-        node_mgr_client = Node.Manager.as_client(port=node_mgr_port, authkey=authkey)
+        debug_print(f"Worker {worker_id} connecting to node fixture manager")
+        Node.Manager._port = node_mgr_port
+        Node.Manager.as_client(port=node_mgr_port, authkey=authkey)  # start node client to create singleton client
     # noinspection PyUnresolvedReferences
     # from pytest_mproc.worker import WorkerSession  # to make Python happy
     worker = WorkerSession(session_id=session_id,
@@ -465,6 +551,7 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
     try:
         args = [a for a in args if not a.startswith('--log-file')]
         args += [f'--log-file={worker_id}/pytest_output.log']
+        debug_print(f"Worker {worker_id} calling pytest {args}  {id(WorkerSession)} {WorkerSession.singleton()} {os.getpid()}")
         status = pytest.main(args)
         if isinstance(status, pytest.ExitCode):
             status = status.value
@@ -492,17 +579,15 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
 
 if __name__ == "__main__":
     port = _find_free_port()
-    print(">>>>>>>>>>>> READING FROM STDIN")
     authkey_ = sys.stdin.readline()
     sys.stdin.close()
-    print(f">>>>>>>>>>>> READ {authkey_}")
     authkey_ = binascii.a2b_hex(authkey_.strip())
-    print(f">>>>>>>>>>>> READ {authkey_}")
-    agent_ = WorkerAgent.as_server(address=(_get_my_ip(), port), authkey=authkey_)
+    multiprocessing.current_process().authkey = authkey_
+    srvr = WorkerAgent.start_server(address=(_get_my_ip(), port), authkey=authkey_)
     sys.stderr.write(str(port) + '\n')
     sys.stderr.close()
     # serve until agent is shut down explicitly:
     # noinspection PyUnresolvedReferences
-    print("JOINING AGENT...")
-    WorkerAgent.join()
-    print("ENDING WORKER AGENT")
+    debug_print("Serving client...")
+    srvr.join()
+    always_print("Worker agent terminated")

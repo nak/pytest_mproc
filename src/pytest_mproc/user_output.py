@@ -27,7 +27,10 @@ def debug_print(msg: str, *args):
     global is_verbose
     if is_verbose or True:
         msg = f"[{_get_my_ip()}] {msg}"
-        print(msg % args)
+        if args:
+            print(msg % args)
+        else:
+            print(msg)
 
 
 def always_print(msg: str, *args, as_error: bool = False):

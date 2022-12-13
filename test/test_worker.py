@@ -136,7 +136,7 @@ def test_system_worker_e2e():
     agent_authkey = b'abcdef'
     global_mgr = Global.Manager.as_server(address=('localhost', global_mgr_port), auth_key=authkey)
     agent_port = _find_free_port()
-    agent = WorkerAgent.as_server(('localhost', agent_port), authkey=agent_authkey)
+    agent = WorkerAgent.start_server(('localhost', agent_port), authkey=agent_authkey)
     session_id = "Session1"
 
     def external_process(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue):
