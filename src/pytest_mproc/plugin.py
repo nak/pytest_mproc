@@ -157,6 +157,8 @@ def pytest_cmdline_main(config):
     is_orchestrator = 'PTMPROC_ORCHESTRATOR' in os.environ
     uri = config.getoption('mproc_distributed_uri', default=None)
     is_distributed = uri is not None
+    if is_worker:
+        config.workerinput = True  # mimics xdist and tells junitxml plugin to not produce xml log
     if mproc_num_cores is None or is_degraded() or mproc_disabled:
         if is_orchestrator:
             raise pytest.UsageError(
@@ -450,6 +452,7 @@ def pytest_sessionfinish(session):
             status = -1
         if status != 0:
             raise SystemExit(status)
+    return True
 
 ################
 # Process-safe temp dir

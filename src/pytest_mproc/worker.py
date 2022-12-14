@@ -527,12 +527,6 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
         if arg == '--cores':
             index = args.index(arg)
             args[index + 1] = '1'
-        elif arg == '--junitxml':
-            index = args.index(arg)
-            del args[index + 1]
-            args.remove(arg)
-        elif arg.startswith('--junitxml='):
-            args.remove(arg)
     os.chdir(cwd)
     if 'PTMPROC_ORCHESTRATOR' in os.environ:
         del os.environ['PTMPROC_ORCHESTRATOR']

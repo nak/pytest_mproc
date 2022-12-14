@@ -154,7 +154,7 @@ class SSHClient:
 
     async def remove(self, remote_path: Path):
         """
-        Remove path from remote client
+        Remove path (to file) from remote client
 
         :param remote_path: path to file to remove
         :raises: CommandExecutionFailure if command execution fails on remote client
