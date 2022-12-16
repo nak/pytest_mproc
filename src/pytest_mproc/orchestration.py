@@ -84,6 +84,7 @@ class Orchestrator(SafeSerializable):
             self._test_q = SharedJoinableQueue()
             self._status_q = SharedJoinableQueue()
             self._report_q = SharedJoinableQueue()
+        self._internal_server = None
 
     @classmethod
     def instance_at(cls, port: int, has_remote_workers: bool) -> Optional["Orchestrator"]:
@@ -123,6 +124,7 @@ class Orchestrator(SafeSerializable):
             cls._mp_client.connect()
         # noinspection PyUnresolvedReferences
         orchestrator = cls._mp_client.instance_at(address[1], has_remote_workers)
+        always_print(f">>>>>>>>>>>>>> STATE {cls._mp_client._state.value}")
         return orchestrator
 
     @classmethod
@@ -177,7 +179,6 @@ class Orchestrator(SafeSerializable):
         :param cwd: where to run the session (where all workers will run from)
         :returns: queue to pass reports back to overarching session
         """
-
         if session_id in self._sessions:
             raise ValueError(f"Session with id {session_id} already started")
         cls = self.__class__
@@ -189,11 +190,11 @@ class Orchestrator(SafeSerializable):
         # noinspection PyUnresolvedReferences
         authkey = authkey or multiprocessing.current_process().authkey
         if session_id not in self._worker_queues:
-            if cls._mp_server is None:
-                cls._mp_server = SyncManager(address=(_get_my_ip(), 0), authkey=authkey)
-                cls._mp_server.start()
+            if self._internal_server is None:
+                self._internal_server = SyncManager(address=(_get_my_ip(), 0), authkey=authkey)
+                self._internal_server.start()
             # noinspection PyUnresolvedReferences
-            worker_q = cls._mp_server.JoinableQueue()
+            worker_q = self._internal_server.JoinableQueue()
             self._worker_queues[session_id] = worker_q
         debug_print(f"Launching main session...{authkey.hex()} {multiprocessing.current_process().authkey.hex()}")
         proc = multiprocessing.Process(target=MainSession.launch,

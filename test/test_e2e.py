@@ -69,7 +69,7 @@ def test_local_distributed(monkeypatch, iterate):
     agent_proc = subprocess.Popen(cmd.split(), shell=False, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
                                   stdout=sys.stdout, env=env)
     agent_proc.stdin.write(authkey.hex().encode('utf-8') + b'\n')
-    agent_proc.stdin.close()
+    agent_proc.stdin.flush()
     try:
         port_img = agent_proc.stderr.readline()
         port = int(port_img)
@@ -90,6 +90,7 @@ def test_local_distributed(monkeypatch, iterate):
             assert test_suite.tests == 40
         assert proc.returncode == 1
     finally:
+        agent_proc.stdin.close()
         for name in os.listdir('.'):
             if name.startswith('pytest_mproc-') and Path(name).is_dir():
                 shutil.rmtree(name)
