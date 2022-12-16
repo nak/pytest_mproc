@@ -3,7 +3,8 @@ import sys
 
 from pytest_mproc import _get_my_ip
 
-is_verbose = os.environ.get("PTMPROC_VERBOSE", False) not in ['0', 'False', 'false', 'FALSE', False]
+is_verbose = os.environ.get("PTMPROC_VERBOSE", False) not in ['0', 'False', 'false', 'FALSE', False] \
+    or '--ptmproc-verbose' in sys.argv
 
 
 def set_verbose(verbose: bool):

@@ -1,8 +1,11 @@
 import binascii
+import configparser
 import multiprocessing
 import os
 import shutil
 import signal
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from multiprocessing.managers import SyncManager
 from pathlib import Path
@@ -13,20 +16,17 @@ import sys
 import time
 import traceback
 
-from contextlib import suppress
-from multiprocessing import (
-    JoinableQueue,
-)
+from contextlib import suppress, contextmanager
 from typing import (
     Dict,
     Iterator,
     List,
     Optional,
-    Tuple,
+    Tuple, Generator, Union,
 )
 
 from pytest_mproc.fixtures import Global, Node
-from pytest_mproc.mp import SafeSerializable
+from pytest_mproc.mp import SafeSerializable, JoinableQueue
 from pytest_mproc.user_output import always_print, debug_print
 from pytest_mproc import _get_my_ip, find_free_port
 from pytest_mproc.exceptions import TestError
@@ -370,9 +370,9 @@ class WorkerAgent(SafeSerializable):
                 return mp_client.start_worker(address=address, session_id=session_id, worker_id=worker_id)
 
             # noinspection PyMethodMayBeStatic
-            def ping(self) -> str:
+            def ping(self, session_id: str, worker_id: str) -> Dict[str, Union[str, int, bool]]:
                 # noinspection PyUnresolvedReferences
-                return mp_client.ping(address)
+                return mp_client.ping(address, session_id, worker_id)
 
             # noinspection PyMethodMayBeStatic
             def shutdown_session(self, session_id: str, timeout: Optional[float] = None):
@@ -458,15 +458,21 @@ class WorkerAgent(SafeSerializable):
         debug_print(f"Started worker {worker_id} in separate process {proc.pid}")
 
     @classmethod
-    def _cls_ping(cls, address: Tuple[str, int]) -> str:
-        return cls._singleton[address].ping()
+    def _cls_ping(cls, address: Tuple[str, int], session_id: str, worker_id: str) -> Dict[str, Union[str, int, bool]]:
+        return cls._singleton[address].ping(session_id, worker_id)
 
     # noinspection PyMethodMayBeStatic
-    def ping(self) -> str:
+    def ping(self, session_id: str, worker_id: str) -> Dict[str, Union[str, int, bool]]:
         """
         simple ping test when debugging multiprocessing
         """
-        return "pong"
+        if session_id not in self._sessions:
+            raise ValueError(f"No such session active for this worker agent: {session_id}")
+        test_session = self._sessions[session_id]
+        if worker_id not in test_session.worker_procs:
+            raise ValueError(f"No such worker, '{worker_id}', for session {session_id} for worker agent")
+        worker_proc = test_session.worker_procs[worker_id]
+        return {'host': _get_my_ip(), 'port': self._port, 'pid': worker_proc.pid, 'alive': worker_proc.exitcode is None}
 
     @classmethod
     def _cls_shutdown(cls, address: Tuple[str, int], timeout: Optional[float] = None):
@@ -580,24 +586,65 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
     sys.exit(status if status is not None else -1)
 
 
+# noinspection SpellCheckingInspection
+@contextmanager
+def worker_package() -> Generator[Path, None, None]:
+    """
+    :returns: a package for launching a worker agent remotely
+    """
+    root = Path(__file__).parent.parent
+    files = [
+        Path('pytest_mproc') / filename for filename in
+        ('worker.py', 'utils.py', 'user_output.py', 'mp.py', 'exceptions.py', 'data.py', 'constants.py', '__init__.py')
+    ]
+    temp_dir = tempfile.mkdtemp()
+    try:
+        zfile_path = Path(temp_dir) / 'worker_pkg.tgz'
+        with zipfile.ZipFile(zfile_path, mode='w') as zfile:
+            for filename in files:
+                zfile.write(filename=root / filename, arcname=filename)
+            executable = Path(sys.executable).name
+            cmd = f"{executable} -m pytest_mproc.worker"
+            start_filename = Path(temp_dir) / 'start'
+            with open(start_filename, 'w') as start_file:
+                start_file.write(f"{cmd}\n")
+            os.chmod(start_filename, mode=0o700)
+            zfile.write(filename=start_filename, arcname=start_filename.name)
+        yield zfile_path
+    finally:
+        shutil.rmtree(temp_dir)
+
+
 if __name__ == "__main__":
     port = find_free_port()
-    authkey_ = sys.stdin.readline()
-    sys.stdin.close()
-    authkey_ = binascii.a2b_hex(authkey_.strip())
+    if len(sys.argv) > 1:
+        ini_path = Path(sys.argv[1])
+        if not ini_path.is_file():
+            print(f"Ini path specified, {ini_path}', does not exist or is not a file")
+            sys.exit(1)
+        parser = configparser.ConfigParser()
+        parser.read(ini_path)
+        authkey_ = parser.get(section='pytest_mproc', option='authkey')
+        authkey_ = binascii.a2b_hex(authkey_)
+    else:
+        authkey_ = sys.stdin.readline()
+        sys.stdin.flush()
+        authkey_ = binascii.a2b_hex(authkey_.strip())
     multiprocessing.current_process().authkey = authkey_
-    srvr = WorkerAgent.start_server(address=(_get_my_ip(), port), authkey=authkey_)
-    sys.stderr.write(str(port) + '\n')
-    sys.stderr.close()
+    server = WorkerAgent.start_server(address=(_get_my_ip(), port), authkey=authkey_)
+    if len(sys.argv) <= 1:
+        sys.stderr.write(str(port) + '\n')
+        sys.stderr.close()
     # serve until agent is shut down explicitly:
     # noinspection PyUnresolvedReferences
 
-    def hanlder(*_, **__):
-        srvr.shutdown()
+    def handler(*_, **__):
+        server.shutdown()
 
 
     # noinspection PyTypeChecker
-    signal.signal(signal.SIGTERM, hanlder)
+    signal.signal(signal.SIGTERM, handler)
     debug_print("Serving client...")
-    srvr.join()
+    sys.stdin.read()
+    server.shutdown()
     always_print("Worker agent terminated")
