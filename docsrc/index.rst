@@ -18,12 +18,13 @@ Indices and tables
 Introduction
 ============
 
-Welcome to *pytest_mproc*, a plugin for pytest to run distributed testing via multiprocessing.  This manner
-of distributed testing has several advantages, including more efficient execution over pytest-xdist in many cases.
-
+Welcome to *pytest_mproc*, a plugin for pytest to run distributed testing via multiprocessing.
 To begin using pytest_mproc, just install:
 
 % pip install pytest-mproc
+
+You can run a simple parallelized test execution by then add "--cores <N>" to the command line of pytest where
+<N> is the number of parallel workers to use.
 
 *pytest_mproc* is usable in the context of a single host with multiple cores, as well as execution across a distributed
 set of machines.
@@ -31,20 +32,20 @@ set of machines.
 Why Use *pytest_mproc* over *pytest-xdist*?
 ===========================================
 
-Why not just use *xdist*, another parallelization mechanism for test execution? *pytest_mproc* was motivated due
+Why create another parallelization mechanism for test execution? *pytest_mproc* was motivated due
 to the high overhead cost in startup and overall execution times over a large number of tests utilizing larger numbers
-of cores.   *xdist* also
-does not provide a way to run distributed execution across multiple machines
+of cores when using another framework, *pytest-xdist*.  *pytest_mproc* fixed these issues and also adds the ability
+to parallelize across multiple machines (whereas xdist only support parallel execution on a single host).
 
-*pytest_mproc* has several advantages over xdist, depending on your situation:
+The specific advantages of *pytest_mproc* are:
 
-* Overhead firing up worker threads on startup is much less, and start-up time does not grow with increasing number
+* Reduced overhead firing up worker threads on startup, and start-up time does not grow with increasing number
   of cores as in *xdist*
-* It uses a pull model, so that each worker pulls the next test from a master queue, with no need to figure
-  out how to divide the tests beforehand.  The disadvantage is that optimal efficiency requires knowledge to
-  prioritize longer running tests first (in cases where test case times are disparate).
+* It uses a pull model to determine next-test-torun: each worker pulls the next test from a master queue,
+  with no need to formulate out how to divide the tests beforehand.  (The disadvantage is that optimal efficiency
+  requires knowledge to prioritize longer running tests first).
 * It provides a 'global' scoped test fixture to provide a single instance of a fixture across all tests, regardless of
-  how many nodes.
+  how many nodes OR hosts.
 * It provide a 'node' scoped test fixture that is a single instance across all workers on a single machine (node)
 * It allows you to programmatically group together a bunch of tests to run serially on a single worker process
 * It supports execution across multiple machines
@@ -77,7 +78,8 @@ refer to a single machine within a group of machines (over which execution is di
 refers to the orchestrator of the tests, responsible for overseeing test execution and reporting results to the
 user.  The term 'worker' is used to specify a single process running on a node that is doing the actual test
 execution.  The main node can distribute tests across multiple other nodes, with multiple worker processes executing
-within each node.  Parallelization across multiple machines is an advanced topic described below.
+within each node.  Parallelization across multiple machines is an advanced topic described toward the end of this
+document.
 
 Disabling *pytest_mproc* from Command Line
 ------------------------------------------
@@ -90,7 +92,7 @@ Grouping Tests
 ==============
 
 By default all tests are assumed independently runnable and isolated from one another, and the order in which they
-run within which process does not matter.  To group tests that must run serially within the
+run does not matter.  To group tests that must run serially within the
 same process/thread, annotate each test using a unique name for the group:
 
 .. code-block:: python
@@ -173,19 +175,18 @@ You can specify a priority for test execution using the *pytest_mproc.priority* 
       pass
 
 Groups with lower integer priority value are scheduled before those with a higher priority value.  Thus, a
-group with priority *pytest_mproc.DEFAULT_PRIORITY-1* will be scheduled before a group with priority
-*pytest_mproc.DEFAULT_PRIORITY-2*.  Of course, the default priority of *pytest_mproc.DEFAULT_PRIORITY*  is used if
+group with priority *pytest_mproc.DEFAULT_PRIORITY-2* will be scheduled before a group with priority
+*pytest_mproc.DEFAULT_PRIORITY-1*.  Of course, the default priority of *pytest_mproc.DEFAULT_PRIORITY*  is used if
 unspecified.
 
-Priorities should be specified to the default priority assigned to all tests without decorators, which can be
-obtained through the variable *pytest_mproc.DEFAULT_PRIORITY*.  When working with grouped tests as explained above,
-the priorities are scoped.  That is, at a global level, the priority of a group of tests will determine that group's
+When working with grouped tests (see above),
+the priorities are scoped.  That is, the priority of a group of tests will determine that group's
 execution order relative to all other top-level tests or test groups. For tests within a group, the priority of each test
 will determine the order of execution only within that group.  *pytest_mproc* does not guarantee order of
 execution for tests or test groups with the same priority.
 
 If you specify a priority on a class of tests, all test methods within that class will have that priority, unless
-a specific priority is assigned to that method through its own decorator.  In that class, the decorator for the class
+a specific priority is assigned to that method through its own decorator.  In that case, the decorator for the class
 method is obeyed.
 
 
@@ -193,26 +194,29 @@ Globally Scoped Fixtures
 ========================
 
 *pytest_mproc* uses multiprocessing module to achieve parallel concurrency.
-This raises interesting behaviors when using *pytest* and 'session' scoped fixtures.
+This raises interesting behaviors when using *pytest* and 'session' scoped fixtures (similarly found in *xdist*).
 For multiple-process execution, Each subprocess that is launched will create its own
 session-level fixture;  in other words,  a session in the context of *pytest* is a per-process concept,
 with one session-level fixture for each process.  'session' becomes a misnomer in *pytest* in this way as the term
 was not conceived with parallelization in mind.  This is often not obvious to test developers.
 At times, a global fixture is needed, with a
-single instantiation across all processes and tests.  An example might be setting up a single test database.
-(NOTE: when running on more than one machine, also see 'node-level' fixtures discussed below)
+single instantiation across all machines, processes and tests.
 
-To achieve this, *pytest_mproc* adds a 'global' scope feature, instantiated only once and shared with all nodes.
-Behind the scenes, the system uses pythons *multiprocessing*
-module's BaseManager to provide this feature.  This is mostly transparent to the developer, with one notable exception.
-In order to communicate a fixture globally across multiple *Process* es, the object returned (or yielded) from a
-globally scoped fixture must be 'picklable'.  To declare a fixture global:
+To achieve this, *pytest_mproc* adds a 'global' scope feature. Such a fixtue is instantiated only once
+and shared with all workers across all nodes.
+Behind the scenes, the system uses ps *multiprocessing*
+module's BaseManager to provide this feature.  Since objects returned from a global fixtures must be
+shared across processes and even machines, the object returned (or yielded) from a
+globally scoped fixture must be 'pickle-able'.  If *pytest_mproc* is installed but not invoked during execution
+(aka normal serial execution), global fixtures revert to session-scoped fixtures.
+
+To declare a fixture global:
 
 .. code-block:: python
 
    import pytest
 
-   @pytest_mproc.fixtures.global_fixture(host="some.host", port=<some port, or None to pick a random free port>)
+   @pytest_mproc.fixtures.global_fixture()
    def globally_scoped_fixture()
        ...
 
@@ -220,7 +224,7 @@ The global fixture is the highest level above 'session' in the hierarchy.  That 
 depend on other globally scoped fixtures.
 
 .. warning::
-    Values returned or yielded from a global fixture must be picklable so as to be shared across multiple
+    Values returned or yielded from a global fixture must be pickle-able so as to be shared across multiple
     independent subprocesses.
 
 Global fixtures can be passed any keyword args supported by *pytest.fixture* EXCEPT autouse.
@@ -231,25 +235,28 @@ not to cause a race condition.
 Node-scoped Fixtures
 ====================
 
-With the system now allowing execution of multiple workers on a single machine, and execution across multiple machines,
-this introduces another level of scoping of fixtures:  *node*-scoped fixtures.  A node-level fixture is
-instantiated once per node and such instance is only available to workers (aka all test processes) on that specific node.
+*pytest_mproc* also allows for another scope for fixtures:  *node*-scoped fixtures.  A node-level fixture is
+instantiated once per node (machine) and such instance is only available to workers (aka all test processes)
+on that specific node.
 
-To declare a fixture to be scoped to a node, which declares the optional autouse:
+To declare a fixture to be scoped to a node:
 
 .. code-block:: python
 
    import pytest
 
-   @pytest_mproc.fixtures.node_fixture(autouse=True)
+   @pytest_mproc.fixtures.node_fixture()
    def globally_scoped_fixture()
        ...
 
-Node fixtures can be passed any keyword args supported by pytest.fixure.
+Node fixtures can be passed any keyword args supported by pytest.fixture.
 
 .. warning::
-    Values returned or yielded from a fixture with scope to a node must be picklable so as to be shared across multiple
-    independent subprocesses.
+    Values returned or yielded from a fixture with scope to a node must be pickle-able as described above for global
+    fixtures.
+
+If test execution is confined to a single (host) machine, then global fixtures and node fixtures are equivalent.
+
 
 A Safe *tmpdir* Fixture
 =======================
