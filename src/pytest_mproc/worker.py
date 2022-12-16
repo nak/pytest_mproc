@@ -25,6 +25,7 @@ from typing import (
     Tuple, Generator, Union,
 )
 
+from pytest_mproc.constants import ENV_PTMPROC_ORCHESTRATOR, ENV_PTMPROC_WORKER, ENV_PTMPROC_SESSION_ID
 from pytest_mproc.fixtures import Global, Node
 from pytest_mproc.mp import SafeSerializable, JoinableQueue
 from pytest_mproc.user_output import always_print, debug_print
@@ -534,16 +535,16 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
             index = args.index(arg)
             args[index + 1] = '1'
     os.chdir(cwd)
-    if 'PTMPROC_ORCHESTRATOR' in os.environ:
-        del os.environ['PTMPROC_ORCHESTRATOR']
-    os.environ['PTMPROC_WORKER'] = worker_id
+    if ENV_PTMPROC_ORCHESTRATOR in os.environ:
+        del os.environ[ENV_PTMPROC_ORCHESTRATOR]
+    os.environ[ENV_PTMPROC_WORKER] = worker_id
+    os.environ[ENV_PTMPROC_SESSION_ID] = session_id
     status_q.put(WorkerStarted(worker_id, os.getpid(), _get_my_ip()))
     if global_mgr_address:
         always_print(f"Worker {worker_id} connecting to global fixture manager", as_error=True)
         Global.Manager.as_client(global_mgr_address, auth_key=authkey)
     if node_mgr_port:
         debug_print(f"Worker {worker_id} connecting to node fixture manager")
-        Node.Manager._port = node_mgr_port
         Node.Manager.as_client(port=node_mgr_port, authkey=authkey)  # start node client to create singleton client
     # noinspection PyUnresolvedReferences
     worker = WorkerSession(session_id=session_id,

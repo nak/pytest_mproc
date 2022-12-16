@@ -5,10 +5,12 @@ import asyncio
 import os
 import sys
 import threading
+import traceback
 
 import _pytest.terminal
 
 from pytest_mproc import user_output
+from pytest_mproc.constants import ENV_PTMPROC_ORCHESTRATOR, ENV_PTMPROC_WORKER
 from pytest_mproc.session import Session
 from pytest_mproc.resourcing import ResourceManager
 from pytest_mproc.user_output import always_print
@@ -51,7 +53,7 @@ def parse_numprocesses(s: str) -> int:
     :param s: text to process
     :return: number of parallel worker processes to use
     """
-    is_worker = 'PTMPROC_WORKER' in os.environ
+    is_worker = ENV_PTMPROC_WORKER in os.environ
     if is_worker:
         return 1  # override for worker that runs one worker per core
     try:
@@ -153,8 +155,8 @@ def pytest_cmdline_main(config):
     mproc_disabled = config.getoption("mproc_disabled", default=False)
     mproc_num_cores = config.getoption("mproc_numcores", default=None)
     user_output.is_verbose = config.getoption("mproc_verbose", default=False)
-    is_worker = 'PTMPROC_WORKER' in os.environ
-    is_orchestrator = 'PTMPROC_ORCHESTRATOR' in os.environ
+    is_worker = ENV_PTMPROC_WORKER in os.environ
+    is_orchestrator = ENV_PTMPROC_ORCHESTRATOR in os.environ
     uri = config.getoption('mproc_distributed_uri', default=None)
     is_distributed = uri is not None
     if is_worker:
@@ -250,8 +252,8 @@ def pytest_sessionstart(session):
 def pytest_configure(config):
     # if config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
     #    return
-    is_worker = 'PTMPROC_WORKER' in os.environ
-    is_orchestrator = 'PTMPROC_ORCHESTRATOR' in os.environ
+    is_worker = ENV_PTMPROC_WORKER in os.environ
+    is_orchestrator = ENV_PTMPROC_ORCHESTRATOR in os.environ
     is_distributed = config.getoption('mproc_distributed_uri', default=None) is not None
     mproc_num_cores = config.getoption("mproc_numcores", default=None)
     if not is_worker and ((mproc_num_cores is None)
@@ -308,8 +310,8 @@ def _process_fixtures(session, reporter, item):
 
 # noinspection PyProtectedMember,SpellCheckingInspection
 def pytest_runtestloop(session):
-    is_worker = 'PTMPROC_WORKER' in os.environ
-    is_orchestrator = 'PTMPROC_ORCHESTRATOR' in os.environ
+    is_worker = ENV_PTMPROC_WORKER in os.environ
+    is_orchestrator = ENV_PTMPROC_ORCHESTRATOR in os.environ
     is_distributed = session.config.getoption('mproc_distributed_uri', default=None) is not None
     mproc_num_cores = session.config.getoption("mproc_numcores", default=None)
     if session.config.option.collectonly:
@@ -343,6 +345,7 @@ def pytest_runtestloop(session):
             except asyncio.exceptions.CancelledError:
                 pytest.exit("Tests canceled")
             except Exception as exc:
+                traceback.print_exc()
                 reporter.write(f"{exc.__class__.__qualname__}: {exc}", red=True)
                 # noinspection SpellCheckingInspection
                 session.shouldfail = True
@@ -359,7 +362,7 @@ def pytest_runtestloop(session):
 def pytest_collection_finish(session) -> None:
     config = session.config
     verbose = config.getoption("mproc_verbose", default=False)
-    is_worker = 'PTMPROC_WORKER' in os.environ
+    is_worker = ENV_PTMPROC_WORKER in os.environ
     if is_worker:
         config.option.verbose = -2
         with suppress(Exception):
@@ -398,8 +401,8 @@ def pytest_runtest_logfinish(nodeid, location):
 # noinspection PyUnusedLocal,SpellCheckingInspection
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    is_worker = 'PTMPROC_WORKER' in os.environ
-    is_orchestrator = 'PTMPROC_ORCHESTRATOR' in os.environ
+    is_worker = ENV_PTMPROC_WORKER in os.environ
+    is_orchestrator = ENV_PTMPROC_ORCHESTRATOR in os.environ
     verbose = config.getoption("mproc_verbose", default=False)
     if is_worker:
         config.option.verbose = -2
@@ -436,8 +439,8 @@ def pytest_sessionstart(session) -> None:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionfinish(session):
-    is_worker = 'PTMPROC_WORKER' in os.environ
-    is_orchestrator = 'PTMPROC_ORCHESTRATOR' in os.environ
+    is_worker = ENV_PTMPROC_WORKER in os.environ
+    is_orchestrator = ENV_PTMPROC_ORCHESTRATOR in os.environ
     uri = session.config.getoption('mproc_distributed_uri', default=None)
     is_distributed = uri is not None
     num_cores = session.config.getoption("mproc_numcores", default=None)

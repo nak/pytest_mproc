@@ -6,6 +6,7 @@ from contextlib import suppress
 from multiprocessing.managers import BaseManager
 from typing import Any, Dict, Tuple, Optional
 
+from pytest_mproc.constants import ENV_PTMPROC_SESSION_ID
 from pytest_mproc.user_output import debug_print, always_print
 
 
@@ -61,28 +62,29 @@ class Node:
 
     class Manager(FixtureManager):
 
-        _port: int = 0
+        _ports: Dict[str, int] = {}
 
         def __init__(self, port: int, authkey: bytes, name: str = "Node.Manager"):
             super().__init__(("127.0.0.1", port), authkey)
 
         @classmethod
-        def port(cls):
-            return cls._port
+        def port(cls) -> Optional[int]:
+            if ENV_PTMPROC_SESSION_ID in os.environ:
+                return cls._ports[os.environ[ENV_PTMPROC_SESSION_ID]]
+            return None
 
         @classmethod
-        def as_server(cls, port: int, authkey: bytes) -> "Node.Manager":
+        def as_server(cls, port: int, session_id: str, authkey: bytes) -> "Node.Manager":
             instance = cls(port=port, authkey=authkey)
             instance.start()
-            assert cls._port == 0
-            cls._port = port
+            cls._ports[session_id] = port
             return instance
 
         @classmethod
         def as_client(cls, port: int, authkey: Optional[bytes] = None) -> "Node.Manager":
-            port = cls._port if port == 0 else port
             assert port != 0
-            cls._port = port
+            if ENV_PTMPROC_SESSION_ID in os.environ:
+                cls._ports[os.environ[ENV_PTMPROC_SESSION_ID]] = port
             instance = cls(port=port, authkey=authkey)
             instance.connect()
             return instance
@@ -245,9 +247,9 @@ def node_fixture(func=None, **kwargs):
             return value
 
         # noinspection PyProtectedMember
-        if Node.Manager._port != 0:
+        if ENV_PTMPROC_SESSION_ID in os.environ and os.environ[ENV_PTMPROC_SESSION_ID] in Node.Manager._ports:
             # noinspection PyProtectedMember
-            node_mgr = Node.Manager.as_client(Node.Manager._port)
+            node_mgr = Node.Manager.as_client(Node.Manager._ports[os.environ[ENV_PTMPROC_SESSION_ID]])
             return pytest.fixture(scope='session', **kwargs)(_wrapper)
         else:
             return pytest.fixture(scope='session', **kwargs)(func)

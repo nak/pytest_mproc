@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import secrets
 import signal
+import traceback
 
 from pytest_mproc.mp import JoinableQueue, SharedJoinableQueue
 from multiprocessing.managers import BaseManager, SyncManager
@@ -22,7 +23,7 @@ from _pytest.reports import TestReport
 
 from pytest_mproc import AsyncMPQueue, _get_my_ip, find_free_port
 from pytest_mproc.exceptions import FatalError
-from pytest_mproc.constants import DEFAULT_PRIORITY
+from pytest_mproc.constants import DEFAULT_PRIORITY, ENV_PTMPROC_ORCHESTRATOR, ENV_PTMPROC_SESSION_ID
 from pytest_mproc.data import (
     WorkerExited,
     GroupTag,
@@ -124,7 +125,6 @@ class Orchestrator(SafeSerializable):
             cls._mp_client.connect()
         # noinspection PyUnresolvedReferences
         orchestrator = cls._mp_client.instance_at(address[1], has_remote_workers)
-        always_print(f">>>>>>>>>>>>>> STATE {cls._mp_client._state.value}")
         return orchestrator
 
     @classmethod
@@ -181,6 +181,7 @@ class Orchestrator(SafeSerializable):
         """
         if session_id in self._sessions:
             raise ValueError(f"Session with id {session_id} already started")
+        os.environ[ENV_PTMPROC_SESSION_ID] = session_id
         cls = self.__class__
         self._session_args[session_id] = args
         # noinspection PyProtectedMember,PyUnresolvedReferences
@@ -196,19 +197,22 @@ class Orchestrator(SafeSerializable):
             # noinspection PyUnresolvedReferences
             worker_q = self._internal_server.JoinableQueue()
             self._worker_queues[session_id] = worker_q
+        self._node_mgr_port[session_id] = find_free_port()
+        self._node_mgr[session_id] = Node.Manager.as_server(self._node_mgr_port[session_id],
+                                                            session_id=session_id,
+                                                            authkey=authkey)
         debug_print(f"Launching main session...{authkey.hex()} {multiprocessing.current_process().authkey.hex()}")
         proc = multiprocessing.Process(target=MainSession.launch,
                                        args=(session_id, authkey, self._main_address, self._main_authkey,
                                              self._test_q, self._status_q, self._report_q,
-                                             self._worker_queues[session_id], args, cwd),
+                                             self._worker_queues[session_id], args, cwd,
+                                             self._node_mgr_port[session_id]),
                                        )
         if authkey is not None:
             proc.authkey = authkey
         proc.start()
         debug_print(f"Main session '{session_id}' launched [{proc.pid}]")
         self._sessions[session_id] = proc
-        self._node_mgr_port[session_id] = find_free_port()
-        self._node_mgr[session_id] = Node.Manager.as_server(self._node_mgr_port[session_id], authkey=authkey)
         return self._report_q
 
     def join_session(self, session_id: str, on_error: bool, timeout: Optional[float] = None) -> int:
@@ -314,11 +318,13 @@ class MainSession:
     def launch(session_id: str, authkey: bytes, main_address: Optional[Tuple[int, str]],
                main_authkey: Optional[bytes],
                test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue,
-               worker_q: JoinableQueue, args: List[str], cwd: Path) -> None:
+               worker_q: JoinableQueue, args: List[str], cwd: Path,
+               node_mgr_port: int) -> None:
         os.chdir(cwd)
         multiprocessing.current_process().authkey = authkey
         debug_print(f"Starting main session {session_id}... {args}")
         status = -1
+        Node.Manager._ports[session_id] = node_mgr_port
         if main_address:
 
             def get_test_q():
@@ -355,7 +361,8 @@ class MainSession:
                     args.append('--log-file=pytest_debug.log')
                 debug_print(f"Starting main orchestrator...\n   cmd: pytest {' '.join(args)}\n   from: {cwd}"
                             f"\n    args: {args}")
-                os.environ['PTMPROC_ORCHESTRATOR'] = '1'
+                os.environ[ENV_PTMPROC_ORCHESTRATOR] = '1'
+                os.environ[ENV_PTMPROC_SESSION_ID] = session_id
                 status = pytest.main(args)
                 worker_q.put(None)  # signals no more workers to be processed/added
                 if isinstance(status, pytest.ExitCode):
@@ -593,6 +600,7 @@ class MainSession:
             always_print("\n!!! Testing interrupted reading of results !!!")
             raise
         except Exception as e:
+            traceback.print_exc()
             always_print(f"Fatal exception during results processing, shutting down: {e}", as_error=True)
             raise
         finally:
