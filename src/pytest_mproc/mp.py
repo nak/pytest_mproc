@@ -2,10 +2,7 @@
 Convenience definitions to work around the faults and silliness underlying multiprocessing module in places
 """
 import multiprocessing
-from multiprocessing.managers import SyncManager
 from typing import Any, Dict, TypeVar, Generic, Optional
-
-from pytest_mproc.user_output import always_print
 
 
 class SafeSerializable:

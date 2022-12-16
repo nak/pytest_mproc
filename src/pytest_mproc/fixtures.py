@@ -8,8 +8,6 @@ from typing import Any, Dict, Tuple, Optional
 
 from pytest_mproc.user_output import debug_print, always_print
 
-# assert plugin  # import takes care of some things on import, but not used otherwise; here to make flake8 happy
-
 
 logging.basicConfig(level=logging.DEBUG)
 
