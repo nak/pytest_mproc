@@ -44,7 +44,6 @@ class Session:
         # noinspection PyTypeChecker
         self._orchestrator = Orchestrator.as_local(has_remote_workers=resource_mgr is not None) if self._is_local \
             else Orchestrator.as_client(self._orchestrator_address, authkey, resource_mgr is not None)
-        self._mp = multiprocessing.Manager() if not self._is_local else None
         self._report_q: Optional[AsyncMPQueue] = None
         self._global_mgr_address: Optional[Tuple[str, int]] = None
         self._session_id = self._new_session_id()
@@ -99,8 +98,6 @@ class Session:
 
     def shutdown(self, on_error: bool = False) -> int:
         status = self._orchestrator.shutdown_session(session_id=self._session_id, on_error=on_error)
-        if self._mp is not None:
-            self._mp.shutdown()
         return status if not on_error else -1
 
     async def process_reports(self, hook):
@@ -145,10 +142,14 @@ class Session:
                     hook.pytest_runtest_logfinish(nodeid=report_.nodeid, location=report_.location)
             return False
         try:
+            always_print(f">>>>>>>>>>>>>>>>> GETTING")
             report = await self._report_q.get()
+            always_print(f">>>>>>>>>>>>>>>>> GOT {report}")
             while report is not None:
                 process(report)
+                always_print(f">>>>>>>>>>>>>>>>> GETTING")
                 report = await self._report_q.get()
+                always_print(f">>>>>>>>>>>>>>>>> GOT {report}")
             debug_print(f"No more reports to process {self._pending_reports}")
             if tasks:
                 await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)

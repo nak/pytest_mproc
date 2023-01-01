@@ -5,7 +5,8 @@ import secrets
 import threading
 import time
 from multiprocessing import JoinableQueue
-from typing import List, AsyncIterator
+from pathlib import Path
+from typing import List, AsyncIterator, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -29,6 +30,7 @@ class MockHook:
         self.reported.append(report.nodeid)
 
     def pytest_runtest_logstart(self, nodeid: str, location):
+        print(f">>>>>>>>>>>>>>>>>>>>>>> STARTED {nodeid}")
         self.started.append(nodeid)
 
     def pytest_runtest_logfinish(self, nodeid: str, location):
@@ -44,9 +46,11 @@ def hook():
 async def test_process_reports(hook):
     with Session() as session:
 
-        def mock_launch(session_id: str, token: str, test_q: JoinableQueue, status_q: JoinableQueue,
+        def mock_launch(session_id: str, authkey: bytes, main_address: Optional[Tuple[str, int]],
+                        main_authkey: Optional[bytes],
+                        test_q: JoinableQueue, status_q: JoinableQueue,
                         report_q: JoinableQueue,
-                        worker_q: JoinableQueue, args: List[str], cwd):
+                        worker_q: JoinableQueue, args: List[str], cwd: Path, node_mgr_port: int):
             worker = worker_q.get()
             while worker is not None:
                 time.sleep(1)
@@ -70,6 +74,7 @@ async def test_process_reports(hook):
                     for item in items:
                         await session._report_q.put(item)
                     await session._report_q.put(WorkerExited(worker_id="Worker-1", pid=os.getpid(), host='localhost'))
+                    await session._report_q.put(None)
                 asyncio.run(do())
 
             proc = multiprocessing.Process(target=populate)
@@ -100,9 +105,11 @@ async def test_process_reports_nonlocal(hook):
 
     port = find_free_port()
 
-    def mock_launch(session_id: str, token: str, test_q: JoinableQueue, status_q: JoinableQueue,
-                    report_q: JoinableQueue,
-                    worker_q: JoinableQueue, args: List[str], cwd):
+    def mock_launch(session_id: str, authkey: bytes, main_address: Optional[Tuple[str, int]],
+                        main_authkey: Optional[bytes],
+                        test_q: JoinableQueue, status_q: JoinableQueue,
+                        report_q: JoinableQueue,
+                        worker_q: JoinableQueue, args: List[str], cwd: Path, node_mgr_port: int):
         worker = worker_q.get()
         while worker is not None:
             start_worker(report_q, session_id, worker[0], None)
@@ -119,6 +126,7 @@ async def test_process_reports_nonlocal(hook):
         def worker():
             nonlocal nodeids
             for nodeid in nodeids[worker_id]:
+                print(f">>>>>>>>>>>>> PUTTING {nodeid}")
                 report_q.put(ReportStarted(nodeid=nodeid, location="here"))
                 report_q.put(TestReport(nodeid=nodeid, location=("there", None, ""),
                                                     longrepr="", when='call', keywords={},
@@ -126,7 +134,7 @@ async def test_process_reports_nonlocal(hook):
                 report_q.put(ReportFinished(nodeid=nodeid, location="here"))
             report_q.put(WorkerExited(worker_id=worker_id,
                                             pid=os.getpid(), host='localhost'))
-
+            report_q.put(None)
         thread = threading.Thread(target=worker)
         thread.start()
 
@@ -139,6 +147,7 @@ async def test_process_reports_nonlocal(hook):
             with Session(resource_mgr=resource_mgr, orchestrator_address=('localhost', port),
                          authkey=authkey) as session:
                 await session.start(worker_count=14, pytest_args=[])
+                raise Exception("HERE")
                 await session.process_reports(hook)
                 assert set(hook.started) == {f'node-{i}' for i in range(112)}, "Not all tests started"
                 assert set(hook.finished) == {f'node-{i}' for i in range(112)}, "Not all tests finished"

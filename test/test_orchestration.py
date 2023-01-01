@@ -5,9 +5,9 @@ import shutil
 import signal
 import time
 from contextlib import suppress
+from typing import Optional, Tuple
+
 from pytest_mproc.mp import JoinableQueue
-# noinspection PyProtectedMember
-from pytest_mproc.mp import SharedJoinableQueue
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,9 +31,11 @@ def test_start_globals():
 
 
 # noinspection PyUnusedLocal
-def mock_launch(session_id: str, authkey: bytes, test_q: JoinableQueue, status_q: JoinableQueue,
+def mock_launch(session_id: str, authkey: bytes, main_address: Optional[Tuple[int, str]],
+                main_authkey: Optional[bytes], test_q: JoinableQueue, status_q: JoinableQueue,
                 report_q: JoinableQueue,
-                worker_q: JoinableQueue, args, cwd):
+                worker_q: JoinableQueue, args, cwd,
+                node_mgr_port: int):
     worker = worker_q.get()
     while worker is not None:
         time.sleep(1)
@@ -90,10 +92,10 @@ def test_start_session_nonlocal():
             client.start_session(session_id="Session2", args=[
                 '-s', '--cores', '10', f'--ignore={str(Path(__file__).parent)}'], cwd=TEST_PROXY_DIR)
         status = client.shutdown_session(session_id="Session1", timeout=5)
-        assert status.copy()['exitcode'] == -signal.SIGTERM
+        assert status['exitcode'] == -signal.SIGTERM
         assert client.sessions().copy() == ['Session2']
         status = client.shutdown_session(session_id="Session2", timeout=5)
-        assert status.copy()['exitcode'] == -signal.SIGTERM
+        assert status['exitcode'] == -signal.SIGTERM
         assert not client.sessions().copy()
 
     try:

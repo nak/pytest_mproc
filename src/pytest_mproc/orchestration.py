@@ -255,15 +255,15 @@ class Orchestrator(SafeSerializable):
         :param on_error: if True, will terminate abruptly
         :param timeout: optional timeout to wait before forcibly closing main session (default is 10 seconds)
         """
+        if session_id in self._worker_queues:
+            with suppress(BrokenPipeError, TimeoutError):
+                self._worker_queues[session_id].put(None, block=False, timeout=1)
+            # self._worker_queues[session_id].close()
+            del self._worker_queues[session_id]
         if session_id in self._node_mgr:
             self._node_mgr[session_id].shutdown()
         if Global.Manager.singleton():
             Global.Manager.singleton().shutdown()
-        if session_id in self._worker_queues:
-            with suppress(BrokenPipeError, TimeoutError):
-                self._worker_queues[session_id].put(None, timeout=1)
-            # self._worker_queues[session_id].close()
-            del self._worker_queues[session_id]
         if session_id in self._sessions:
             status = self.join_session(session_id, on_error=on_error, timeout=timeout)
             return status
