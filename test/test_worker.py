@@ -1,7 +1,7 @@
 import multiprocessing
 import os
 from queue import Empty
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing import JoinableQueue
 from pathlib import Path
 from typing import List
@@ -91,17 +91,17 @@ def test_test_loop():
 
     @dataclass
     class Config:
-        hook: Hook = Hook()
+        hook: Hook = field(default_factory=Hook)
 
     @dataclass
     class PytestNode:
         nodeid: str
-        config: Config = Config()
+        config: Config = field(default_factory=Config)
 
     @dataclass
     class PytestSession:
         items: List[PytestNode]
-        config: Config = Config()
+        config: Config = field(default_factory=Config)
         testsfailed: bool = False
         shouldstop: bool = False
 
@@ -150,6 +150,9 @@ def test_system_worker_e2e():
         always_print(f">>>>>>>>>>>>>>>>>> S{str(Path(__file__).parent)}")
         agent_client = WorkerAgent.as_client(address=('localhost', agent_port), authkey=agent_authkey)
         agent_client.start_session(session_id=session_id,
+                                   main_address=('localhost', global_mgr_port),
+                                   main_token=authkey.hex(),
+                                   token=authkey.hex(),
                                    test_q=test_q, status_q=status_q, report_q=report_q,
                                    global_mgr_address=('localhost', global_mgr_port),
                                    args=['-s', '--cores', '2', f'--ignore={str(Path(__file__).parent)}'],
@@ -192,6 +195,6 @@ def test_system_worker_e2e():
     finally:
         global_mgr.shutdown()
         proc.terminate()
-        agent.shutdown_session(session_id=session_id, timeout=2.0)
+        agent.shutdown_session(address=('localhost', agent_port), session_id=session_id, timeout=2.0)
         agent.shutdown()
         os.chdir(cwd)
