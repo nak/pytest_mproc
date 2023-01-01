@@ -94,7 +94,7 @@ def _add_option(group, name: str, dest: str, action: str,
 
 
 # noinspection SpellCheckingInspection
-@pytest.mark.tryfirst
+@pytest.hookimpl(tryfirst=True)
 def pytest_addoption(parser):
     """
     add options to given parser for this plugin
@@ -244,7 +244,7 @@ def pytest_sessionstart(session):
             reporter._session = session
 
 
-@pytest.mark.trylast
+@pytest.hookimpl(trylast=True)
 def pytest_configure(config):
     # if config.ptmproc_config.mode == ModeEnum.MODE_UNASSIGNED:
     #    return
@@ -373,21 +373,21 @@ def pytest_internalerror(excrepr):
 
 
 # noinspection SpellCheckingInspection
-@pytest.mark.tryfirst
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_logreport(report):
     if WorkerSession.singleton():
         return WorkerSession.singleton().pytest_runtest_logreport(report)
 
 
 # noinspection SpellCheckingInspection
-@pytest.mark.tryfirst
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_logstart(nodeid, location):
     if WorkerSession.singleton():
         return WorkerSession.singleton().pytest_runtest_logstart(nodeid=nodeid, location=location)
 
 
 # noinspection SpellCheckingInspection
-@pytest.mark.tryfirst
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_logfinish(nodeid, location):
     if WorkerSession.singleton():
         return WorkerSession.singleton().pytest_runtest_logfinish(nodeid=nodeid, location=location)

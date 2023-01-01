@@ -41,7 +41,7 @@ def get_ip_addr():
         return None
 
 
-@pytest.mark.trylast
+@pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session):
     if _node_tmpdir and not hasattr(session.config.option, "mproc_worker"):
         # noinspection PyTypeChecker
@@ -107,6 +107,11 @@ def worker_agent_factory() -> WorkerAgentFactory:
 
 shielded = os.environ.get("SHIELDED", False)
 
+
+@pytest.fixture(scope='session')
+def shield_always():
+    global shielded
+    shielded = True
 
 @pytest.fixture
 def shield():

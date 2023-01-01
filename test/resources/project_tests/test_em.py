@@ -20,12 +20,12 @@ def glob_fix():
     global_number2 -= 1
 
 
-def test1(node_fix, glob_fix):
+def test1(node_fix, glob_fix, shield_always):
     time.sleep(0.5)
     assert node_fix == 42
     assert glob_fix == -42
 
 
-def test2():
+def test2(shield_always):
     time.sleep(0.5)
     assert False, "This is supposed to fail"

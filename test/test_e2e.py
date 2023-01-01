@@ -25,7 +25,9 @@ LOOP_COUNT = 100
 def test_local_serialized(monkeypatch):
     monkeypatch.chdir(RESOURCE_TEST_PATH)
     cmd = "pytest -s . --loop 5 --junitxml=pytest_report.xml"
-    proc = subprocess.Popen(cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr)
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(Path(__file__).parent.parent / 'src')
+    proc = subprocess.Popen(cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr, env=env)
     proc.wait(timeout=10)
     assert proc.returncode == 1
     for test_suite in JUnitXml.fromfile("pytest_report.xml"):
@@ -36,8 +38,10 @@ def test_local_serialized(monkeypatch):
 @pytest.mark.parametrize('iterate', [_ for _ in range(LOOP_COUNT)])
 def test_local_parallelized(monkeypatch, iterate):
     monkeypatch.chdir(RESOURCE_TEST_PATH)
-    cmd = "pytest -s . --loop 20 --junitxml=pytest_report.xml --cores 4"
-    proc = subprocess.Popen(cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr)
+    cmd = "pytest -s . --loop 20 --junitxml=pytest_report.xml --cores 20"
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(Path(__file__).parent.parent / 'src')
+    proc = subprocess.Popen(cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr, env=env)
     proc.wait(timeout=220)
     if proc.returncode is None:
         proc.kill()
@@ -47,7 +51,7 @@ def test_local_parallelized(monkeypatch, iterate):
         assert test_suite.failures == 20
         assert test_suite.tests == 40
         suite_count += 1
-    assert suite_count == 1, f"Got {suite_count} test suite results, but expeting one"
+    assert suite_count == 1, f"Got {suite_count} test suite results, but expecting one"
     assert proc.returncode == 1
     for name in os.listdir('.'):
         if name.startswith('pytest_mproc-') and Path(name).is_dir():
@@ -60,8 +64,10 @@ def test_local_distributed(monkeypatch, iterate):
     monkeypatch.chdir(RESOURCE_TEST_PATH)
     authkey = secrets.token_bytes(64)
     cmd = f"{sys.executable} -m pytest_mproc.worker"
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(Path(__file__).parent.parent / 'src')
     agent_proc = subprocess.Popen(cmd.split(), shell=False, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  stdout=sys.stdout)
+                                  stdout=sys.stdout, env=env)
     agent_proc.stdin.write(authkey.hex().encode('utf-8') + b'\n')
     agent_proc.stdin.close()
     try:
@@ -109,7 +115,9 @@ def test_local_distributed_failed_workers(monkeypatch):
             out_stream.write(f"{ip}:{port}\n")
     cmd = "pytest -s . --loop 20 --junitxml=pytest_report.xml --cores 4 --distributed fixed_topology://workers.txt"\
           " --full-trace"
-    proc = subprocess.Popen(cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr)
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(Path(__file__).parent.parent / 'src')
+    proc = subprocess.Popen(cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr, env=env)
     start = time.monotonic()
     proc.wait(timeout=120)
     assert time.monotonic() - start < 20,  "pytest failed to exit in time under condition no workers started"

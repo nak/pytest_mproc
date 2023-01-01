@@ -539,14 +539,13 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
     os.environ['PTMPROC_WORKER'] = worker_id
     status_q.put(WorkerStarted(worker_id, os.getpid(), _get_my_ip()))
     if global_mgr_address:
-        debug_print(f"Worker {worker_id} connecting to global fixture manager")
+        always_print(f"Worker {worker_id} connecting to global fixture manager", as_error=True)
         Global.Manager.as_client(global_mgr_address, auth_key=authkey)
     if node_mgr_port:
         debug_print(f"Worker {worker_id} connecting to node fixture manager")
         Node.Manager._port = node_mgr_port
         Node.Manager.as_client(port=node_mgr_port, authkey=authkey)  # start node client to create singleton client
     # noinspection PyUnresolvedReferences
-    # from pytest_mproc.worker import WorkerSession  # to make Python happy
     worker = WorkerSession(session_id=session_id,
                            worker_id=worker_id,
                            test_q=test_q,
@@ -559,9 +558,9 @@ def main(test_q: JoinableQueue, status_q: JoinableQueue, report_q: JoinableQueue
     has_error = False
     msg = f"Worker {worker_id} exited cleanly"
     try:
-        args = [a for a in args if not a.startswith('--log-file')]
+        args = [a for a in args if not a.startswith('--log-file')] + ['-s']
         args += [f'--log-file=pytest_mproc-{worker_id}/pytest_output.log']
-        debug_print(f"Worker {worker_id} calling pytest {args}  {id(WorkerSession)} {WorkerSession.singleton()}")
+        debug_print(f"Worker {worker_id} calling pytest {args}  {id(WorkerSession)} {WorkerSession.singleton()} {os.getpid()}")
         status = pytest.main(args)
         if isinstance(status, pytest.ExitCode):
             status = status.value
