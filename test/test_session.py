@@ -141,17 +141,24 @@ async def test_process_reports_nonlocal(hook):
     authkey = secrets.token_bytes(64)
     resource_mgr = ResourceMgr()
 
+    def start_serve():
+        server = Orchestrator.as_server(address=('localhost', port), authkey=authkey)
+        time.sleep(1000)
+
     with patch("pytest_mproc.orchestration.MainSession.launch", new=mock_launch):
-        orchestrator_srvr = Orchestrator.as_server(address=('localhost', port), authkey=authkey)
+        proc = multiprocessing.Process(target=start_serve)
+        proc.start()
+        # orchestrator = Orchestrator.as_server(address=('localhost', port), authkey=authkey)
+        time.sleep(3)
         try:
             with Session(resource_mgr=resource_mgr, orchestrator_address=('localhost', port),
                          authkey=authkey) as session:
                 await session.start(worker_count=14, pytest_args=[])
-                raise Exception("HERE")
                 await session.process_reports(hook)
                 assert set(hook.started) == {f'node-{i}' for i in range(112)}, "Not all tests started"
                 assert set(hook.finished) == {f'node-{i}' for i in range(112)}, "Not all tests finished"
                 assert set(hook.reported) == {f'node-{i}' for i in range(112)}, "Not all tests reported"
 
         finally:
-            orchestrator_srvr.shutdown()
+            # orchestrator.shutdown()
+            proc.kill()

@@ -201,7 +201,7 @@ def mproc_pytest_cmdline_main_local(config, num_cores: int) -> None:
     reporter.write(f"Running locally as main\n", green=True)
     orchestrator = Orchestrator.as_local()
     config.orchestrator = orchestrator
-    config.report_q = orchestrator.start_session(session_id="LocalSession", cwd=Path(os.getcwd()), args=sys.argv[1:])
+    config.report_q = orchestrator.conduct_session(session_id="LocalSession", cwd=Path(os.getcwd()), args=sys.argv[1:])
     for index in range(num_cores):
         worker_id = f"Worker-{index}"
         orchestrator.start_worker(session_id="LocalSession", worker_id=worker_id)

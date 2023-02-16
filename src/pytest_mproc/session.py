@@ -42,6 +42,7 @@ class Session:
         self._orchestrator_address = orchestrator_address
         self._is_local = orchestrator_address is None
         # noinspection PyTypeChecker
+        always_print(f">>>>>>>>>>>>>>>>>>>>>> CONNECTING TO {self._orchestrator_address}")
         self._orchestrator = Orchestrator.as_local(has_remote_workers=resource_mgr is not None) if self._is_local \
             else Orchestrator.as_client(self._orchestrator_address, authkey, resource_mgr is not None)
         self._report_q: Optional[AsyncMPQueue] = None
@@ -74,7 +75,7 @@ class Session:
             self._global_mgr_address = (host, port)
         else:
             self._global_mgr_address = None
-        report_q = self._orchestrator.start_session(
+        report_q = self._orchestrator.conduct_session(
             session_id=self._session_id, args=pytest_args, cwd=Path(os.getcwd())
         )
         self._report_q = AsyncMPQueue(report_q)
@@ -142,14 +143,14 @@ class Session:
                     hook.pytest_runtest_logfinish(nodeid=report_.nodeid, location=report_.location)
             return False
         try:
-            always_print(f">>>>>>>>>>>>>>>>> GETTING")
+            always_print(f">>>>>>>>>>>>>><<<<<<<<<<<<<<<<< GETTING ITEM")
             report = await self._report_q.get()
-            always_print(f">>>>>>>>>>>>>>>>> GOT {report}")
+            always_print(f">>>>>>>>>>>>>><<<<<<<<<<<<<<<<< GOT ITEM {report}")
             while report is not None:
                 process(report)
-                always_print(f">>>>>>>>>>>>>>>>> GETTING")
+                always_print(f">>>>>>>>>>>>>><<<<<<<<<<<<<<<<< GETTING ITEM")
                 report = await self._report_q.get()
-                always_print(f">>>>>>>>>>>>>>>>> GOT {report}")
+                always_print(f">>>>>>>>>>>>>><<<<<<<<<<<<<<<<< GOT ITEM {report}")
             debug_print(f"No more reports to process {self._pending_reports}")
             if tasks:
                 await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)

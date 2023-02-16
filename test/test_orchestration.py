@@ -51,12 +51,12 @@ def test_start_session():
     time.sleep(1)
     # noinspection PyUnresolvedReferences
     client = Orchestrator.as_client(address=('localhost', port), authkey=authkey, )
-    client.start_session(session_id="Session1", args=['-s'], cwd=Path(os.getcwd()))
+    client.conduct_session(session_id="Session1", args=['-s'], cwd=Path(os.getcwd()))
     assert list(server.sessions().copy()) == ['Session1']
-    client.start_session(session_id="Session2", args=['-s'], cwd=Path(os.getcwd()))
+    client.conduct_session(session_id="Session2", args=['-s'], cwd=Path(os.getcwd()))
     assert server.sessions().copy() == ['Session1', 'Session2']
     with suppress(ValueError):
-        client.start_session(session_id="Session2", args=['-s'],  cwd=Path(os.getcwd()))
+        client.conduct_session(session_id="Session2", args=['-s'], cwd=Path(os.getcwd()))
     client.shutdown_session(session_id="Session1", timeout=5)
     assert server.sessions().copy() == ['Session2']
     client.shutdown_session(session_id="Session2", timeout=5)
@@ -81,15 +81,15 @@ def test_start_session_nonlocal():
                 sys.path.remove(path)
         os.environ['PYTHONPATH'] = str(Path(__file__).parent.parent / 'src')
         client = Orchestrator.as_client(address=('localhost', port), authkey=authkey)
-        client.start_session(session_id="Session1", args=['-s', '--cores', '10',
+        client.conduct_session(session_id="Session1", args=['-s', '--cores', '10',
                                                           f'--ignore={str(Path(__file__).parent)}'], cwd=TEST_PROXY_DIR)
         assert list(client.sessions().copy()) == ['Session1']
-        client.start_session(session_id="Session2", args=['-s', '--cores', '10',
+        client.conduct_session(session_id="Session2", args=['-s', '--cores', '10',
                                                           f'--ignore={str(Path(__file__).parent)}'
-                                                          ], cwd=TEST_PROXY_DIR)
+                                                            ], cwd=TEST_PROXY_DIR)
         assert client.sessions().copy() == ['Session1', 'Session2']
         with suppress(ValueError):
-            client.start_session(session_id="Session2", args=[
+            client.conduct_session(session_id="Session2", args=[
                 '-s', '--cores', '10', f'--ignore={str(Path(__file__).parent)}'], cwd=TEST_PROXY_DIR)
         status = client.shutdown_session(session_id="Session1", timeout=5)
         assert status['exitcode'] == -signal.SIGTERM
@@ -140,10 +140,10 @@ def test_session_with_workers(worker_agent_factory, request, shield):
     my_ip = _get_my_ip()
     orchestrator = Orchestrator.as_server(address=(my_ip, orch_port), authkey=authkey)
     orchestrator.start_globals()
-    report_q = orchestrator.start_session(session_id="Session1", args=['--cores', '2', '-s', '--loop', '200',
+    report_q = orchestrator.conduct_session(session_id="Session1", args=['--cores', '2', '-s', '--loop', '200',
                                                                        f'--ignore={str(Path(__file__).parent)}'
-                                                                       ],
-                                          cwd=TEST_PROXY_DIR,)
+                                                                         ],
+                                            cwd=TEST_PROXY_DIR, )
     for index in range(worker_count):
         orchestrator.start_worker(session_id="Session1", worker_id=f"Worker-{index}", address=(_get_my_ip(), port),)
     process_reports()
@@ -187,8 +187,8 @@ def test_session_with_localhost_only(request, shield):
         assert results.get('failed') == 200
     orchestrator = Orchestrator.as_local()
     orchestrator.start_globals()
-    report_q = orchestrator.start_session(session_id="Session1", args=['--cores', '2', '-s', '--loop', '200'],
-                                          cwd=TEST_PROXY_DIR)
+    report_q = orchestrator.conduct_session(session_id="Session1", args=['--cores', '2', '-s', '--loop', '200'],
+                                            cwd=TEST_PROXY_DIR)
     for port in ports:
         orchestrator.start_worker(session_id="Session1", worker_id=f"Worker-{port}", address=None)
     process_reports()
