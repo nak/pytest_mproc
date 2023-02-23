@@ -151,8 +151,8 @@ ReportUpdate = Union[ReportActivity, TestReport]
 
 
 def resource_utilization(time_span: float, start_rusage, end_rusage) -> "ResourceUtilization":
-    if time_span <= 0.001:
-        return ResourceUtilization(-1, -1, -1, end_rusage.ru_maxrss)
+    if (start_rusage is None or end_rusage is None) or time_span <= 0.001:
+        return ResourceUtilization(-1, -1, -1, end_rusage.ru_maxrss if end_rusage is not None else -1)
     if sys.platform.lower() == 'darwin':
         # OS X is in bytes
         delta_mem = (end_rusage.ru_maxrss - start_rusage.ru_maxrss) / 1000.0

@@ -10,7 +10,11 @@ from abc import ABC, abstractmethod
 from pytest_mproc.mp import JoinableQueue, SharedJoinableQueue
 from multiprocessing.managers import BaseManager, SyncManager
 
-import resource
+try:
+    import resource
+except ImportError:
+    # not on Windows and psutil requires native code so don't want that as a dependency
+    resource = None
 import sys
 import time
 
@@ -377,31 +381,34 @@ class MainSession:
         """
         Output the summary of test execution
         """
-        sys.stdout.write("User CPU, System CPU utilization, Additional memory during run\n")
-        sys.stdout.write("---------------------------------------------------------\n")
-        for exit_result in self._exit_results:
-            if exit_result.test_count > 0:
+        if resource is None:
+            sys.stdout.write(">>> Resource utilization not available on this platform")
+        else:
+            sys.stdout.write("User CPU, System CPU utilization, Additional memory during run\n")
+            sys.stdout.write("---------------------------------------------------------\n")
+            for exit_result in self._exit_results:
+                if exit_result.test_count > 0:
+                    sys.stdout.write(
+                        f"Process {exit_result.worker_id} executed " +
+                        f"{exit_result.test_count} tests in {exit_result.resource_utilization.time_span:.2f} " +
+                        f"seconds; User CPU: {exit_result.resource_utilization.user_cpu:.2f}%, " +
+                        f"Sys CPU: {exit_result.resource_utilization.system_cpu:.2f}%, " +
+                        f"Mem consumed (additional from base): "
+                        f"{exit_result.resource_utilization.memory_consumed / 1000.0:.2f}M\n")
+                else:
+                    sys.stdout.write(f"Process {exit_result.worker_id} executed 0 tests\n")
+            sys.stdout.write("\n")
+            if self._rusage:
+                time_span = self._rusage.time_span
+                user_cpu = self._rusage.user_cpu
+                system_cpu = self._rusage.system_cpu
+                unshared_mem = self._rusage.memory_consumed
+                self._write_sep('=', "STATS")
                 sys.stdout.write(
-                    f"Process {exit_result.worker_id} executed " +
-                    f"{exit_result.test_count} tests in {exit_result.resource_utilization.time_span:.2f} " +
-                    f"seconds; User CPU: {exit_result.resource_utilization.user_cpu:.2f}%, " +
-                    f"Sys CPU: {exit_result.resource_utilization.system_cpu:.2f}%, " +
-                    f"Mem consumed (additional from base): "
-                    f"{exit_result.resource_utilization.memory_consumed / 1000.0:.2f}M\n")
-            else:
-                sys.stdout.write(f"Process {exit_result.worker_id} executed 0 tests\n")
-        sys.stdout.write("\n")
-        if self._rusage:
-            time_span = self._rusage.time_span
-            ucpu = self._rusage.user_cpu
-            scpu = self._rusage.system_cpu
-            unshared_mem = self._rusage.memory_consumed
-            self._write_sep('=', "STATS")
-            sys.stdout.write(
-                f"Process Orchestrator executed in {time_span:.2f} seconds. " +
-                f"User CPU: {ucpu:.2f}%, Sys CPU: {scpu:.2f}%, " +
-                f"Mem consumed: {unshared_mem / 1000.0}M\n\n"
-            )
+                    f"Process Orchestrator executed in {time_span:.2f} seconds. " +
+                    f"User CPU: {user_cpu:.2f}%, Sys CPU: {system_cpu:.2f}%, " +
+                    f"Mem consumed: {unshared_mem / 1000.0}M\n\n"
+                )
         if self._count != self._target_count:
             self._write_sep(
                 '!', "{} tests unaccounted for {} out of {}".format(self._target_count - self._count,
@@ -706,7 +713,7 @@ class MainSession:
             item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
         if not tests:
             return
-        start_rusage = resource.getrusage(resource.RUSAGE_SELF)
+        start_rusage = resource.getrusage(resource.RUSAGE_SELF) if resource is not None else None
         start_time = time.time()
         populate_tests_task = asyncio.create_task(
             self._populate_test_queue(test_batches)
@@ -736,13 +743,14 @@ class MainSession:
                              as_error=True)
             with suppress(Exception):
                 populate_tests_task.cancel()
-            with suppress(Exception):
-                end_rusage = resource.getrusage(resource.RUSAGE_SELF)
-                time_span = time.time() - start_time
-                self._rusage = resource_utilization(time_span=time_span,
-                                                    start_rusage=start_rusage,
-                                                    end_rusage=end_rusage)
-                sys.stdout.write("\r\n")
+            if resource is not None:
+                with suppress(Exception):
+                    end_rusage = resource.getrusage(resource.RUSAGE_SELF)
+                    time_span = time.time() - start_time
+                    self._rusage = resource_utilization(time_span=time_span,
+                                                        start_rusage=start_rusage,
+                                                        end_rusage=end_rusage)
+                    sys.stdout.write("\r\n")
             await self._report_q.put(None)
             debug_print("Run loop done")
 
