@@ -493,7 +493,7 @@ def pytest_runtestloop(session):
                 with suppress(Exception):
                     session.config.remote_task.cancel()
                 orchestrator.shutdown()
-        asyncio.get_event_loop().run_until_complete(loop())
+        asyncio.new_event_loop().run_until_complete(loop())
         http_session = RemoteWorkerConfig.http_session()
         if http_session:
             always_print("Shutting down HTTP session...")
